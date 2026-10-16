@@ -217,5 +217,29 @@ class HoverTests(unittest.TestCase):
         self.assertGreater(len(text), 127)
 
 
+class IconArtTests(unittest.TestCase):
+    def test_every_state_renders_a_64px_rgba_icon(self):
+        from icon_art import live_icon, quota_icon
+        images = [quota_icon(value, letter, stale) for letter in "CGM"
+                  for value in (None, 0, 12, 42, 87, 100) for stale in (False, True)]
+        images += [live_icon(value, letter) for letter in "CGM" for value in (0, 7, 58, 143, 2500, 99999)]
+        for image in images:
+            self.assertEqual((image.mode, image.size), ("RGBA", (64, 64)))
+            self.assertIsNotNone(image.getbbox())
+
+    def test_ring_length_and_colour_follow_remaining_quota(self):
+        from icon_art import AMBER, CLAY, accent, quota_icon, ring_color
+        self.assertEqual(ring_color(87, "C"), accent("C"))
+        self.assertEqual(ring_color(42, "C"), AMBER)
+        self.assertEqual(ring_color(12, "C"), CLAY)
+        self.assertNotEqual(quota_icon(87, "C").tobytes(), quota_icon(42, "C").tobytes())
+        # Stale data adds a badge without changing the quota reading.
+        self.assertNotEqual(quota_icon(87, "C").tobytes(), quota_icon(87, "C", stale=True).tobytes())
+
+    def test_large_tps_values_stay_short(self):
+        from icon_art import tps_text
+        self.assertEqual([tps_text(v) for v in (7.4, 143, 2500, 99999)], ["7", "143", "2k", "9k+"])
+
+
 if __name__ == "__main__":
     unittest.main()

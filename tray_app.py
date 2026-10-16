@@ -11,9 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 import pystray
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image
 
 from hover_details import HoverDetails, HoverIcon
+from icon_art import color_for, live_icon, quota_icon  # noqa: F401  (color_for re-exported)
 
 from quota_sources import (
     QuotaSnapshot,
@@ -45,74 +46,19 @@ def resource_path(path: str) -> Path:
     return base / path
 
 
-def font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for name in ("seguisym.ttf", "msyh.ttc", "arial.ttf"):
-        path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / name
-        if path.is_file():
-            return ImageFont.truetype(str(path), size)
-    return ImageFont.load_default()
-
-
-def color_for(percent: float | None, letter: str = "C") -> str:
-    if percent is None:
-        return "#8793A5"
-    if percent >= 50:
-        return {"C": "#73DAB4", "G": "#D7DFEA", "M": "#A6B7FF"}[letter]
-    if percent >= 20:
-        return "#F4BE64"
-    return "#F08080"
-
-
 def make_icon(snapshots: dict[str, QuotaSnapshot]) -> Image.Image:
-    image = Image.new("RGBA", (192, 64), "#101216")
+    image = Image.new("RGBA", (192, 64), (0, 0, 0, 0))
     for index, (provider, letter) in enumerate(PROVIDERS.items()):
         image.alpha_composite(make_provider_icon(snapshots[provider], letter), (index * 64, 0))
     return image
 
 
 def make_provider_icon(snapshot: QuotaSnapshot, letter: str) -> Image.Image:
-    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((10, 2, 53, 61), radius=12, fill=(24, 31, 42, 238), outline=(137, 154, 180, 210), width=2)
-    fill_mask = Image.new("L", image.size, 0)
-    remaining = snapshot.remaining_percent
-    if remaining is not None:
-        remaining = max(0.0, min(100.0, remaining))
-        height = max(4, round(54 * remaining / 100)) if remaining > 0 else 0
-        if height:
-            mask_draw = ImageDraw.Draw(fill_mask)
-            mask_draw.rounded_rectangle((13, 5, 50, 58), radius=10, fill=255)
-            mask_draw.rectangle((0, 0, 63, 58 - height), fill=0)
-            image.paste(Image.new("RGBA", image.size, color_for(remaining, letter)), (0, 0), fill_mask)
-    label = letter if remaining is not None else "?"
-    label_font = ImageFont.truetype(str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/segoeuib.ttf"), 40)
-    label_mask = Image.new("L", image.size, 0)
-    label_draw = ImageDraw.Draw(label_mask)
-    box = label_draw.textbbox((0, 0), label, font=label_font)
-    label_draw.text(((64 - box[2] + box[0]) / 2 - box[0], (64 - box[3] + box[1]) / 2 - box[1]), label, font=label_font, fill=255)
-    label_color = "#F1F5FA" if remaining else color_for(remaining, letter)
-    image.paste(Image.new("RGBA", image.size, label_color), (0, 0), label_mask)
-    image.paste(Image.new("RGBA", image.size, "#13202C"), (0, 0), ImageChops.multiply(label_mask, fill_mask))
-    if snapshot.stale:
-        ImageDraw.Draw(image).ellipse((48, 0, 58, 10), fill="#F4BE64", outline="#17202C", width=2)
-    return image
+    return quota_icon(snapshot.remaining_percent, letter, stale=snapshot.stale)
 
 
 def make_tps_icon(performance: dict, letter: str) -> Image.Image:
-    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    color = color_for(100, letter)
-    draw.rounded_rectangle((1, 5, 62, 62), radius=12, fill=(24, 31, 42, 240), outline=(137, 154, 180, 210), width=1)
-    value = performance.get("display_tps", 0)
-    text = str(round(value)) if value < 1000 else f"{value / 1000:.0f}k"
-    for size in range(45, 17, -1):
-        value_font = ImageFont.truetype(str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/segoeuib.ttf"), size)
-        box = draw.textbbox((0, 0), text, font=value_font)
-        if box[2] - box[0] <= 56:
-            break
-    draw.text(((64 - box[2] + box[0]) / 2 - box[0], (64 - box[3] + box[1]) / 2 - box[1] + 5), text, font=value_font, fill=color)
-    draw.text((5, 7), letter, font=font(11), fill=color)
-    return image
+    return live_icon(performance.get("display_tps", 0) or 0, letter)
 
 
 def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict) -> Image.Image:
