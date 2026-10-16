@@ -19,6 +19,9 @@ data/
 *.spec
 state.json
 performance.json
+history.json
+app.log
+app.log.*
 diagnostics.txt
 
 # Local credentials and desktop metadata

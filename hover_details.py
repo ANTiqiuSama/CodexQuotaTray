@@ -4,10 +4,13 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import logging
+import os
 import time
 
 import pystray
 from pystray._util import win32
+
+from detail_card import MARGIN, render_card, text_card
 
 
 WM_USER = 0x0400
@@ -18,7 +21,11 @@ TTM_TRACKPOSITION = WM_USER + 18
 WS_EX_TOPMOST = 0x00000008
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
 SWP_NOACTIVATE = 0x0010
+SW_HIDE = 0
+ULW_ALPHA = 2
 
 
 class HoverIcon(pystray.Icon):
@@ -75,7 +82,20 @@ class MonitorInfo(ctypes.Structure):
                 ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
 
 
+class BlendFunction(ctypes.Structure):
+    _fields_ = [("BlendOp", ctypes.c_byte), ("BlendFlags", ctypes.c_byte),
+                ("SourceConstantAlpha", ctypes.c_ubyte), ("AlphaFormat", ctypes.c_byte)]
+
+
+class BitmapInfoHeader(ctypes.Structure):
+    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+
 user = ctypes.WinDLL("user32", use_last_error=True)
+gdi = ctypes.WinDLL("gdi32", use_last_error=True)
 shell = ctypes.WinDLL("shell32", use_last_error=True)
 common = ctypes.WinDLL("comctl32", use_last_error=True)
 user.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
@@ -111,6 +131,23 @@ user.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND,
 user.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user.DispatchMessageW.restype = ctypes.c_ssize_t
+user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user.GetDC.argtypes = [wintypes.HWND]
+user.GetDC.restype = wintypes.HDC
+user.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.POINTER(wintypes.POINT),
+    ctypes.POINTER(wintypes.SIZE), wintypes.HDC, ctypes.POINTER(wintypes.POINT), wintypes.DWORD,
+    ctypes.POINTER(BlendFunction), wintypes.DWORD]
+user.UpdateLayeredWindow.restype = wintypes.BOOL
+gdi.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi.CreateCompatibleDC.restype = wintypes.HDC
+gdi.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+gdi.CreateDIBSection.restype = wintypes.HBITMAP
+gdi.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi.SelectObject.restype = wintypes.HGDIOBJ
+gdi.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi.DeleteDC.argtypes = [wintypes.HDC]
 shell.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(NotifyIconIdentifier), ctypes.POINTER(wintypes.RECT)]
 shell.Shell_NotifyIconGetRect.restype = ctypes.c_long
 
@@ -171,6 +208,37 @@ def is_window_covered(hwnd, rect) -> bool:
     return False
 
 
+def enable_thread_dpi_awareness() -> bool:
+    """Per-monitor v2 for the hover thread only, so the card is drawn at the
+    monitor's real DPI instead of being bitmap-stretched (blurry) by DWM. All
+    coordinates this thread reads (cursor, icon rect, monitor) become physical
+    together. CODEX_QUOTA_LEGACY_DPI=1 keeps the previous behaviour."""
+    if os.environ.get("CODEX_QUOTA_LEGACY_DPI") == "1":
+        return False
+    try:
+        function = user.SetThreadDpiAwarenessContext
+        function.argtypes = [ctypes.c_void_p]
+        function.restype = ctypes.c_void_p
+        return bool(function(ctypes.c_void_p(-4)))  # PER_MONITOR_AWARE_V2
+    except (AttributeError, OSError):
+        return False
+
+
+def monitor_scale(monitor) -> float:
+    try:
+        shcore = ctypes.WinDLL("shcore")
+        x, y = wintypes.UINT(), wintypes.UINT()
+        if shcore.GetDpiForMonitor(wintypes.HANDLE(monitor), 0, ctypes.byref(x), ctypes.byref(y)) == 0 and x.value:
+            return x.value / 96
+    except (AttributeError, OSError):
+        pass
+    return 1.0
+
+
+def content_text(content) -> str:
+    return content if isinstance(content, str) else content.as_text()
+
+
 class TrackingTooltip:
     """All window operations run on the owning thread; focus is never requested."""
 
@@ -198,6 +266,7 @@ class TrackingTooltip:
         return user.SendMessageW(self.hwnd, message, wparam, lparam)
 
     def show(self, text, anchor):
+        text = content_text(text)
         first_show = not self.visible
         if text != self.text:
             self.buffer = ctypes.create_unicode_buffer(text)
@@ -251,6 +320,120 @@ class TrackingTooltip:
                 setattr(self, name, None)
 
 
+class DetailCardWindow:
+    """Layered, click-through, never-activated card rendered by detail_card.
+
+    Mirrors TrackingTooltip's guarantees: a steady card with unchanged content
+    performs no window calls at all; SWP_SHOWWINDOW is only reasserted after
+    real occlusion, so fullscreen apps and refreshes cannot make it flicker.
+    """
+
+    FADE_STEPS = (64, 128, 192, 255)
+
+    def __init__(self):
+        self.hwnd = user.CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+            "STATIC", "AI 数据详情", 0x80000000, 0, 0, 0, 0, None, None, None, None)
+        if not self.hwnd:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.visible = False
+        self.content = None
+        self.scale = None
+        self.image = None
+        self.position = None
+
+    def _work_area(self, anchor):
+        native_anchor = wintypes.RECT(*anchor)
+        monitor = user.MonitorFromRect(ctypes.byref(native_anchor), 2)
+        info = MonitorInfo(cbSize=ctypes.sizeof(MonitorInfo))
+        if not user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        work = info.rcWork
+        return monitor, (work.left, work.top, work.right, work.bottom)
+
+    def _present(self, image, x, y, alpha=255):
+        width, height = image.size
+        data = image.convert("RGBa").tobytes("raw", "BGRa")  # premultiplied BGRA
+        header = BitmapInfoHeader(biSize=ctypes.sizeof(BitmapInfoHeader), biWidth=width,
+            biHeight=-height, biPlanes=1, biBitCount=32, biCompression=0)
+        screen = user.GetDC(None)
+        memory = gdi.CreateCompatibleDC(screen)
+        bits = ctypes.c_void_p()
+        bitmap = gdi.CreateDIBSection(screen, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
+        try:
+            if not bitmap or not bits:
+                raise ctypes.WinError(ctypes.get_last_error())
+            ctypes.memmove(bits, data, len(data))
+            previous = gdi.SelectObject(memory, bitmap)
+            blend = BlendFunction(0, 0, alpha, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
+            ok = user.UpdateLayeredWindow(self.hwnd, screen, ctypes.byref(wintypes.POINT(x, y)),
+                ctypes.byref(wintypes.SIZE(width, height)), memory, ctypes.byref(wintypes.POINT(0, 0)),
+                0, ctypes.byref(blend), ULW_ALPHA)
+            gdi.SelectObject(memory, previous)
+            if not ok:
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            if bitmap:
+                gdi.DeleteObject(bitmap)
+            gdi.DeleteDC(memory)
+            user.ReleaseDC(None, screen)
+
+    def _fade(self, alpha):
+        blend = BlendFunction(0, 0, alpha, 1)
+        user.UpdateLayeredWindow(self.hwnd, None, None, None, None, None, 0, ctypes.byref(blend), ULW_ALPHA)
+
+    def show(self, content, anchor):
+        first_show = not self.visible
+        monitor, work = self._work_area(anchor)
+        scale = monitor_scale(monitor)
+        changed = content != self.content or scale != self.scale or self.image is None
+        if changed:
+            model = text_card(content) if isinstance(content, str) else content
+            self.image = render_card(model, scale)
+            self.content, self.scale = content, scale
+        margin = round(MARGIN * scale)
+        size = self.image.size
+        x, y = tooltip_position(anchor, size, work, gap=round(6 * scale) - margin)
+        moved = (x, y) != self.position
+        if changed or moved:
+            self._present(self.image, x, y, 0 if first_show else 255)
+            self.position = (x, y)
+        elif first_show:
+            self._fade(0)  # Re-shown with identical pixels: start transparent.
+        rect = wintypes.RECT(x, y, x + size[0], y + size[1])
+        covered = is_window_covered(self.hwnd, rect)
+        if first_show or covered or not user.IsWindowVisible(self.hwnd):
+            if not user.SetWindowPos(self.hwnd, wintypes.HWND(-1), x, y, 0, 0,
+                    0x0001 | SWP_NOACTIVATE | 0x0040):
+                raise ctypes.WinError(ctypes.get_last_error())
+        if first_show:
+            for alpha in self.FADE_STEPS:  # ~70 ms ease-in, still non-activating
+                self._fade(alpha)
+                time.sleep(0.018)
+        self.visible = True
+
+    def hide(self):
+        if self.visible:
+            user.ShowWindow(self.hwnd, SW_HIDE)
+            self.visible = False
+
+    pump = staticmethod(TrackingTooltip.pump)
+
+    def close(self):
+        if self.hwnd:
+            user.DestroyWindow(self.hwnd)
+            self.hwnd = None
+
+
+def create_popup():
+    """Prefer the rendered card; fall back to the native tooltip."""
+    try:
+        return DetailCardWindow()
+    except Exception:
+        logging.getLogger(__name__).exception("detail card unavailable, using tooltip")
+        return TrackingTooltip()
+
+
 class HoverDetails:
     def __init__(self, icons, text_for, stop_event):
         self.icons, self.text_for, self.stop_event = icons, text_for, stop_event
@@ -281,7 +464,8 @@ class HoverDetails:
     def run(self):
         popup = None
         try:
-            popup = TrackingTooltip()
+            enable_thread_dpi_awareness()
+            popup = create_popup()
             while not self.stop_event.wait(0.1):
                 popup.pump()
                 point = wintypes.POINT()
@@ -292,7 +476,16 @@ class HoverDetails:
                 for key, icon in self.icons.items():
                     icon.details_visible = key == provider
                 shell_dwell = provider and getattr(self.icons[provider], "_version4", False)
-                self.update(popup, provider, anchor, time.monotonic(), dwell=0 if shell_dwell else 0.4)
+                try:
+                    self.update(popup, provider, anchor, time.monotonic(), dwell=0 if shell_dwell else 0.4)
+                except Exception:
+                    if not isinstance(popup, DetailCardWindow):
+                        raise
+                    # A rendering/GDI failure downgrades to the native tooltip
+                    # instead of losing hover details for the whole session.
+                    logging.getLogger(__name__).exception("detail card failed, using tooltip")
+                    popup.close()
+                    popup = TrackingTooltip()
         except Exception:
             logging.getLogger(__name__).exception("AI hover details stopped")
             # Restore the Shell tooltip if the independent popup cannot run.

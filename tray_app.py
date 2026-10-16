@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
+import logging.handlers
 import os
 import subprocess
 import sys
@@ -13,22 +15,27 @@ from pathlib import Path
 import pystray
 from PIL import Image
 
+from detail_card import CardModel
+from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
 from icon_art import color_for, live_icon, quota_icon  # noqa: F401  (color_for re-exported)
-
 from quota_sources import (
     QuotaSnapshot,
-    collect_all,
+    collect,
     dump_snapshot,
     get_grok_quota,
     load_cached_snapshots,
+    placeholder,
     save_cached_snapshots,
 )
-from tps_sources import PERFORMANCE_PATH, TpsMonitor, save_performance
+from refresh_scheduler import RefreshScheduler
+from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
 
 
 APP_NAME = "CodexQuotaTray"
-REFRESH_SECONDS = 300
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / APP_NAME
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+PERFORMANCE_SAVE_SECONDS = 60
 PROVIDERS = {
     "codex": "C",
     "grok": "G",
@@ -39,22 +46,12 @@ LAUNCHERS = {
     "grok": ("cli", Path.home() / ".grok" / "bin" / "grok.exe"),
     "gemini": ("gui", Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Programs" / "antigravity" / "Antigravity.exe"),
 }
-
-
-def resource_path(path: str) -> Path:
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return base / path
-
-
-def make_icon(snapshots: dict[str, QuotaSnapshot]) -> Image.Image:
-    image = Image.new("RGBA", (192, 64), (0, 0, 0, 0))
-    for index, (provider, letter) in enumerate(PROVIDERS.items()):
-        image.alpha_composite(make_provider_icon(snapshots[provider], letter), (index * 64, 0))
-    return image
+log = logging.getLogger(APP_NAME)
 
 
 def make_provider_icon(snapshot: QuotaSnapshot, letter: str) -> Image.Image:
-    return quota_icon(snapshot.remaining_percent, letter, stale=snapshot.stale)
+    # The ring follows the binding window (e.g. Codex weekly when it is lower).
+    return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale)
 
 
 def make_tps_icon(performance: dict, letter: str) -> Image.Image:
@@ -63,6 +60,18 @@ def make_tps_icon(performance: dict, letter: str) -> Image.Image:
 
 def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict) -> Image.Image:
     return make_tps_icon(performance, letter) if performance.get("active_sessions", 0) and performance.get("display_tps") is not None else make_provider_icon(snapshot, letter)
+
+
+def window_label(minutes: int | None) -> str:
+    if not minutes:
+        return ""
+    if minutes == 10080:
+        return "每周"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440} 天"
+    if minutes % 60 == 0:
+        return f"{minutes // 60} 小时"
+    return f"{minutes} 分钟"
 
 
 def reset_text(timestamp: int | None) -> str:
@@ -80,8 +89,11 @@ def reset_countdown(timestamp: int | None) -> str:
     delta = int(timestamp - time.time())
     if delta <= 0:
         return "已到重置时间"
-    hours, rem = divmod(delta, 3600)
+    days, rem = divmod(delta, 86400)
+    hours, rem = divmod(rem, 3600)
     minutes = rem // 60
+    if days:
+        return f"{days} 天 {hours} 小时"
     return f"{hours} 小时 {minutes} 分"
 
 
@@ -90,20 +102,42 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
         status = "未知/获取失败"
     else:
         status = f"剩余 {snapshot.remaining_percent:.0f}% · 已用 {snapshot.used_percent:.0f}%"
+        if snapshot.secondary_remaining_percent is not None:
+            status += f" · {window_label(snapshot.secondary_window_minutes) or '第二窗口'}剩余 {snapshot.secondary_remaining_percent:.0f}%"
     stale = " · 旧数据" if snapshot.stale else ""
     return f"{snapshot.label}: {status}{stale}"
 
 
+def startup_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{Path(sys.executable).resolve()}"'
+    interpreter = Path(sys.executable)
+    windowless = interpreter.with_name("pythonw.exe")
+    runner = windowless if windowless.is_file() else interpreter
+    return f'"{runner}" -X utf8 "{Path(__file__).resolve()}"'
+
+
 class QuotaTray:
+    # Class-level so test doubles built with __new__ share the same guarantees.
+    ui_lock = threading.RLock()
+    refresh_lock = threading.Lock()
+    history: QuotaHistory | None = None
+    scheduler: RefreshScheduler | None = None
+
     def __init__(self) -> None:
-        previous = load_cached_snapshots()
-        self.snapshots = collect_all(previous)
-        save_cached_snapshots(self.snapshots)
+        # Show cached values immediately; reading the CLIs can take ~25 s.
+        cached = load_cached_snapshots()
+        self.snapshots = {provider: cached.get(provider) or placeholder(provider) for provider in PROVIDERS}
         self.stop_event = threading.Event()
-        self.refreshing = False
+        self.wake = threading.Event()
+        self.history = QuotaHistory()
+        self.scheduler = RefreshScheduler(PROVIDERS, time.time())
         self.tps_monitor = TpsMonitor()
-        self.performance = self.tps_monitor.poll()
-        save_performance(self.performance)
+        self.performance = self.tps_monitor.snapshot(time.time())
+        self.last_samples: dict[str, float | None] = {}
+        self.saved_signature: str | None = None
+        self.saved_at = 0.0
+        self.migrate_startup()
         self.icons = {
             provider: HoverIcon(
                 f"{APP_NAME}-{provider}",
@@ -114,15 +148,101 @@ class QuotaTray:
             for provider, letter in PROVIDERS.items()
         }
 
+    # ----- text and card content -------------------------------------------------
+
+    def forecasts(self, provider: str) -> list[tuple[str, Forecast]]:
+        snapshot = self.snapshots[provider]
+        if self.history is None:
+            return []
+        now = time.time()
+        result = [(window_label(snapshot.window_minutes), self.history.forecast_for(snapshot, now))]
+        if snapshot.secondary_remaining_percent is not None:
+            result.append((window_label(snapshot.secondary_window_minutes) or "第二窗口",
+                           self.history.forecast_for(snapshot, now, secondary=True)))
+        return result
+
+    def headline_forecast(self, provider: str) -> tuple[str, str]:
+        """The most urgent forecast, prefixed with its window when there are two."""
+        items = self.forecasts(provider)
+        if not items:
+            return "", "unknown"
+        rank = {"danger": 0, "warn": 1, "ok": 2, "idle": 3, "unknown": 4}
+        label, chosen = min(items, key=lambda item: (rank[item[1].tone], item[1].exhausts_at or float("inf")))
+        prefix = f"{label}额度：" if len(items) > 1 and label else ""
+        return prefix + chosen.text, chosen.tone
+
+    def forecast_line(self, provider: str) -> str:
+        text, _ = self.headline_forecast(provider)
+        return f"预测：{text}" if text else ""
+
     def hover_text(self, provider: str) -> str:
         snapshot = self.snapshots[provider]
         data = self.performance["providers"][provider]
-        lines = [data["label"], quota_line(snapshot), "", self.performance_line(provider),
+        lines = [data["label"], quota_line(snapshot)]
+        if self.forecast_line(provider):
+            lines.append(self.forecast_line(provider))
+        lines += ["", self.performance_line(provider),
             self.output_rate_line(provider), f"活动会话：{data['active_sessions']}", "",
             self.menu_reset(provider), self.menu_countdown(provider), self.menu_updated(provider)]
         if snapshot.error:
             lines.extend(("", "读取状态：" + snapshot.error))
         return "\n".join(lines)
+
+    def hover_card(self, provider: str) -> CardModel:
+        snapshot = self.snapshots[provider]
+        data = self.performance["providers"][provider]
+        letter = PROVIDERS[provider]
+        now = time.time()
+        live = data.get("active_sessions", 0) > 0
+        tps = data.get("display_tps")
+        if live:
+            status, tone = ("生成中" + (f" · {tps:.0f} tok/s" if tps is not None else "")), "live"
+        elif snapshot.stale:
+            status, tone = "旧数据", "stale"
+        elif snapshot.error and snapshot.remaining_percent is None:
+            status, tone = "读取失败", "error"
+        else:
+            status, tone = "空闲", "idle"
+        primary_label = window_label(snapshot.window_minutes) or "当前"
+        bars = [(f"{primary_label}窗口", snapshot.remaining_percent)]
+        binding = primary_label if snapshot.window_minutes else ""
+        used = snapshot.used_percent
+        if snapshot.secondary_remaining_percent is not None:
+            secondary_label = window_label(snapshot.secondary_window_minutes) or "第二"
+            bars.append((f"{secondary_label}窗口", snapshot.secondary_remaining_percent))
+            if snapshot.remaining_percent is None or snapshot.secondary_remaining_percent < snapshot.remaining_percent:
+                binding, used = secondary_label, snapshot.secondary_used_percent
+        forecast_text, forecast_tone = self.headline_forecast(provider)
+        value = data.get("generation_tps")
+        metrics = (
+            ("生成 TPS", "—" if value is None else f"{value:.1f} tok/s"),
+            ("60 秒输出", f"{data.get('output_tps_60', 0):.1f} tok/s"),
+            ("活动会话", str(data.get("active_sessions", 0))),
+            ("60 秒 tokens", str(data.get("output_tokens_60", 0))),
+        )
+        footer = [self.reset_summary(primary_label if snapshot.secondary_remaining_percent is not None else "", snapshot.resets_at, now)]
+        if snapshot.secondary_remaining_percent is not None:
+            footer.append(self.reset_summary(window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_resets_at, now))
+        updated = datetime.fromtimestamp(snapshot.updated_at).strftime("%H:%M:%S") if snapshot.updated_at else "未知"
+        plan = self.scheduler.describe(provider, now) if self.scheduler else ""
+        footer.append(f"更新 {updated}" + (f" · {plan}" if plan else ""))
+        notes = []
+        if value is not None:
+            basis = "、".join(data.get("basis") or [])
+            sample = datetime.fromtimestamp(data["last_sample_at"]).strftime("%H:%M:%S") if data.get("last_sample_at") else ""
+            notes.append(f"来源：{basis}" + (f"（样本 {sample}）" if sample else ""))
+        return CardModel(letter, data["label"], status, tone, snapshot.display_remaining, used, binding,
+            tuple(bars), forecast_text, forecast_tone, metrics, tuple(footer), tuple(notes),
+            snapshot.error, text=self.hover_text(provider))
+
+    @staticmethod
+    def reset_summary(label: str, timestamp: int | None, now: float) -> str:
+        name = f"{label}重置" if label else "重置"
+        if not timestamp:
+            return f"{name}时间未知"
+        when = datetime.fromtimestamp(timestamp).strftime("%m-%d %H:%M")
+        tail = f"{duration_text(timestamp - now)}后" if timestamp > now else "已到重置时间，等待刷新"
+        return f"{name}  {when} · {tail}"
 
     def tooltip(self, provider: str) -> str:
         snapshot = self.snapshots[provider]
@@ -140,6 +260,7 @@ class QuotaTray:
             pystray.MenuItem("额度详情", lambda _icon, _item: self.open_details(provider)),
             pystray.MenuItem("本机全部 AI 速率", self.open_all_performance),
             pystray.MenuItem(lambda _: self.menu_quota(provider), None, enabled=False),
+            pystray.MenuItem(lambda _: self.forecast_line(provider) or "预测：暂无", None, enabled=False),
             pystray.MenuItem(lambda _: self.menu_reset(provider), None, enabled=False),
             pystray.MenuItem(lambda _: self.menu_countdown(provider), None, enabled=False),
             pystray.MenuItem(lambda _: self.menu_updated(provider), None, enabled=False),
@@ -170,7 +291,15 @@ class QuotaTray:
 
     def open_details(self, provider: str) -> None:
         snapshot = self.snapshots[provider]
-        lines = [quota_line(snapshot), "", self.performance_line(provider), self.output_rate_line(provider), "", self.menu_reset(provider), self.menu_countdown(provider), "", self.menu_updated(provider)]
+        lines = [quota_line(snapshot)]
+        for label, item in self.forecasts(provider):
+            lines.append(f"预测{f'（{label}）' if label else ''}：{item.text}")
+        lines += ["", self.performance_line(provider), self.output_rate_line(provider), "", self.menu_reset(provider), self.menu_countdown(provider)]
+        if snapshot.secondary_resets_at:
+            lines.append(f"{window_label(snapshot.secondary_window_minutes)}重置：{reset_text(snapshot.secondary_resets_at)}")
+        lines += ["", self.menu_updated(provider)]
+        if self.scheduler:
+            lines.append(self.scheduler.describe(provider, time.time()))
         if snapshot.error:
             lines.extend(("", "读取状态：" + snapshot.error))
         threading.Thread(
@@ -201,38 +330,126 @@ class QuotaTray:
         sections.extend(("", self.performance["measurement_note"]))
         threading.Thread(target=ctypes.windll.user32.MessageBoxW, args=(None, "\n".join(sections), "本机 AI · TPS", 0), daemon=True).start()
 
+    # ----- icon updates ----------------------------------------------------------
+
     def update_ui(self) -> None:
         save_cached_snapshots(self.snapshots)
         for provider, letter in PROVIDERS.items():
-            icon = self.icons[provider]
             self.update_icon(provider, letter)
-            icon.update_menu()
+            self.icons[provider].update_menu()
 
     def update_icon(self, provider: str, letter: str) -> None:
-        icon = self.icons[provider]
-        if getattr(icon, "details_visible", False):
-            # Keep the Shell's hover target stable. The independent detail
-            # window still reads live values from self.performance.
+        # The refresh worker and the 1 s TPS loop both land here. pystray
+        # replaces the native HICON on assignment, so serialise the updates
+        # (this also keeps the cached FreeType faces single-threaded).
+        with self.ui_lock:
+            icon = self.icons[provider]
+            if getattr(icon, "details_visible", False):
+                # Keep the Shell's hover target stable. The independent detail
+                # window still reads live values from self.performance.
+                return
+            image = make_display_icon(self.snapshots[provider], letter, self.performance["providers"][provider])
+            # Icon assignment always sends NIM_MODIFY, even for identical pixels.
+            # Avoid needless Shell redraws; hover detail updates use a separate HWND.
+            if icon.icon != image:
+                icon.icon = image
+            icon.title = self.tooltip(provider)
+
+    # ----- refreshing ------------------------------------------------------------
+
+    def refresh_providers(self, providers) -> None:
+        providers = list(providers)
+        if not providers:
             return
-        image = make_display_icon(self.snapshots[provider], letter, self.performance["providers"][provider])
-        # Icon assignment always sends NIM_MODIFY, even for identical pixels.
-        # Avoid needless Shell redraws; hover detail updates use a separate HWND.
-        if icon.icon != image:
-            icon.icon = image
-        icon.title = self.tooltip(provider)
+        with self.refresh_lock:
+            results = collect(providers, self.snapshots)
+            now = time.time()
+            snapshots = dict(self.snapshots)
+            snapshots.update(results)
+            self.snapshots = snapshots
+            if self.history is not None:
+                if any([self.history.record(snapshot) for snapshot in results.values()]):
+                    self.history.save()
+            if self.scheduler is not None:
+                for provider, snapshot in results.items():
+                    self.scheduler.completed(provider, snapshot, now)
+        self.update_ui()
 
     def refresh(self) -> None:
-        if self.refreshing:
-            return
-        self.refreshing = True
-        try:
-            self.snapshots = collect_all(self.snapshots)
-            self.update_ui()
-        finally:
-            self.refreshing = False
+        """Synchronous refresh of every provider (used by checks and tests)."""
+        self.refresh_providers(PROVIDERS)
 
     def request_refresh(self, _icon=None, _item=None) -> None:
-        threading.Thread(target=self.refresh, daemon=True).start()
+        if self.scheduler is None:
+            threading.Thread(target=self.refresh, daemon=True).start()
+            return
+        self.scheduler.request(None, time.time())
+        self.wake.set()
+
+    def refresh_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                due = self.scheduler.take_due(time.time())
+                if due:
+                    self.refresh_providers(due)
+            except Exception:
+                log.exception("quota refresh failed")
+                for provider in PROVIDERS:  # Never leave a provider stuck "running".
+                    if provider in self.scheduler.running:
+                        self.scheduler.completed(provider, placeholder(provider, "刷新异常"), time.time())
+            self.wake.wait(self.scheduler.next_wake(time.time()))
+            self.wake.clear()
+
+    def feed_scheduler(self, performance: dict, now: float) -> None:
+        moved = False
+        for provider in self.scheduler.providers:
+            data = performance["providers"].get(provider)
+            if data is None:
+                continue
+            sample = data.get("last_sample_at")
+            previous = self.last_samples.get(provider)
+            finished = sample is not None and previous is not None and sample > previous
+            if sample is not None:
+                self.last_samples[provider] = sample
+            elif provider not in self.last_samples:
+                self.last_samples[provider] = None
+            moved |= self.scheduler.activity(provider, data.get("active_sessions", 0) > 0, finished, now)
+        if moved:
+            self.wake.set()
+
+    def save_performance_if_changed(self, performance: dict, now: float) -> None:
+        signature = performance_signature(performance)
+        if signature == self.saved_signature and now - self.saved_at < PERFORMANCE_SAVE_SECONDS:
+            return
+        save_performance(performance)
+        self.saved_signature, self.saved_at = signature, now
+
+    def tps_loop(self) -> None:
+        last_wall = time.time()
+        failures = 0
+        while not self.stop_event.wait(1):
+            now = time.time()
+            try:
+                if now - last_wall > 120:
+                    # Sleep/hibernate: quotas may have reset meanwhile.
+                    self.scheduler.clock_jump(now)
+                    self.wake.set()
+                last_wall = now
+                self.performance = self.tps_monitor.poll(now)
+                self.save_performance_if_changed(self.performance, now)
+                self.feed_scheduler(self.performance, now)
+                for provider, letter in PROVIDERS.items():
+                    if self.icons[provider].visible:
+                        self.update_icon(provider, letter)
+                failures = 0
+            except Exception:
+                # Any unexpected error used to end this thread silently and
+                # freeze the TPS display; log (rate-limited) and keep going.
+                failures += 1
+                if failures in (1, 10) or failures % 300 == 0:
+                    log.exception("TPS loop error (%d in a row)", failures)
+
+    # ----- actions ---------------------------------------------------------------
 
     def open_provider(self, provider: str) -> None:
         kind, target = LAUNCHERS[provider]
@@ -255,39 +472,73 @@ class QuotaTray:
         for item in self.snapshots.values():
             if item.error:
                 sections.append(f"- {item.label}：{item.error}")
+        if self.scheduler:
+            now = time.time()
+            sections += ["", "刷新计划："] + [f"- {p}：{self.scheduler.describe(p, now)}" for p in PROVIDERS]
+        sections += ["", "额度预测："] + [f"- {p}：{self.forecast_line(p) or '暂无'}" for p in PROVIDERS]
         return "\n".join(sections)
 
     def open_diagnostics(self, _icon=None, _item=None) -> None:
-        path = Path.home() / "AppData/Local" / APP_NAME / "diagnostics.txt"
+        path = DATA_DIR / "diagnostics.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.diagnostic_text(), encoding="utf-8")
         os.startfile(path)  # type: ignore[attr-defined]
 
-    def startup_enabled(self) -> bool:
-        return self.startup_path().is_file()
-
+    # Start with Windows through HKCU\\...\\Run: no console flash, and from
+    # source it uses pythonw -X utf8 instead of the .py file association.
     @staticmethod
     def startup_path() -> Path:
+        """Legacy Startup-folder script written by earlier versions."""
         return Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup" / f"{APP_NAME}.cmd"
 
+    @staticmethod
+    def _run_value() -> str | None:
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+                return winreg.QueryValueEx(key, APP_NAME)[0]
+        except OSError:
+            return None
+
+    @staticmethod
+    def _set_run_value(command: str | None) -> None:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            if command is None:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except FileNotFoundError:
+                    pass
+            else:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, command)
+
+    def startup_enabled(self) -> bool:
+        return self._run_value() is not None or self.startup_path().is_file()
+
+    def migrate_startup(self) -> None:
+        try:
+            legacy = self.startup_path()
+            if legacy.is_file():
+                self._set_run_value(startup_command())
+                legacy.unlink()
+        except (OSError, KeyError, ImportError):
+            log.warning("startup migration skipped", exc_info=True)
+
     def toggle_startup(self, _icon=None, _item=None) -> None:
-        path = self.startup_path()
-        if path.is_file():
-            path.unlink()
-            return
-        executable = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve()
-        path.write_text(f'@echo off\r\nstart "" "{executable}"\r\n', encoding="utf-8")
+        enabled = self.startup_enabled()
+        self._set_run_value(None if enabled else startup_command())
+        self.startup_path().unlink(missing_ok=True)
 
     def exit_app(self, _icon=None, _item=None) -> None:
         self.stop_event.set()
+        self.wake.set()
         for icon in self.icons.values():
             icon.stop()
 
     def run(self) -> None:
-        worker = threading.Thread(target=self.refresh_loop, daemon=True)
-        worker.start()
+        threading.Thread(target=self.refresh_loop, name="quota-refresh", daemon=True).start()
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
-        hover = HoverDetails(self.icons, self.hover_text, self.stop_event)
+        hover = HoverDetails(self.icons, self.hover_card, self.stop_event)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
         threads = [
             threading.Thread(target=icon.run, name=f"tray-{provider}", daemon=True)
@@ -298,22 +549,6 @@ class QuotaTray:
         for thread in threads:
             thread.join()
 
-    def refresh_loop(self) -> None:
-        while not self.stop_event.wait(REFRESH_SECONDS):
-            self.refresh()
-
-    def tps_loop(self) -> None:
-        while not self.stop_event.wait(1):
-            try:
-                self.performance = self.tps_monitor.poll()
-                save_performance(self.performance)
-                for provider, letter in PROVIDERS.items():
-                    icon = self.icons[provider]
-                    if icon.visible:
-                        self.update_icon(provider, letter)
-            except (OSError, ValueError, TypeError):
-                continue
-
 
 def acquire_single_instance():
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
@@ -323,13 +558,25 @@ def acquire_single_instance():
     return handle
 
 
+def setup_logging() -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(DATA_DIR / "app.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(threadName)s: %(message)s"))
+        logging.basicConfig(level=logging.INFO, handlers=[handler])
+    except OSError:
+        pass
+
+
 def main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == "--check-hover":
         from hover_check import check_hover_runtime
         tray = QuotaTray.__new__(QuotaTray)
-        tray.snapshots = load_cached_snapshots()
+        cached = load_cached_snapshots()
+        tray.snapshots = {provider: cached.get(provider) or placeholder(provider) for provider in PROVIDERS}
         tray.performance = json.loads(PERFORMANCE_PATH.read_text(encoding="utf-8"))
-        return check_hover_runtime(tray.hover_text("codex"), Path(sys.argv[2]).resolve())
+        tray.history = QuotaHistory()
+        return check_hover_runtime(tray.hover_card("codex"), Path(sys.argv[2]).resolve())
     if len(sys.argv) == 3 and sys.argv[1] == "--check-tps":
         monitor = TpsMonitor()
         snapshot = monitor.poll()
@@ -348,6 +595,7 @@ def main() -> int:
     handle = acquire_single_instance()
     if handle is None:
         return 0
+    setup_logging()
     QuotaTray().run()
     return 0
 

@@ -1,10 +1,10 @@
 # AI 额度托盘
 
-Windows 通知区域程序，显示 Codex、Grok 和 Gemini（5 小时窗口）的账号额度、重置倒计时和更新时间。程序每 5 分钟刷新，也支持托盘菜单立即刷新；刷新失败时保留最后有效值并标记“旧数据”。
+Windows 通知区域程序，显示 Codex、Grok 和 Gemini（5 小时窗口）的账号额度、重置倒计时和更新时间。启动时立即显示上次缓存的额度，再在后台并行刷新；刷新按需调度（见下文），也支持托盘菜单立即刷新；刷新失败时保留最后有效值并标记“旧数据”。
 
 ## 当前数据源
 
-- Codex：调用本机 Codex App Server 的 `account/rateLimits/read`，读取真实账号额度。
+- Codex：调用本机 Codex App Server 的 `account/rateLimits/read`，同时读取 5 小时主窗口和每周次窗口；图标外环按更紧张的窗口显示，详情分别列出两个窗口。
 - Grok：每次刷新启动临时 `grok` 终端，等待会话就绪后执行 `/usage`，读取 `Weekly limit` 和 `Next reset`。启动较慢时在 25 秒内重试该查询，退出时关闭临时进程。
 - Gemini（5 小时）：每次刷新调用 `agy --print /usage --output-format json`，读取 `gemini-5h` 桶的剩余额度和重置时间。
 
@@ -23,9 +23,44 @@ python -X utf8 tray_app.py
 
 外圈弧长表示可用额度，剩余不足 50% 时变为琥珀色，不足 20% 时变为陶土红；未知项只显示灰色空环和 `?`，旧数据右上角有带留白的琥珀圆点。图标在 256 px 画布上绘制后统一缩放，数字优先使用 Windows 自带的 Bahnschrift 窄体。鼠标停在图标上约 0.4 秒后，独立置顶详情显示最近生成 TPS、来源、最近 60 秒输出速率、活动会话、额度重置日期、时区及倒计时。浮层不激活窗口、不抢键盘焦点，支持普通全屏/无边框窗口；移开鼠标后关闭，数据刷新不会打断显示。提示按图标所在显示器定位，支持负坐标。独占全屏或安全桌面无法保证覆盖；全屏隐藏任务栏时需先让托盘图标可见。“额度详情”和“本机全部 AI 速率”仍可从右键菜单打开。
 
+## 按需刷新
+
+不再固定每 5 分钟轮询，而是由 `refresh_scheduler.py` 按状态决定下一次查询：
+
+| 状态 | Codex / Gemini | Grok |
+| --- | --- | --- |
+| 空闲 | 15 分钟 | 30 分钟 |
+| 正在生成 | 3 分钟 | 10 分钟 |
+| 一次生成结束后 | 8 秒后 | 20 秒后 |
+| 读取失败 | 30 秒 → 1 分 → 2 分 → 5 分退避 | 同左 |
+
+到达重置时间后 5 秒、电脑从睡眠唤醒（时钟跳变）以及手动“立即刷新”都会马上刷新。Grok 需要启动临时终端，成本较高，因此间隔更长。详情卡片底部显示每个来源的下一次计划刷新时间。
+
+## 额度耗尽预测
+
+每次成功读取的剩余额度会记录到 `%LOCALAPPDATA%\CodexQuotaTray\history.json`（仅数值和时间）。程序取当前重置窗口内最近 3 小时、跨度至少 10 分钟的样本做最小二乘拟合，估算消耗速度：
+
+- 预计在重置前耗尽：显示“约 X 后耗尽”，并按剩余时间标记琥珀色/陶土红；
+- 足够撑到重置：显示“可撑到重置”；
+- 样本不足或近期没有消耗：显示“样本不足”或“近期无消耗”。
+
+额度回升（窗口重置）时自动截断旧样本。预测结果出现在详情卡片、右键菜单和“额度详情”中。
+
+## 详情卡片
+
+悬停详情改为自绘卡片（`detail_card.py` 渲染、`hover_details.py` 显示）：分层（layered）、鼠标穿透、不激活、置顶窗口，带圆角、阴影和淡入。卡片包含：
+
+- 主数字：当前约束窗口的剩余百分比与重置倒计时；
+- 各窗口进度条（Codex 显示 5 小时 + 每周）；
+- 耗尽预测一行；
+- TPS、60 秒输出速率、活动会话等指标；
+- 底部：各窗口重置时间、下一次计划刷新。
+
+卡片按图标所在显示器的 DPI 渲染（悬停线程启用 Per-Monitor V2）；若遇到旧系统显示异常，可设置环境变量 `CODEX_QUOTA_LEGACY_DPI=1` 关闭。卡片创建失败时自动回退到原有文字提示。
+
 ## TPS 数据来源和含义
 
-程序每秒读取一次已有本地记录，独立于每 5 分钟的额度刷新，不发送模型请求。
+程序每秒读取一次已有本地记录，独立于额度刷新，不发送模型请求。只跟踪 24 小时内修改过的会话文件，空闲读取器会被回收；Grok `usage.json` 仅在修改时间或大小变化时重新解析。
 
 - GPT/Codex：读取本机近期会话的真实 `token_usage_record.output_tokens`，按会话关联客户端 `codex_core::stream_events_utils` 的首个输出项时间，以“真实输出 token 数 ÷ 首个输出项到计数完成的流式时间”统计 TPS。计数包含思考和工具调用输出，不计工具执行时间；完成时结算，不使用字符长度、近似分词器或请求整体耗时。流式日志跨度里的 `model=` 用于识别尚未写入线程表的 GPT 会话，避免活动被归到“其他”而 C 图标不显示数字。没有会话 ID 的 UI delta 日志不用于跨会话关联。老版本 `token_count` 只用于去重后的 60 秒输出计数。
 - Grok CLI：直接读取客户端 `unified.jsonl` 中 `shell.turn.inference_done` 的原生 `tokens_per_sec`，保持客户端数值；用 `events.jsonl` 判断活动，并读取 `updates.jsonl` 和 `usage.json` 的真实输出计数。
@@ -40,10 +75,14 @@ python -X utf8 tray_app.py
 
 读取方案参考 [Tokscale](https://github.com/junhoyeo/tokscale)、[Tallyburn](https://github.com/seoulpro/tallyburn)、[Grok Build](https://github.com/xai-org/grok-build) 及 [Codex 官方遥测说明](https://learn.chatgpt.com/docs/config-file/config-advanced)。程序使用独立的 Python 数值读取器，不运行这些项目的守护进程。
 
+## 开机启动与日志
+
+“开机启动”写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（旧版启动文件夹中的 `.cmd` 会自动迁移）。运行日志为 `%LOCALAPPDATA%\CodexQuotaTray\app.log`（自动轮转），诊断文件也保存在该目录。
+
 ## 构建与测试
 
 ```powershell
-python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py
+python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py
 .\build.ps1 -DistPath .\outputs
 ```
 

@@ -22,6 +22,9 @@ import psutil
 
 
 PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray/performance.json"
+RECENT_SECONDS = 86400          # Only files touched within a day can matter.
+FORGET_SECONDS = 2 * 86400      # Readers idle this long are released.
+SLOW_DISCOVERY_SECONDS = 30     # Process list and full-history globbing.
 PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "other": "其他模型"}
 
 
@@ -211,6 +214,8 @@ class TpsMonitor:
         self.health: dict[str, dict[str, Any]] = {}
         self.legacy_totals: dict[str, int] = {}
         self.software: list[dict[str, Any]] = []
+        self.last_slow_discovery = 0.0
+        self.usage_versions: dict[Path, tuple[int, int]] = {}
 
     def add(self, observation: Observation, now: float):
         if observation.identity in self.seen or not now - 86400 <= observation.ended_at <= now + 5:
@@ -219,6 +224,36 @@ class TpsMonitor:
             return
         self.seen.add(observation.identity)
         self.events.append(observation)
+
+    @staticmethod
+    def _recent(path: Path, now: float) -> bool:
+        try:
+            return path.stat().st_mtime > now - RECENT_SECONDS
+        except OSError:
+            return False
+
+    def _forget_idle(self, now: float):
+        """Release readers and per-session state that can no longer matter."""
+        for path in list(self.readers):
+            try:
+                idle = path.stat().st_mtime < now - FORGET_SECONDS
+            except OSError:
+                idle = True
+            if idle:
+                self.readers.pop(path, None)
+                self.file_sessions.pop(path, None)
+                self.usage_versions.pop(path, None)
+        for session, points in list(self.client_stream_starts.items()):
+            if not points or points[-1] < now - 600:
+                self.client_stream_starts.pop(session, None)
+        for session, moment in list(self.completed_at.items()):
+            if moment < now - FORGET_SECONDS:
+                self.completed_at.pop(session, None)
+        live = set(self.file_sessions.values()) | set(self.activity) | set(self.client_stream_starts)
+        for session in list(self.context):
+            if session not in live and session not in self.completed_at:
+                self.context.pop(session, None)
+                self.legacy_totals.pop(session, None)
 
     def _register(self, path: Path, session: str, source: str, model="", provider=""):
         if path not in self.readers and path.is_file():
@@ -233,22 +268,30 @@ class TpsMonitor:
                 with readonly_db(state) as db:
                     rows = db.execute("SELECT id,rollout_path,model,model_provider FROM threads ORDER BY updated_at DESC LIMIT 512").fetchall()
                 for session, filename, model, provider in rows:
-                    if filename and Path(filename).is_file():
+                    # Registering all 512 threads used to parse ~1.5 MB of
+                    # each history on the first poll; only recent ones matter.
+                    if filename and (Path(filename) in self.readers or self._recent(Path(filename), now)):
                         self._register(Path(filename), session, "Codex", model or "", provider or "")
                 self.health["Codex"] = {"status": "已接入", "sessions": len(rows)}
             except (OSError, sqlite3.Error) as error:
                 self.health["Codex"] = {"status": "读取失败", "error": type(error).__name__}
-        else:
+        elif now - self.last_slow_discovery >= SLOW_DISCOVERY_SECONDS:
             for path in self.codex_root.glob("sessions/*/*/*/rollout-*.jsonl"):
-                if path.stat().st_mtime > now - 86400:
+                if self._recent(path, now):
                     self._register(path, path.stem.split("T", 1)[-1], "Codex")
-        grok_paths = list(self.grok_root.glob("sessions/*/*/updates.jsonl"))
+        grok_paths = [path for path in self.grok_root.glob("sessions/*/*/updates.jsonl")
+                      if path in self.readers or self._recent(path, now)]
         for path in grok_paths:
             self._register(path, path.parent.name, "Grok CLI", "grok")
             if path.with_name("events.jsonl").is_file():
                 self._register(path.with_name("events.jsonl"), path.parent.name, "Grok CLI", "grok")
         self.health["Grok CLI"] = {"status": "已接入" if grok_paths else "未发现记录", "sessions": len(grok_paths)}
-        self.software = running_software()
+        if now - self.last_slow_discovery >= SLOW_DISCOVERY_SECONDS:
+            # Walking every process (and node command lines) every 2 s was the
+            # single most expensive thing this app did while idle.
+            self.software = running_software()
+            self._forget_idle(now)
+            self.last_slow_discovery = now
         self.last_discovery = now
 
     def _codex_logs(self, now: float):
@@ -398,6 +441,18 @@ class TpsMonitor:
             if previous is not None and moment and total > previous:
                 self.add(Observation(key("grok-counter", *counter_key, total), "Grok CLI", counter_key[0], provider_for(model), model, moment, int(total - previous)), now)
 
+    def _usage_changed(self, path: Path) -> bool:
+        """Parse usage.json only after it changes instead of every second."""
+        try:
+            info = path.with_name("usage.json").stat()
+        except OSError:
+            return False
+        version = (info.st_mtime_ns, info.st_size)
+        if self.usage_versions.get(path) == version:
+            return False
+        self.usage_versions[path] = version
+        return True
+
     def _grok_activity(self, record: dict, session: str, now: float):
         moment = timestamp(record.get("ts"))
         if moment is None or moment < now - 600:
@@ -505,17 +560,18 @@ class TpsMonitor:
         for path, reader in list(self.readers.items()):
             session = self.file_sessions[path]
             try:
-                if self.context[session].get("source") == "Grok CLI":
+                if self.context.get(session, {}).get("source") == "Grok CLI":
                     session = path.parent.name
                     for record in reader.read():
                         if path.name == "updates.jsonl":
                             self._grok_record(record, session, now)
                         else:
                             self._grok_activity(record, session, now)
-                    if path.name == "updates.jsonl":
+                    if path.name == "updates.jsonl" and self._usage_changed(path):
                         self._grok_usage_counter(path, now)
                 else:
                     records = list(reader.read())
+                    self.context.setdefault(session, {})
                     if any(r.get("type") == "token_usage_record" for r in records):
                         self.context[session]["modern_usage"] = True
                     for record in records:
@@ -579,6 +635,11 @@ def running_software() -> list[dict[str, Any]]:
                 pass
     supported = {"ChatGPT / Codex 桌面", "Codex 引擎", "Grok CLI", "Antigravity CLI", "Antigravity 桌面"}
     return [{"name": name, "processes": count, "status": "读取本地记录" if name in supported else "暂无可核验的本地TPS信号"} for name, count in sorted(counts.items())]
+
+
+def performance_signature(snapshot: dict[str, Any]) -> str:
+    """Everything except the clock, so unchanged state is not rewritten."""
+    return json.dumps({k: v for k, v in snapshot.items() if k != "generated_at"}, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def save_performance(snapshot: dict[str, Any]) -> None:

@@ -15,6 +15,11 @@ try:
 except ImportError:
     PTY = None
 
+try:
+    import psutil
+except ImportError:  # psutil is a hard requirement of the app; stay importable.
+    psutil = None
+
 
 ANSI_RE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])")
 PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
@@ -88,6 +93,35 @@ def _create_terminal():
         raise
 
 
+def _child_processes(pid: int, executable: str) -> list:
+    """Descendants of our own temporary session only (verified by image name)."""
+    if psutil is None or not pid:
+        return []
+    try:
+        root = psutil.Process(pid)
+        if root.name().lower() != os.path.basename(executable).lower():
+            return []
+        return root.children(recursive=True)
+    except (psutil.Error, OSError, ValueError):
+        return []
+
+
+def _terminate(processes: list) -> None:
+    if not processes:
+        return
+    for process in processes:
+        try:
+            process.terminate()
+        except psutil.Error:
+            pass
+    try:
+        _, alive = psutil.wait_procs(processes, timeout=2)
+        for process in alive:
+            process.kill()
+    except psutil.Error:
+        pass
+
+
 def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0) -> str:
     """Open a temporary PTY session, issue `/usage`, and return its visible text."""
     if PTY is None:
@@ -132,11 +166,15 @@ def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0)
             terminal.write("\x03")
         except Exception:
             pass
+        # grok.exe can start helpers (MCP servers, node). Collect them first:
+        # once the parent is gone Windows no longer links them to it.
+        children = _child_processes(terminal.pid, executable)
         try:
             if terminal.isalive():
                 os.kill(terminal.pid, signal.SIGTERM)
         except Exception:
             pass
+        _terminate(children)
         if own_console:
             ctypes.windll.kernel32.FreeConsole()
 
