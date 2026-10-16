@@ -24,6 +24,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from providers import SPECS
+
 SIZE = 64            # Pixel size handed to pystray (tests and Shell expect 64).
 CANVAS = 256         # Supersampled drawing canvas.
 
@@ -41,12 +43,10 @@ INK_EDGE = _mix(INK, IVORY, 0.10)  # hairline that lifts the disc off dark taskb
 TRACK = _mix(INK, IVORY, 0.17)     # unfilled ring
 MUTED = (164, 159, 148, 255)       # unknown state
 AMBER = (229, 168, 75, 255)        # < 50 %
-CLAY = (217, 119, 87, 255)         # < 20 %, Claude clay
-ACCENTS = {
-    "C": (126, 201, 166, 255),     # Codex  - sage mint
-    "G": (203, 208, 216, 255),     # Grok   - pale silver
-    "M": (164, 176, 245, 255),     # Gemini - periwinkle
-}
+ROSE = (226, 92, 92, 255)          # < 20 %  (clay now belongs to Claude's accent)
+CLAY = ROSE                        # legacy name for the danger colour
+# Accents live in the provider registry; letters map to them.
+ACCENTS = {spec.letter: spec.accent for spec in SPECS}
 TILE_TEXT = (31, 30, 28, 255)      # dark numerals on a lit tile
 
 

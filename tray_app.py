@@ -23,11 +23,13 @@ from quota_sources import (
     QuotaSnapshot,
     collect,
     dump_snapshot,
+    get_claude_quota,
     get_grok_quota,
     load_cached_snapshots,
     placeholder,
     save_cached_snapshots,
 )
+import providers as provider_registry
 from refresh_scheduler import RefreshScheduler
 from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
 
@@ -36,16 +38,9 @@ APP_NAME = "CodexQuotaTray"
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / APP_NAME
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 PERFORMANCE_SAVE_SECONDS = 60
-PROVIDERS = {
-    "codex": "C",
-    "grok": "G",
-    "gemini": "M",
-}
-LAUNCHERS = {
-    "codex": ("aumid", "OpenAI.Codex_2p2nqsd0c76g0!App"),
-    "grok": ("cli", Path.home() / ".grok" / "bin" / "grok.exe"),
-    "gemini": ("gui", Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Programs" / "antigravity" / "Antigravity.exe"),
-}
+# Shown providers (key -> icon letter), in registry order; see providers.py.
+PROVIDERS = {key: provider_registry.get(key).letter for key in provider_registry.enabled_keys()}
+LAUNCHERS = {spec.key: spec.launch for spec in provider_registry.SPECS}
 log = logging.getLogger(APP_NAME)
 
 
@@ -452,23 +447,30 @@ class QuotaTray:
     # ----- actions ---------------------------------------------------------------
 
     def open_provider(self, provider: str) -> None:
-        kind, target = LAUNCHERS[provider]
+        kind, resolve = LAUNCHERS[provider]
+        label = provider_registry.get(provider).label
         try:
+            target = resolve()
             if kind == "aumid":
                 launched = ctypes.windll.shell32.ShellExecuteW(None, "open", f"shell:AppsFolder\\{target}", None, None, 1)
                 if launched <= 32:
-                    raise OSError(f"无法启动 Codex（错误 {launched}）")
+                    raise OSError(f"无法启动 {label}（错误 {launched}）")
                 return
+            if target is None or not Path(target).is_file():
+                raise FileNotFoundError(f"未找到 {label} 客户端：{target or '未安装'}")
             path = Path(target)
-            if not path.is_file():
-                raise FileNotFoundError(str(path))
             flags = subprocess.CREATE_NEW_CONSOLE if kind == "cli" else 0
-            subprocess.Popen([str(path)], cwd=str(path.parent), creationflags=flags, close_fds=True)
+            # A CLI opened from its install folder would work on that folder;
+            # Claude Code and similar start in the user's home instead.
+            cwd = path.parent if provider == "grok" else Path.home()
+            command = ["cmd.exe", "/k", str(path)] if path.suffix.lower() in (".cmd", ".bat") else [str(path)]
+            subprocess.Popen(command, cwd=str(cwd), creationflags=flags, close_fds=True)
         except OSError as error:
-            ctypes.windll.user32.MessageBoxW(None, str(error), f"{PROVIDERS[provider]} · 无法打开", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, str(error), f"{label} · 无法打开", 0x10)
 
     def diagnostic_text(self) -> str:
-        sections = [dump_snapshot(self.snapshots), "", "数据源边界：", "- Codex：Codex App Server account/rateLimits/read"]
+        sections = [dump_snapshot(self.snapshots), "", "数据源边界："]
+        sections += [f"- {provider_registry.get(p).label}：{provider_registry.get(p).source_note}" for p in PROVIDERS]
         for item in self.snapshots.values():
             if item.error:
                 sections.append(f"- {item.label}：{item.error}")
@@ -568,6 +570,25 @@ def setup_logging() -> None:
         pass
 
 
+def check_claude(destination: Path, raw: bool = False) -> int:
+    """Read Claude Code /usage once; `--raw` also saves the cleaned screen
+    (emails redacted) so the parser can be checked against a new CLI version."""
+    import re
+    from cli_usage import CLAUDE_ARGS, CLAUDE_PROBE, run_temporary_usage
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = get_claude_quota()
+    destination.write_text(dump_snapshot({"claude": snapshot}), encoding="utf-8")
+    if raw:
+        executable = provider_registry.find_claude()
+        try:
+            text = run_temporary_usage(str(executable), CLAUDE_ARGS, timeout=30.0, probe=CLAUDE_PROBE) if executable else "未找到 Claude Code"
+        except Exception as exc:
+            text = f"{type(exc).__name__}: {exc}"
+        text = re.sub(r"[\w.+-]+@[\w-]+\.[\w.-]+", "<email>", text)
+        destination.with_suffix(".raw.txt").write_text(text, encoding="utf-8")
+    return 1 if snapshot.error else 0
+
+
 def main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == "--check-hover":
         from hover_check import check_hover_runtime
@@ -592,6 +613,8 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(dump_snapshot({"grok": snapshot}), encoding="utf-8")
         return 1 if snapshot.error else 0
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-claude":
+        return check_claude(Path(sys.argv[2]).resolve(), raw=len(sys.argv) == 4 and sys.argv[3] == "--raw")
     handle = acquire_single_instance()
     if handle is None:
         return 0
