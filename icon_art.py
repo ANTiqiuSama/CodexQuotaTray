@@ -5,9 +5,12 @@ Two calm states, one visual language:
 * Idle  - a warm charcoal disc with a thin quota ring and the provider letter.
           The ring sweeps clockwise from 12 o'clock; its length is the
           remaining quota, its colour shifts only when attention is needed.
-* Live  - while a model is generating, the disc becomes a lit rounded tile in
-          the provider's accent colour carrying the current TPS number.
-          A shape change (circle -> tile) is readable even at 16 px.
+* Live  - while a model is generating, the same full-size disc lights up in
+          the provider's accent colour and carries the current TPS number.
+          Dark disc -> lit disc is readable even at 16 px.
+
+Both states fill the whole tray slot and share one serif family (Sitka Small,
+falling back to Cambria / Palatino / Georgia) for letters and numerals.
 
 Everything is drawn at 4x on a 256 px canvas and reduced once with Lanczos so
 strokes stay crisp at the 16/20/24/32 px sizes Windows actually displays.
@@ -52,7 +55,8 @@ def _font_dirs() -> list[Path]:
     local = os.environ.get("LOCALAPPDATA")
     if local:
         dirs.append(Path(local) / "Microsoft/Windows/Fonts")
-    dirs += [Path("/usr/share/fonts/liberation-sans"), Path("/usr/share/fonts/google-noto")]
+    dirs += [Path("/usr/share/fonts/msttcore"), Path("/usr/share/fonts/liberation-serif"),
+             Path("/usr/share/fonts/liberation-sans"), Path("/usr/share/fonts/google-noto")]
     return dirs
 
 
@@ -72,27 +76,29 @@ def _load(candidates: tuple[tuple[str, str | None], ...], size: int):
     return ImageFont.load_default(size)
 
 
+# One elegant serif family for letters and numerals so both states read as a
+# set.  Sitka (Windows 10+) has an optical "Small" cut drawn for tiny sizes;
+# Cambria / Palatino / Georgia are fallbacks shipped with every Windows.
+# All of these use lining figures except Georgia, which is therefore last.
+SERIF = (
+    ("SitkaVF.ttf", "Small Bold"),
+    ("SitkaB.ttc", None),
+    ("cambriab.ttf", None),
+    ("palab.ttf", None),
+    ("georgiab.ttf", None),
+    ("LiberationSerif-Bold.ttf", None),
+    ("LiberationSans-Bold.ttf", None),
+)
+
+
 @lru_cache(maxsize=64)
 def letter_font(size: int):
-    return _load((
-        ("SegUIVar.ttf", "Display Semibold"),
-        ("segoeuisb.ttf", None),
-        ("segoeuib.ttf", None),
-        ("LiberationSans-Bold.ttf", None),
-        ("arialbd.ttf", None),
-    ), size)
+    return _load(SERIF, size)
 
 
 @lru_cache(maxsize=64)
 def number_font(size: int):
-    # Bahnschrift (Windows 10+) is a DIN-style variable face; its condensed
-    # cut lets three digits sit comfortably inside a 16 px icon.
-    return _load((
-        ("bahnschrift.ttf", "SemiBold Condensed"),
-        ("bahnschrift.ttf", "Bold"),
-        ("segoeuib.ttf", None),
-        ("LiberationSans-Bold.ttf", None),
-    ), size)
+    return _load(SERIF, size)
 
 
 def accent(letter: str) -> tuple[int, int, int, int]:
@@ -140,7 +146,7 @@ def _finish(canvas: Image.Image) -> Image.Image:
 
 def _stale_badge(canvas: Image.Image) -> None:
     """Amber dot at the top-right with a transparent knock-out gap."""
-    cx, cy, r, gap = 210, 46, 34, 14
+    cx, cy, r, gap = 214, 42, 36, 14
     knock = Image.new("L", canvas.size, 0)
     ImageDraw.Draw(knock).ellipse((cx - r - gap, cy - r - gap, cx + r + gap, cy + r + gap), fill=255)
     alpha = canvas.getchannel("A")
@@ -149,32 +155,47 @@ def _stale_badge(canvas: Image.Image) -> None:
     ImageDraw.Draw(canvas).ellipse((cx - r, cy - r, cx + r, cy + r), fill=AMBER)
 
 
+# Shared geometry: both states are full-bleed discs so the icon uses the
+# whole tray slot.  The ring hugs the edge; the glyph gets the rest.
+DISC = (0, 0, CANVAS - 1, CANVAS - 1)
+RING_W = 26
+RING_BOX = (RING_W / 2 + 1, RING_W / 2 + 1, CANVAS - RING_W / 2 - 2, CANVAS - RING_W / 2 - 2)
+
+
+def _ring(draw: ImageDraw.ImageDraw, value: float | None, color, track) -> None:
+    box, width = RING_BOX, RING_W
+    # PIL strokes ellipses inward from the box, so expand by half the width.
+    outer = (box[0] - width / 2, box[1] - width / 2, box[2] + width / 2, box[3] + width / 2)
+    draw.ellipse(outer, outline=track, width=width)
+    if value is None:
+        return
+    value = max(0.0, min(100.0, value))
+    if value >= 99.5:
+        draw.ellipse(outer, outline=color, width=width)
+        return
+    if value <= 0:
+        return
+    sweep = max(12.0, 360.0 * value / 100.0)
+    start, end = -90.0, -90.0 + sweep
+    draw.arc(outer, start, end, fill=color, width=width)
+    radius = (box[2] - box[0]) / 2
+    cx = (box[0] + box[2]) / 2
+    for angle in (start, end):  # round caps
+        x = cx + radius * math.cos(math.radians(angle))
+        y = cx + radius * math.sin(math.radians(angle))
+        draw.ellipse((x - width / 2, y - width / 2, x + width / 2, y + width / 2), fill=color)
+
+
 def quota_icon(remaining: float | None, letter: str, stale: bool = False) -> Image.Image:
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    draw.ellipse((2, 2, 253, 253), fill=INK, outline=INK_EDGE, width=5)
-
-    ring_box, ring_w = (17, 17, 238, 238), 28
-    draw.ellipse(ring_box, outline=TRACK, width=ring_w)
-    if remaining is not None:
-        value = max(0.0, min(100.0, remaining))
-        color = ring_color(value, letter)
-        if value >= 99.5:
-            draw.ellipse(ring_box, outline=color, width=ring_w)
-        elif value > 0:
-            sweep = max(12.0, 360.0 * value / 100.0)
-            start, end = -90.0, -90.0 + sweep
-            draw.arc(ring_box, start, end, fill=color, width=ring_w)
-            # Round caps keep the arc from looking chopped at small sizes.
-            radius = (ring_box[2] - ring_box[0]) / 2 - ring_w / 2
-            for angle in (start, end):
-                x = 127.5 + radius * math.cos(math.radians(angle))
-                y = 127.5 + radius * math.sin(math.radians(angle))
-                draw.ellipse((x - ring_w / 2, y - ring_w / 2, x + ring_w / 2, y + ring_w / 2), fill=color)
+    draw.ellipse(DISC, fill=INK)
+    value = None if remaining is None else max(0.0, min(100.0, remaining))
+    _ring(draw, value, ring_color(value, letter), TRACK)
 
     label, fill = (letter, IVORY) if remaining is not None else ("?", MUTED)
-    face = letter_font(150)
-    _centered_text(draw, label, face, (0, 0, CANVAS, CANVAS), fill, optical_dy=2)
+    face = _fit(label, letter_font, 176, 168, 212, draw)
+    _centered_text(draw, label, face, (0, 0, CANVAS, CANVAS), fill)
     if stale:
         _stale_badge(canvas)
     return _finish(canvas)
@@ -187,10 +208,14 @@ def tps_text(value: float) -> str:
 
 
 def live_icon(tps: float, letter: str) -> Image.Image:
+    """Same disc, lit in the provider accent, carrying the TPS number."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((4, 4, 251, 251), radius=64, fill=accent(letter))
+    color = accent(letter)
+    draw.ellipse(DISC, fill=color)
     text = tps_text(tps)
-    face = _fit(text, number_font, 214, 168, 200, draw)
+    # Widest chord available inside the hairline at numeral height.
+    wide = len(text) >= 3
+    face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
     _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), TILE_TEXT)
     return _finish(canvas)
