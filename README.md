@@ -8,6 +8,8 @@ Windows 通知区域程序，显示 Codex、Grok 和 Gemini（5 小时窗口）�
 - Grok：每次刷新启动临时 `grok` 终端，等待会话就绪后执行 `/usage`，读取 `Weekly limit` 和 `Next reset`。启动较慢时在 25 秒内重试该查询，退出时关闭临时进程。
 - Gemini（5 小时）：每次刷新调用 `agy --print /usage --output-format json`，读取 `gemini-5h` 桶的剩余额度和重置时间。
 
+- Claude（已做好接入准备，检测到 Claude Code 时自动显示，图标字母 A、陶土色）：每次刷新在应用自有的空文件夹 `%LOCALAPPDATA%\CodexQuotaTray\claude-probe` 中启动临时 `claude --strict-mcp-config` 会话并执行 `/usage`，读取 “Current session”（5 小时，主窗口）和 “Current week (all models)”（每周，次窗口）的已用百分比与重置时间；首次在该文件夹运行时自动确认“信任此文件夹”。API Key 计费账号没有订阅额度，会显示明确的提示。
+
 程序不会读取或输出 `auth.json`、token、cookie、账号 ID 等凭据或身份信息。
 
 ## 使用
@@ -19,15 +21,23 @@ python -m pip install -r requirements.txt
 python -X utf8 tray_app.py
 ```
 
-直接运行 `outputs\CodexQuotaTray.exe`。通知区域使用三个图标：C=GPT/Codex（鼠尾草绿）、G=Grok（浅银）、M=Gemini（长春花紫）。三种状态统一为铺满托盘格位的大圆盘：空闲时为暖炭色圆盘，中间是象牙白字母，外圈细环从 12 点方向顺时针表示剩余额度；检测到对应模型正在请求或生成时，同一圆盘点亮为该模型主色，并以深色数字显示 TPS。暗盘/亮盘的变化在 16 px 下也能一眼区分“空闲/生成中”。字母和数字统一使用衬线字体（优先 Windows 自带的 Sitka Small，依次回退到 Cambria、Palatino Linotype、Georgia）。刚结束生成的数字保留约 3 秒后恢复额度，避免快速闪烁。左键点击图标打开对应程序：C 打开 Codex 桌面，G 新开 Grok CLI 窗口，M 打开 Antigravity。右键菜单仍可刷新和查看详情。
+直接运行 `outputs\CodexQuotaTray.exe`。通知区域使用三个图标：C=GPT/Codex（鼠尾草绿）、G=Grok（浅银）、M=Gemini（长春花紫），以及检测到 Claude Code 时的 A=Claude（陶土色）。三种状态统一为铺满托盘格位的大圆盘：空闲时为暖炭色圆盘，中间是象牙白字母，外圈细环从 12 点方向顺时针表示剩余额度；检测到对应模型正在请求或生成时，同一圆盘点亮为该模型主色，并以深色数字显示 TPS。暗盘/亮盘的变化在 16 px 下也能一眼区分“空闲/生成中”。字母和数字统一使用衬线字体（优先 Windows 自带的 Sitka Small，依次回退到 Cambria、Palatino Linotype、Georgia）。刚结束生成的数字保留约 3 秒后恢复额度，避免快速闪烁。左键点击图标打开对应程序：C 打开 Codex 桌面，G 新开 Grok CLI 窗口，M 打开 Antigravity。右键菜单仍可刷新和查看详情。
 
-外圈弧长表示可用额度，剩余不足 50% 时变为琥珀色，不足 20% 时变为陶土红；未知项只显示灰色空环和 `?`，旧数据右上角有带留白的琥珀圆点。图标在 256 px 画布上绘制后统一缩放。鼠标停在图标上约 0.4 秒后，独立置顶详情显示最近生成 TPS、来源、最近 60 秒输出速率、活动会话、额度重置日期、时区及倒计时。浮层不激活窗口、不抢键盘焦点，支持普通全屏/无边框窗口；移开鼠标后关闭，数据刷新不会打断显示。提示按图标所在显示器定位，支持负坐标。独占全屏或安全桌面无法保证覆盖；全屏隐藏任务栏时需先让托盘图标可见。“额度详情”和“本机全部 AI 速率”仍可从右键菜单打开。
+外圈弧长表示可用额度，剩余不足 50% 时变为琥珀色，不足 20% 时变为玫瑰红（陶土色留给 Claude）；未知项只显示灰色空环和 `?`，旧数据右上角有带留白的琥珀圆点。图标在 256 px 画布上绘制后统一缩放。鼠标停在图标上约 0.4 秒后，独立置顶详情显示最近生成 TPS、来源、最近 60 秒输出速率、活动会话、额度重置日期、时区及倒计时。浮层不激活窗口、不抢键盘焦点，支持普通全屏/无边框窗口；移开鼠标后关闭，数据刷新不会打断显示。提示按图标所在显示器定位，支持负坐标。独占全屏或安全桌面无法保证覆盖；全屏隐藏任务栏时需先让托盘图标可见。“额度详情”和“本机全部 AI 速率”仍可从右键菜单打开。
+
+## 接入新的模型 / 选择显示哪些
+
+所有来源登记在 `providers.py` 的 `SPECS` 表中（键、图标字母、名称、主色、刷新间隔、打开方式）；托盘图标、菜单、刷新调度、颜色都由这张表生成。新增来源只需在表中加一项，并在 `quota_sources.py` 中提供额度读取函数（可选：在 `tps_sources.py` 中加入本地 token 记录读取）。
+
+- 默认显示 Codex、Grok、Gemini；Claude 在找到 `claude.exe`/`claude.cmd` 或 `~\.claude\projects` 时自动显示。
+- 环境变量 `CODEX_QUOTA_PROVIDERS=codex,grok,gemini,claude` 可指定要显示的来源；`CODEX_QUOTA_CLAUDE_EXE` 可指定 Claude Code 路径，`CLAUDE_CONFIG_DIR` 与 Claude Code 自身的设置一致。
+- `CodexQuotaTray.exe --check-claude <结果文件.json> [--raw]` 单独检查 Claude 额度读取；加 `--raw` 时另存一份去除邮箱的 `/usage` 屏幕文本，便于 Claude Code 更新界面后核对解析规则。
 
 ## 按需刷新
 
 不再固定每 5 分钟轮询，而是由 `refresh_scheduler.py` 按状态决定下一次查询：
 
-| 状态 | Codex / Gemini | Grok |
+| 状态 | Codex / Gemini | Grok / Claude |
 | --- | --- | --- |
 | 空闲 | 15 分钟 | 30 分钟 |
 | 正在生成 | 3 分钟 | 10 分钟 |
@@ -40,7 +50,7 @@ python -X utf8 tray_app.py
 
 每次成功读取的剩余额度会记录到 `%LOCALAPPDATA%\CodexQuotaTray\history.json`（仅数值和时间）。程序取当前重置窗口内最近 3 小时、跨度至少 10 分钟的样本做最小二乘拟合，估算消耗速度：
 
-- 预计在重置前耗尽：显示“约 X 后耗尽”，并按剩余时间标记琥珀色/陶土红；
+- 预计在重置前耗尽：显示“约 X 后耗尽”，并按剩余时间标记琥珀色/玫瑰红；
 - 足够撑到重置：显示“可撑到重置”；
 - 样本不足或近期没有消耗：显示“样本不足”或“近期无消耗”。
 
@@ -65,6 +75,7 @@ python -X utf8 tray_app.py
 - GPT/Codex：读取本机近期会话的真实 `token_usage_record.output_tokens`，按会话关联客户端 `codex_core::stream_events_utils` 的首个输出项时间，以“真实输出 token 数 ÷ 首个输出项到计数完成的流式时间”统计 TPS。计数包含思考和工具调用输出，不计工具执行时间；完成时结算，不使用字符长度、近似分词器或请求整体耗时。流式日志跨度里的 `model=` 用于识别尚未写入线程表的 GPT 会话，避免活动被归到“其他”而 C 图标不显示数字。没有会话 ID 的 UI delta 日志不用于跨会话关联。老版本 `token_count` 只用于去重后的 60 秒输出计数。
 - Grok CLI：直接读取客户端 `unified.jsonl` 中 `shell.turn.inference_done` 的原生 `tokens_per_sec`，保持客户端数值；用 `events.jsonl` 判断活动，并读取 `updates.jsonl` 和 `usage.json` 的真实输出计数。
 - Gemini/Antigravity 桌面及 CLI：只读读取会话 SQLite 的 generation/step 数值字段，对输出总量与“回复输出+思考输出”做一致性检查。目前本机客户端没有找到原生 TPS 数字，因此保留额度显示，只展示真实计数的 60 秒输出速率，不用耗时推算生成 TPS。
+- Claude Code：只读读取 `~\.claude\projects` 下近期会话（含子代理）记录中每条回复的 `message.usage.output_tokens`，同一回复分块写入时只按最终计数统计一次，不计输入和缓存，不保存正文。Claude Code 没有提供原生 TPS，因此和 Gemini 一样只显示 60 秒输出速率与活动状态，不用耗时推算 TPS。
 - Codex 的 Gemini 桥接器：监听现有临时隔离配置中的会话记录，保存数值投影；对已识别的桥接回传与底层生成做一对一去重，无法观察底层时保留回传计数。
 
 使用时显示最近一次完整的生成 TPS，样本超过 5 分钟后失效；详情注明来源和样本时间。客户端在响应完成后发布真实 token 计数，因此尚未取得完整样本时继续显示额度。60 秒输出速率为所有相应会话在窗口内报告的输出 token 之和除以 60，不计输入和缓存，不重复加入已包含的思考 token。它作为独立指标显示在详情中，不充当生成 TPS。没有记录不证明没有生成。
@@ -82,7 +93,7 @@ python -X utf8 tray_app.py
 ## 构建与测试
 
 ```powershell
-python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py
+python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py test_claude.py
 .\build.ps1 -DistPath .\outputs
 ```
 

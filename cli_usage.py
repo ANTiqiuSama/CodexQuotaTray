@@ -7,8 +7,9 @@ import re
 import signal
 import subprocess
 import time
-from datetime import datetime, timezone
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
 
 try:
     from winpty import PTY
@@ -80,7 +81,7 @@ def _create_terminal():
         handles = [kernel32.GetStdHandle(value) for value in (-10, -11, -12)]
         if any(handle in (None, ctypes.c_void_p(-1).value) for handle in handles):
             if not kernel32.AllocConsole():
-                raise RuntimeError("无法初始化隐藏的 Grok 额度读取终端")
+                raise RuntimeError("无法初始化隐藏的 CLI 额度读取终端")
             own_console = True
             user32 = ctypes.windll.user32
             user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -122,7 +123,39 @@ def _terminate(processes: list) -> None:
         pass
 
 
-def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0) -> str:
+@dataclass(frozen=True)
+class UsageProbe:
+    """How to drive one CLI's interactive `/usage` in a throwaway PTY."""
+    name: str                                   # used in user-facing errors
+    ready: re.Pattern                           # prompt is up; slash commands work
+    found: re.Pattern                           # quota figures have appeared
+    complete: Callable[[str], bool]             # figures are fully rendered
+    missing: str                                # what the timeout says we lacked
+    command: str = "/usage"
+    ready_after: float = 4.0                    # send anyway after this long
+    retry_every: float = 2.0
+    settle: float = 1.2                         # max wait for `complete` after `found`
+    answers: tuple[tuple[re.Pattern, str], ...] = ()   # one-shot prompt replies
+    cwd: Callable[[], str | None] = lambda: None
+
+
+GROK_PROBE = UsageProbe(
+    name="Grok",
+    ready=GROK_READY_RE,
+    found=GROK_WEEKLY_RE,
+    complete=lambda text: parse_reset(text) is not None,
+    missing="Weekly limit",
+)
+
+
+def _spawn_target(executable: str, args: list[str]) -> tuple[str, str]:
+    """npm installs CLIs as .cmd shims, which need cmd.exe to run in a PTY."""
+    if executable.lower().endswith((".cmd", ".bat")):
+        return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"), subprocess.list2cmdline(["/d", "/c", executable, *args])
+    return executable, subprocess.list2cmdline(args)
+
+
+def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0, probe: UsageProbe = GROK_PROBE) -> str:
     """Open a temporary PTY session, issue `/usage`, and return its visible text."""
     if PTY is None:
         raise RuntimeError("缺少 pywinpty，无法读取 CLI /usage 临时窗口")
@@ -130,45 +163,55 @@ def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0)
     # The native PTY constructor needs standard console handles even when
     # called by a windowed EXE. Create and release a hidden console as needed.
     terminal, own_console = _create_terminal()
+    appname, cmdline = _spawn_target(executable, args)
     captured: list[str] = []
     started_at = time.monotonic()
     deadline = started_at + timeout
     last_request_at = None
     first_quota_at = None
+    answered: set[int] = set()
     try:
-        if not terminal.spawn(executable, subprocess.list2cmdline(args)):
-            raise RuntimeError("无法启动 Grok 额度读取会话")
+        cwd = probe.cwd()
+        spawned = terminal.spawn(appname, cmdline, cwd) if cwd else terminal.spawn(appname, cmdline)
+        if not spawned:
+            raise RuntimeError(f"无法启动 {probe.name} 额度读取会话")
         while time.monotonic() < deadline:
             captured.append(terminal.read(blocking=False))
             current = clean_terminal_text("".join(captured))
             now = time.monotonic()
-            if GROK_WEEKLY_RE.search(current):
+            for index, (pattern, reply) in enumerate(probe.answers):
+                if index not in answered and pattern.search(current):
+                    answered.add(index)
+                    terminal.write(reply)
+                    last_request_at = None  # the prompt may only appear after this
+            if probe.found.search(current):
                 if first_quota_at is None:
                     first_quota_at = now
-                if parse_reset(current) is not None or now - first_quota_at >= 1.2:
+                if probe.complete(current) or now - first_quota_at >= probe.settle:
                     return current
-            elif (GROK_READY_RE.search(current) or now - started_at >= 4.0) and (
-                last_request_at is None or now - last_request_at >= 2.0
+            elif (probe.ready.search(current) or now - started_at >= probe.ready_after) and (
+                last_request_at is None or now - last_request_at >= probe.retry_every
             ):
                 # /usage before session initialization reports "unavailable".
                 # Wait for the prompt, then retry only this local slash command.
-                terminal.write("/usage")
+                terminal.write(probe.command)
                 time.sleep(0.1)
                 terminal.write("\r")
                 last_request_at = time.monotonic()
             if not terminal.isalive():
-                raise RuntimeError("Grok 额度读取会话提前退出，请检查 CLI 登录状态")
+                raise RuntimeError(f"{probe.name} 额度读取会话提前退出，请检查 CLI 登录状态")
             time.sleep(0.1)
-        raise TimeoutError(f"Grok 会话在 {timeout:g} 秒内未返回 Weekly limit")
+        raise TimeoutError(f"{probe.name} 会话在 {timeout:g} 秒内未返回 {probe.missing}")
     finally:
         try:
+            terminal.write("\x1b")
             terminal.write("\x03")
             terminal.write("\x03")
         except Exception:
             pass
-        # grok.exe can start helpers (MCP servers, node). Collect them first:
+        # CLIs can start helpers (MCP servers, node). Collect them first:
         # once the parent is gone Windows no longer links them to it.
-        children = _child_processes(terminal.pid, executable)
+        children = _child_processes(terminal.pid, appname)
         try:
             if terminal.isalive():
                 os.kill(terminal.pid, signal.SIGTERM)
@@ -248,3 +291,158 @@ def run_agy_usage(executable: str, timeout: float = 10.0) -> dict[str, Any]:
     if payload.get("status") != "SUCCESS":
         raise RuntimeError(str(payload.get("response") or "agy /usage 未成功"))
     return parse_agy_usage_json(payload)
+
+
+# ----- Claude Code ---------------------------------------------------------------
+#
+# `/usage` in Claude Code (subscription plans) renders, per window:
+#
+#   Current session
+#   █████████▌                                   19% used
+#   Resets 5pm (Asia/Shanghai)
+#
+#   Current week (all models)
+#   ███▌                                         7% used
+#   Resets Oct 23, 3:30pm (Asia/Shanghai)
+#
+# plus model-specific weekly windows.  We read the session (5 h) window as the
+# primary and "week (all models)" as the secondary window.
+
+CLAUDE_SECTION_RE = re.compile(r"current\s+(session|week)\b[^\n]*", re.I)
+CLAUDE_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(used|left|remaining)", re.I)
+CLAUDE_RESET_RE = re.compile(r"resets?\s+(?:at\s+|on\s+)?([^\n]+)", re.I)
+CLAUDE_READY_RE = re.compile(r"for\s+shortcuts|/help\s+for\s+help|bypass\s+permissions|accept\s+edits", re.I)
+CLAUDE_TRUST_RE = re.compile(r"do\s+you\s+trust\s+the\s+files|trust\s+this\s+folder", re.I)
+CLAUDE_TIME_RE = re.compile(
+    r"^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s+)?"
+    r"(?:(?P<month>[a-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s*(?:at\s+)?)?"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?",
+    re.I,
+)
+MONTHS = {name: index for index, name in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
+
+
+def _zone(name: str | None):
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:  # tzdata missing or unknown name: fall back to local time
+        return None
+
+
+def parse_claude_reset(value: str, now: datetime | None = None) -> int | None:
+    """'5pm (Asia/Shanghai)', 'Oct 23, 3:30pm (UTC)', '15:00' -> epoch seconds."""
+    value = value.strip()
+    zone_match = re.search(r"\(([A-Za-z]+(?:/[A-Za-z0-9_+\-]+)*)\)", value)
+    zone = _zone(zone_match.group(1)) if zone_match else None
+    body = value[:zone_match.start()].strip() if zone_match else value
+    match = CLAUDE_TIME_RE.match(body)
+    if not match:
+        return None
+    hour, minute = int(match["hour"]), int(match["minute"] or 0)
+    ampm = (match["ampm"] or "").lower()
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    now = now or datetime.now(timezone.utc)
+    current = now.astimezone(zone) if zone else now.astimezone()
+    if match["month"]:
+        month = MONTHS.get(match["month"][:3].lower())
+        if not month:
+            return None
+        try:
+            moment = current.replace(month=month, day=int(match["day"]), hour=hour, minute=minute, second=0, microsecond=0)
+        except ValueError:
+            return None
+        if moment < current - timedelta(days=1):  # e.g. "Jan 2" seen on Dec 30
+            moment = moment.replace(year=moment.year + 1)
+    else:
+        moment = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if moment <= current - timedelta(minutes=1):
+            moment += timedelta(days=1)
+    return int(moment.timestamp())
+
+
+def _claude_sections(text: str) -> dict[str, str]:
+    clean = clean_terminal_text(text)
+    matches = list(CLAUDE_SECTION_RE.finditer(clean))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(clean)
+        heading = match.group(0).lower()
+        if match.group(1).lower() == "session":
+            name = "session"
+        elif "all models" in heading or "(" not in heading:
+            name = "week"
+        else:
+            name = "week:" + heading.split("(", 1)[1].split(")", 1)[0].strip()
+        # The TUI redraws; the latest rendering of a section wins.
+        sections[name] = clean[match.end():end]
+    return sections
+
+
+def _claude_window(body: str) -> tuple[float | None, int | None]:
+    percent = CLAUDE_PERCENT_RE.search(body)
+    used = None
+    if percent:
+        value = max(0.0, min(100.0, float(percent.group(1))))
+        used = value if percent.group(2).lower() == "used" else 100.0 - value
+    reset = CLAUDE_RESET_RE.search(body)
+    return used, (parse_claude_reset(reset.group(1)) if reset else None)
+
+
+def claude_usage_complete(text: str) -> bool:
+    sections = _claude_sections(text)
+    return all(name in sections and _claude_window(sections[name])[0] is not None for name in ("session", "week"))
+
+
+def parse_claude_usage(text: str) -> dict[str, Any]:
+    sections = _claude_sections(text)
+    session_used, session_reset = _claude_window(sections.get("session", ""))
+    week_used, week_reset = _claude_window(sections.get("week", ""))
+    if session_used is None and week_used is None:
+        raise ValueError("Claude /usage 未找到订阅额度（API Key 计费账号没有 5 小时/每周额度）")
+    result: dict[str, Any] = {
+        "used_percent": session_used,
+        "remaining_percent": None if session_used is None else 100.0 - session_used,
+        "resets_at": session_reset,
+        "window_minutes": 300,
+    }
+    if week_used is not None:
+        result.update({
+            "secondary_used_percent": week_used,
+            "secondary_remaining_percent": 100.0 - week_used,
+            "secondary_resets_at": week_reset,
+            "secondary_window_minutes": 10080,
+        })
+    return result
+
+
+def _claude_probe_dir() -> str:
+    """An empty, app-owned folder: trusting it grants Claude Code nothing."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, "CodexQuotaTray", "claude-probe")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+CLAUDE_PROBE = UsageProbe(
+    name="Claude Code",
+    ready=CLAUDE_READY_RE,
+    found=CLAUDE_PERCENT_RE,
+    complete=claude_usage_complete,
+    missing="订阅额度（Current session / Current week）",
+    ready_after=6.0,
+    retry_every=4.0,
+    settle=2.0,
+    answers=((CLAUDE_TRUST_RE, "\r"),),
+    cwd=_claude_probe_dir,
+)
+# No MCP servers, no IDE hookup: the session only needs to render /usage.
+CLAUDE_ARGS = ["--strict-mcp-config"]

@@ -20,12 +20,16 @@ from typing import Any
 
 import psutil
 
+import providers
+
 
 PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray/performance.json"
 RECENT_SECONDS = 86400          # Only files touched within a day can matter.
 FORGET_SECONDS = 2 * 86400      # Readers idle this long are released.
 SLOW_DISCOVERY_SECONDS = 30     # Process list and full-history globbing.
-PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "other": "其他模型"}
+PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "other": "其他模型"}
+CLAUDE_IDLE_FLUSH = 30          # Emit an unfinished Claude message after this much silence.
+CLAUDE_STALE_ACTIVITY = 90      # Drop "generating" when a session went quiet this long.
 
 
 def number(value: Any, default: float | None = None) -> float | None:
@@ -52,6 +56,8 @@ def timestamp(value: Any) -> float | None:
 
 def provider_for(model: str) -> str:
     model = model.lower()
+    if "claude" in model or "anthropic" in model:
+        return "claude"
     if "gemini" in model:
         return "gemini"
     if "grok" in model:
@@ -196,6 +202,8 @@ class TpsMonitor:
         self.home = home or Path.home()
         self.codex_root = self.home / ".codex" if home else Path(os.environ.get("CODEX_HOME", self.home / ".codex"))
         self.grok_root = self.home / ".grok" if home else Path(os.environ.get("GROK_HOME", self.home / ".grok"))
+        self.claude_root = self.home / ".claude" if home else providers.claude_home()
+        self.claude_pending: dict[str, dict[str, Any]] = {}
         self.antigravity_bridge = (self.home / "AppData/Local/Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/codex-grok-bridge/app/src/antigravity.mjs").is_file()
         self.readers: dict[Path, JsonlReader] = {}
         self.context: dict[str, dict[str, Any]] = {}
@@ -286,6 +294,7 @@ class TpsMonitor:
             if path.with_name("events.jsonl").is_file():
                 self._register(path.with_name("events.jsonl"), path.parent.name, "Grok CLI", "grok")
         self.health["Grok CLI"] = {"status": "已接入" if grok_paths else "未发现记录", "sessions": len(grok_paths)}
+        self._discover_claude(now)
         if now - self.last_slow_discovery >= SLOW_DISCOVERY_SECONDS:
             # Walking every process (and node command lines) every 2 s was the
             # single most expensive thing this app did while idle.
@@ -293,6 +302,84 @@ class TpsMonitor:
             self._forget_idle(now)
             self.last_slow_discovery = now
         self.last_discovery = now
+
+    def _discover_claude(self, now: float):
+        """Claude Code transcripts: ~/.claude/projects/<project>/<session>.jsonl
+        (+ <session>/subagents/*.jsonl).  A project folder's mtime changes when
+        a session file is created, so quiet folders are only rescanned slowly."""
+        projects = self.claude_root / "projects"
+        if not projects.is_dir():
+            return
+        slow = now - self.last_slow_discovery >= SLOW_DISCOVERY_SECONDS
+        count = 0
+        try:
+            folders = [folder for folder in projects.iterdir() if folder.is_dir()]
+        except OSError:
+            self.health["Claude Code"] = {"status": "读取失败"}
+            return
+        for folder in folders:
+            if not (slow or self._recent(folder, now)):
+                continue
+            paths = [(path, path.stem) for path in folder.glob("*.jsonl")]
+            paths += [(path, path.parent.parent.name) for path in folder.glob("*/subagents/*.jsonl")]
+            for path, session in paths:
+                if path in self.readers or self._recent(path, now):
+                    self._register(path, session, "Claude Code", "", "claude")
+                    count += 1
+        known = sum(1 for path in self.readers if self.context.get(self.file_sessions.get(path, ""), {}).get("source") == "Claude Code")
+        self.health["Claude Code"] = {"status": "已接入" if known or count else "未发现记录", "sessions": max(known, count)}
+
+    def _claude_record(self, record: dict, session: str, now: float):
+        """Numbers only: message id, model, output token count, timestamps."""
+        moment = timestamp(record.get("timestamp"))
+        if moment is None:
+            return
+        kind = record.get("type")
+        if kind not in ("assistant", "user"):
+            return
+        # Any later record means earlier messages of this session are final.
+        message = record.get("message") or {}
+        current = message.get("id") if kind == "assistant" else None
+        for mid, pending in list(self.claude_pending.items()):
+            if pending["session"] == session and mid != current:
+                self._claude_emit(mid, now)
+        if kind == "user":
+            if moment > now - 120:
+                self.activity[session] = ("claude", moment, "请求中")
+            return
+        model = message.get("model") or ""
+        output = number((message.get("usage") or {}).get("output_tokens"))
+        if output is None or not current or model == "<synthetic>":
+            return
+        pending = self.claude_pending.setdefault(current, {
+            "session": session, "model": model, "last": moment, "output": 0, "stop": None, "seen_at": now,
+        })
+        # Content blocks of one message are written as separate lines; the
+        # usage on the last one is final, so keep the largest count seen.
+        pending["last"] = max(pending["last"], moment)
+        pending["output"] = max(pending["output"], int(output))
+        pending["stop"] = message.get("stop_reason") or pending["stop"]
+        pending["seen_at"] = now
+        if moment > now - 120:
+            self.activity[session] = ("claude", moment, "生成中")
+
+    def _claude_emit(self, mid: str, now: float):
+        pending = self.claude_pending.pop(mid, None)
+        if not pending or pending["output"] <= 0:
+            return
+        self.add(Observation(key("claude", mid), "Claude Code", pending["session"], "claude", pending["model"],
+                             pending["last"], pending["output"], None, "读取Claude Code真实输出计数；不推算TPS"), now)
+        if pending["stop"] == "end_turn" and pending["last"] > now - 3:
+            self.activity[pending["session"]] = ("claude", pending["last"], "刚完成生成")
+
+    def _claude_flush(self, now: float):
+        for mid, pending in list(self.claude_pending.items()):
+            if pending["stop"] == "end_turn" or now - pending["seen_at"] >= CLAUDE_IDLE_FLUSH:
+                self._claude_emit(mid, now)
+        waiting = {pending["session"] for pending in self.claude_pending.values()}
+        for session, (provider, moment, state) in list(self.activity.items()):
+            if provider == "claude" and state != "刚完成生成" and session not in waiting and now - moment > CLAUDE_STALE_ACTIVITY:
+                self.activity.pop(session, None)
 
     def _codex_logs(self, now: float):
         path = self.codex_root / "logs_2.sqlite"
@@ -560,7 +647,11 @@ class TpsMonitor:
         for path, reader in list(self.readers.items()):
             session = self.file_sessions[path]
             try:
-                if self.context.get(session, {}).get("source") == "Grok CLI":
+                source = self.context.get(session, {}).get("source")
+                if source == "Claude Code":
+                    for record in reader.read():
+                        self._claude_record(record, session, now)
+                elif source == "Grok CLI":
                     session = path.parent.name
                     for record in reader.read():
                         if path.name == "updates.jsonl":
@@ -578,6 +669,7 @@ class TpsMonitor:
                         self._codex_record(record, session, now)
             except (OSError, ValueError, TypeError):
                 self.health[self.context.get(session or "", {}).get("source", "记录读取")] = {"status": "部分记录不可读取"}
+        self._claude_flush(now)
         try:
             self._antigravity(now)
         except (OSError, sqlite3.Error):
@@ -633,7 +725,7 @@ def running_software() -> list[dict[str, Any]]:
                         break
             except (psutil.Error, OSError):
                 pass
-    supported = {"ChatGPT / Codex 桌面", "Codex 引擎", "Grok CLI", "Antigravity CLI", "Antigravity 桌面"}
+    supported = {"ChatGPT / Codex 桌面", "Codex 引擎", "Grok CLI", "Antigravity CLI", "Antigravity 桌面", "Claude Code"}
     return [{"name": name, "processes": count, "status": "读取本地记录" if name in supported else "暂无可核验的本地TPS信号"} for name, count in sorted(counts.items())]
 
 

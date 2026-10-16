@@ -12,7 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from cli_usage import parse_grok_usage, run_agy_usage, run_temporary_usage
+import providers
+from cli_usage import CLAUDE_ARGS, CLAUDE_PROBE, parse_claude_usage, parse_grok_usage, run_agy_usage, run_temporary_usage
 
 
 CACHE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray" / "state.json"
@@ -45,7 +46,7 @@ class QuotaSnapshot:
         return min(values) if values else None
 
 
-LABELS = {"codex": ("Codex", None), "grok": ("Grok", 10080), "gemini": ("Gemini（5 小时）", 300)}
+LABELS = {spec.key: (spec.label, spec.window_minutes) for spec in providers.SPECS}
 SECONDARY_FIELDS = ("secondary_window_minutes", "secondary_used_percent", "secondary_remaining_percent", "secondary_resets_at")
 
 
@@ -216,9 +217,24 @@ def get_gemini_quota() -> QuotaSnapshot:
         return _unknown("gemini", "Gemini（5 小时）", 300, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
 
 
+def get_claude_quota() -> QuotaSnapshot:
+    executable = providers.find_claude()
+    if executable is None:
+        return _unknown("claude", "Claude", 300, "未找到 Claude Code（claude.exe / claude.cmd），可设置 CODEX_QUOTA_CLAUDE_EXE")
+    try:
+        text = run_temporary_usage(str(executable), CLAUDE_ARGS, timeout=30.0, probe=CLAUDE_PROBE)
+        parsed = parse_claude_usage(text)
+        return QuotaSnapshot("claude", "Claude", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
+                             parsed["resets_at"], time.time(), False, None,
+                             parsed.get("secondary_window_minutes"), parsed.get("secondary_used_percent"),
+                             parsed.get("secondary_remaining_percent"), parsed.get("secondary_resets_at"))
+    except Exception as exc:
+        return _unknown("claude", "Claude", 300, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
+
+
 def _reader(provider: str):
     # Resolved at call time so tests and callers can patch the module attribute.
-    return {"codex": get_codex_quota, "grok": get_grok_quota, "gemini": get_gemini_quota}[provider]
+    return {"codex": get_codex_quota, "grok": get_grok_quota, "gemini": get_gemini_quota, "claude": get_claude_quota}[provider]
 
 
 def keep_last_good(snapshot: QuotaSnapshot, old: QuotaSnapshot | None) -> QuotaSnapshot:
@@ -254,7 +270,7 @@ def collect(providers, previous: dict[str, QuotaSnapshot] | None = None) -> dict
 
 
 def collect_all(previous: dict[str, QuotaSnapshot] | None = None) -> dict[str, QuotaSnapshot]:
-    return collect(("codex", "grok", "gemini"), previous)
+    return collect(providers.enabled_keys(), previous)
 
 
 def dump_snapshot(snapshots: dict[str, QuotaSnapshot]) -> str:

@@ -3,3 +3,4 @@ pystray>=0.19.5
 pywinpty>=3.0.5
 pyinstaller>=6.20
 psutil>=7.0
+tzdata>=2024.1

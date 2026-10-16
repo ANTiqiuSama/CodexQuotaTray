@@ -7,7 +7,7 @@ Triggers, per provider:
 * the reset time of any window passes          -> a few seconds after it
 * read failed                                  -> 30 s, 1, 2, 5 min backoff
 * otherwise idle                               -> IDLE seconds (long)
-Grok's reader launches a whole CLI session, so its intervals are wider.
+Grok's and Claude's readers launch a whole CLI session, so their intervals are wider.
 """
 from __future__ import annotations
 
@@ -15,9 +15,12 @@ import math
 import threading
 from typing import Any, Iterable
 
-IDLE = {"codex": 15 * 60, "gemini": 15 * 60, "grok": 30 * 60}
-ACTIVE = {"codex": 3 * 60, "gemini": 3 * 60, "grok": 10 * 60}
-SETTLE = {"codex": 8, "gemini": 8, "grok": 20}
+from providers import SPECS
+
+# Per-provider intervals come from the registry (providers.py).
+IDLE = {spec.key: spec.idle_seconds for spec in SPECS}
+ACTIVE = {spec.key: spec.active_seconds for spec in SPECS}
+SETTLE = {spec.key: spec.settle_seconds for spec in SPECS}
 RETRY = (30, 60, 120, 300)
 RESET_DELAY = 5
 MAX_SLEEP = 30.0
