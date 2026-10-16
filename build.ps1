@@ -1,0 +1,20 @@
+﻿param([string]$DistPath = (Split-Path -Parent $PSScriptRoot))
+
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $root
+
+python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py
+if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
+python -m PyInstaller --noconfirm --onefile --windowed `
+  --collect-binaries winpty --collect-data winpty `
+  --runtime-tmpdir (Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime-temp') --name CodexQuotaTray `
+  --distpath $DistPath `
+  --workpath work/pyinstaller `
+  --specpath work `
+  tray_app.py
+if ($LASTEXITCODE -ne 0) { throw "Packaging failed" }
+
+$exe = Join-Path (Resolve-Path -LiteralPath $DistPath).Path "CodexQuotaTray.exe"
+if (-not (Test-Path -LiteralPath $exe)) { throw "EXE was not produced" }
+Get-Item -LiteralPath $exe | Select-Object FullName, Length, LastWriteTime

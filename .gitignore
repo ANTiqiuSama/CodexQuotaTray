@@ -1,0 +1,30 @@
+# Local environments and Python caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated packages, temporary work, and runtime data
+work/
+outputs/
+build/
+dist/
+runtime-temp/
+data/
+*.exe
+*.spec
+state.json
+performance.json
+diagnostics.txt
+
+# Local credentials and desktop metadata
+.env
+.env.*
+!.env.example
+auth.json
+Thumbs.db
+Desktop.ini
