@@ -246,6 +246,44 @@ class TpsTests(unittest.TestCase):
         path.write_bytes(b'{"new":2}\n')
         self.assertEqual(list(reader.read()), [{"new": 2}])
 
+    def test_grok_usage_json_is_parsed_only_after_it_changes(self):
+        folder = self.home / "grok/u"
+        folder.mkdir(parents=True)
+        path = folder / "updates.jsonl"
+        path.write_text("", encoding="utf-8")
+        usage = folder / "usage.json"
+        usage.write_text("{}")
+        self.assertTrue(self.monitor._usage_changed(path))
+        self.assertFalse(self.monitor._usage_changed(path))
+        usage.write_text('{"session": {}}')
+        self.assertTrue(self.monitor._usage_changed(path))
+
+    def test_old_histories_are_not_registered_and_idle_readers_are_released(self):
+        import os
+        old = self.home / "old.jsonl"
+        old.write_text("{}\n")
+        os.utime(old, (self.now - 3 * 86400, self.now - 3 * 86400))
+        self.assertFalse(self.monitor._recent(old, self.now))
+        fresh = self.home / "fresh.jsonl"
+        fresh.write_text("{}\n")
+        self.assertTrue(self.monitor._recent(fresh, self.now))
+        self.monitor._register(old, "old", "Codex")
+        self.monitor._register(fresh, "fresh", "Codex")
+        self.monitor.client_stream_starts["gone"] = [self.now - 3600]
+        self.monitor._forget_idle(self.now)
+        self.assertNotIn(old, self.monitor.readers)
+        self.assertIn(fresh, self.monitor.readers)
+        self.assertNotIn("gone", self.monitor.client_stream_starts)
+        self.assertNotIn("old", self.monitor.context)
+        self.assertIn("fresh", self.monitor.context)
+
+    def test_process_scan_is_throttled(self):
+        with patch("tps_sources.running_software", return_value=[]) as scan:
+            self.monitor.discover(self.now)
+            self.monitor.discover(self.now + 2)
+            self.monitor.discover(self.now + 31)
+        self.assertEqual(scan.call_count, 2)
+
     def test_snapshot_does_not_persist_private_message_or_request_id(self):
         value = self.event(response="private-response-id")
         value["payload"]["response"] = "PRIVATE_PROMPT_CANARY"

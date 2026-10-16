@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,9 +29,29 @@ class QuotaSnapshot:
     updated_at: float | None
     stale: bool
     error: str | None
+    # Optional second window (Codex reports a weekly limit next to the 5 h one).
+    secondary_window_minutes: int | None = None
+    secondary_used_percent: float | None = None
+    secondary_remaining_percent: float | None = None
+    secondary_resets_at: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def display_remaining(self) -> float | None:
+        """The binding window: whichever has less quota left."""
+        values = [v for v in (self.remaining_percent, self.secondary_remaining_percent) if v is not None]
+        return min(values) if values else None
+
+
+LABELS = {"codex": ("Codex", None), "grok": ("Grok", 10080), "gemini": ("Gemini（5 小时）", 300)}
+SECONDARY_FIELDS = ("secondary_window_minutes", "secondary_used_percent", "secondary_remaining_percent", "secondary_resets_at")
+
+
+def placeholder(provider: str, error: str = "正在读取…") -> QuotaSnapshot:
+    label, window = LABELS[provider]
+    return _unknown(provider, label, window, error)
 
 
 def _unknown(provider: str, label: str, window_minutes: int | None, error: str) -> QuotaSnapshot:
@@ -121,6 +142,36 @@ class _JsonRpcProcess:
                 self.process.kill()
 
 
+def _percent(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    return max(0.0, min(100.0, float(value)))
+
+
+def parse_codex_rate_limits(bucket: dict[str, Any]) -> QuotaSnapshot:
+    window = bucket.get("primary") or {}
+    used_value = _percent(window.get("usedPercent"))
+    if used_value is None:
+        raise ValueError("Codex 额度响应缺少 usedPercent")
+    secondary = bucket.get("secondary") or {}
+    secondary_used = _percent(secondary.get("usedPercent")) if isinstance(secondary, dict) else None
+    return QuotaSnapshot(
+        provider="codex",
+        label="Codex",
+        window_minutes=window.get("windowDurationMins"),
+        used_percent=used_value,
+        remaining_percent=100.0 - used_value,
+        resets_at=window.get("resetsAt"),
+        updated_at=time.time(),
+        stale=False,
+        error=None,
+        secondary_window_minutes=secondary.get("windowDurationMins") if secondary_used is not None else None,
+        secondary_used_percent=secondary_used,
+        secondary_remaining_percent=None if secondary_used is None else 100.0 - secondary_used,
+        secondary_resets_at=secondary.get("resetsAt") if secondary_used is not None else None,
+    )
+
+
 def get_codex_quota() -> QuotaSnapshot:
     executable = _codex_executable()
     if not executable:
@@ -138,22 +189,7 @@ def get_codex_quota() -> QuotaSnapshot:
         result = rpc.request("account/rateLimits/read", None)
         buckets = result.get("rateLimitsByLimitId") or {"codex": result.get("rateLimits", {})}
         bucket = buckets.get("codex") or result.get("rateLimits") or {}
-        window = bucket.get("primary") or {}
-        used = window.get("usedPercent")
-        if used is None:
-            raise ValueError("Codex 额度响应缺少 usedPercent")
-        used_value = max(0.0, min(100.0, float(used)))
-        return QuotaSnapshot(
-            provider="codex",
-            label="Codex",
-            window_minutes=window.get("windowDurationMins"),
-            used_percent=used_value,
-            remaining_percent=max(0.0, min(100.0, 100.0 - used_value)),
-            resets_at=window.get("resetsAt"),
-            updated_at=time.time(),
-            stale=False,
-            error=None,
-        )
+        return parse_codex_rate_limits(bucket)
     except Exception as exc:
         return _unknown("codex", "Codex", None, f"读取失败：{type(exc).__name__}: {exc}")
     finally:
@@ -180,23 +216,45 @@ def get_gemini_quota() -> QuotaSnapshot:
         return _unknown("gemini", "Gemini（5 小时）", 300, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
 
 
-def collect_all(previous: dict[str, QuotaSnapshot] | None = None) -> dict[str, QuotaSnapshot]:
+def _reader(provider: str):
+    # Resolved at call time so tests and callers can patch the module attribute.
+    return {"codex": get_codex_quota, "grok": get_grok_quota, "gemini": get_gemini_quota}[provider]
+
+
+def keep_last_good(snapshot: QuotaSnapshot, old: QuotaSnapshot | None) -> QuotaSnapshot:
+    """A failed read keeps the last valid numbers and marks them stale."""
+    if snapshot.error and old and old.used_percent is not None:
+        snapshot.used_percent = old.used_percent
+        snapshot.remaining_percent = old.remaining_percent
+        snapshot.resets_at = old.resets_at
+        snapshot.window_minutes = old.window_minutes or snapshot.window_minutes
+        snapshot.updated_at = old.updated_at
+        for name in SECONDARY_FIELDS:
+            setattr(snapshot, name, getattr(old, name))
+        snapshot.stale = True
+    return snapshot
+
+
+def collect(providers, previous: dict[str, QuotaSnapshot] | None = None) -> dict[str, QuotaSnapshot]:
+    """Read the given providers in parallel; total time is the slowest one."""
     previous = previous or {}
-    snapshots = {
-        "codex": get_codex_quota(),
-        "grok": get_grok_quota(),
-        "gemini": get_gemini_quota(),
-    }
-    for provider, snapshot in snapshots.items():
-        old = previous.get(provider)
-        if snapshot.error and old and old.used_percent is not None:
-            snapshot.used_percent = old.used_percent
-            snapshot.remaining_percent = old.remaining_percent
-            snapshot.resets_at = old.resets_at
-            snapshot.window_minutes = old.window_minutes or snapshot.window_minutes
-            snapshot.updated_at = old.updated_at
-            snapshot.stale = True
-    return snapshots
+    providers = list(providers)
+    if not providers:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(providers), thread_name_prefix="quota") as pool:
+        futures = {provider: pool.submit(_reader(provider)) for provider in providers}
+    results = {}
+    for provider, future in futures.items():
+        try:
+            snapshot = future.result()
+        except Exception as exc:  # Readers already catch; this is a last resort.
+            snapshot = placeholder(provider, f"读取失败：{type(exc).__name__}: {exc}")
+        results[provider] = keep_last_good(snapshot, previous.get(provider))
+    return results
+
+
+def collect_all(previous: dict[str, QuotaSnapshot] | None = None) -> dict[str, QuotaSnapshot]:
+    return collect(("codex", "grok", "gemini"), previous)
 
 
 def dump_snapshot(snapshots: dict[str, QuotaSnapshot]) -> str:
@@ -222,6 +280,7 @@ def load_cached_snapshots() -> dict[str, QuotaSnapshot]:
                 updated_at=item.get("updated_at"),
                 stale=True,
                 error=None,
+                **{name: item.get(name) for name in SECONDARY_FIELDS},
             )
             result[snapshot.provider] = snapshot
         return result

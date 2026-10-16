@@ -1,0 +1,222 @@
+"""Platform-neutral tests: forecast, refresh scheduling, detail card, quota parsing."""
+import math
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+import quota_sources
+from detail_card import CardModel, render_card, text_card
+from forecast import QuotaHistory, Sample, current_window, duration_text, forecast
+from refresh_scheduler import ACTIVE, IDLE, RETRY, SETTLE, RefreshScheduler
+
+HOUR = 3600
+
+
+class ForecastTests(unittest.TestCase):
+    def series(self, now, used_values, step=600, resets_at=None):
+        start = now - step * (len(used_values) - 1)
+        return [Sample(start + i * step, used, resets_at) for i, used in enumerate(used_values)]
+
+    def test_steady_burn_predicts_exhaustion_before_reset(self):
+        now = 1_000_000.0
+        reset = int(now + 10 * HOUR)
+        samples = self.series(now, [40, 45, 50, 55, 60], resets_at=reset)  # 30 %/h
+        result = forecast(samples, now, 40, reset)
+        self.assertAlmostEqual(result.rate_per_hour, 30, places=3)
+        self.assertTrue(result.before_reset)
+        self.assertAlmostEqual(result.exhausts_at - now, 80 * 60, delta=1)
+        self.assertEqual(result.tone, "warn")
+        self.assertIn("早于重置", result.text)
+
+    def test_slow_burn_is_enough_until_reset(self):
+        now = 1_000_000.0
+        reset = int(now + 2 * HOUR)
+        samples = self.series(now, [10, 11, 12], resets_at=reset)  # 6 %/h
+        result = forecast(samples, now, 88, reset)
+        self.assertFalse(result.before_reset)
+        self.assertEqual(result.tone, "ok")
+        self.assertIn("够用", result.text)
+
+    def test_reset_inside_series_is_not_negative_usage(self):
+        now = 1_000_000.0
+        samples = self.series(now, [90, 95, 2, 6, 10])
+        self.assertEqual([s.used for s in current_window(samples, None)], [2, 6, 10])
+        self.assertGreater(forecast(samples, now, 90, None).rate_per_hour, 0)
+
+    def test_other_reset_windows_are_ignored(self):
+        now = 1_000_000.0
+        old = self.series(now - 6 * HOUR, [10, 50, 90], resets_at=int(now - HOUR))
+        new = self.series(now, [5, 5, 5], resets_at=int(now + 4 * HOUR))
+        result = forecast(old + new, now, 95, int(now + 4 * HOUR))
+        self.assertEqual(result.tone, "idle")
+
+    def test_too_little_history_says_so(self):
+        now = 1_000_000.0
+        self.assertEqual(forecast([Sample(now - 60, 10, None), Sample(now, 12, None)], now, 88, None).tone, "unknown")
+        self.assertEqual(forecast([], now, None, None).tone, "unknown")
+        self.assertEqual(forecast([], now, 0, int(now + 60)).tone, "danger")
+
+    def test_duration_text_uses_days_for_weekly_windows(self):
+        self.assertEqual(duration_text(2 * 86400 + 5 * 3600), "2 天 5 小时")
+        self.assertEqual(duration_text(3 * 3600 + 120), "3 小时 2 分")
+        self.assertEqual(duration_text(20), "1 分钟")
+
+    def test_history_records_fresh_reads_only_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "history.json"
+            history = QuotaHistory(path)
+            fresh = quota_sources.QuotaSnapshot("codex", "Codex", 300, 20, 80, 2_000_000, 1_000_000, False, None,
+                                                10080, 30, 70, 2_500_000)
+            stale = quota_sources.QuotaSnapshot("codex", "Codex", 300, 25, 75, 2_000_000, 1_000_100, True, "x")
+            self.assertTrue(history.record(fresh))
+            self.assertFalse(history.record(fresh))  # Same reading.
+            self.assertFalse(history.record(stale))
+            history.save()
+            loaded = QuotaHistory(path)
+            self.assertEqual(loaded.samples("codex"), [Sample(1_000_000, 20, 2_000_000)])
+            self.assertEqual(loaded.samples("codex:secondary"), [Sample(1_000_000, 30, 2_500_000)])
+
+
+class SchedulerTests(unittest.TestCase):
+    def snapshot(self, error=None, resets_at=None, secondary=None):
+        return SimpleNamespace(error=error, resets_at=resets_at, secondary_resets_at=secondary)
+
+    def test_startup_reads_everything_once(self):
+        scheduler = RefreshScheduler(("codex", "grok"), 100)
+        self.assertEqual(scheduler.take_due(100), ["codex", "grok"])
+        self.assertEqual(scheduler.take_due(100), [])  # Already running.
+
+    def test_idle_providers_wait_long_and_grok_longest(self):
+        scheduler = RefreshScheduler(("codex", "grok"), 0)
+        scheduler.take_due(0)
+        scheduler.completed("codex", self.snapshot(), 0)
+        scheduler.completed("grok", self.snapshot(), 0)
+        self.assertEqual(scheduler.due["codex"], IDLE["codex"])
+        self.assertEqual(scheduler.due["grok"], IDLE["grok"])
+        self.assertGreater(IDLE["grok"], IDLE["codex"])
+
+    def test_finished_generation_refreshes_after_settle_delay(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        scheduler.take_due(0)
+        scheduler.completed("codex", self.snapshot(), 0)
+        scheduler.activity("codex", True, False, 10)
+        self.assertGreaterEqual(scheduler.due["codex"], ACTIVE["codex"])  # No refresh storm on start.
+        self.assertTrue(scheduler.activity("codex", False, False, 100))
+        self.assertEqual(scheduler.due["codex"], 100 + SETTLE["codex"])
+
+    def test_continuous_use_refreshes_at_active_interval(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        scheduler.take_due(0)
+        scheduler.completed("codex", self.snapshot(), 800)
+        scheduler.activity("codex", True, False, 1000)
+        self.assertEqual(scheduler.due["codex"], 1060)  # One minute into use, not instantly.
+        scheduler.take_due(1060)
+        scheduler.completed("codex", self.snapshot(), 1060)
+        self.assertEqual(scheduler.due["codex"], 1060 + ACTIVE["codex"])
+
+    def test_reset_time_pulls_refresh_forward(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        scheduler.take_due(0)
+        scheduler.completed("codex", self.snapshot(resets_at=120, secondary=90), 0)
+        self.assertEqual(scheduler.due["codex"], 95)
+        self.assertIn("额度重置", scheduler.describe("codex", 0))
+
+    def test_failures_back_off(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        delays = []
+        now = 0
+        for _ in range(6):
+            scheduler.take_due(now)
+            scheduler.completed("codex", self.snapshot(error="x"), now)
+            delays.append(scheduler.due["codex"] - now)
+            now = scheduler.due["codex"]
+        self.assertEqual(delays[:4], list(RETRY))
+        self.assertEqual(delays[-1], RETRY[-1])
+
+    def test_manual_and_wake_requests_are_immediate_and_sleep_is_bounded(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        scheduler.take_due(0)
+        scheduler.completed("codex", self.snapshot(), 0)
+        self.assertLessEqual(scheduler.next_wake(0), 30)
+        scheduler.request(None, 50)
+        self.assertEqual(scheduler.take_due(50), ["codex"])
+        self.assertEqual(scheduler.due["codex"], math.inf)
+
+
+class QuotaParsingTests(unittest.TestCase):
+    def test_codex_secondary_window_is_read_and_binding(self):
+        snapshot = quota_sources.parse_codex_rate_limits({
+            "primary": {"usedPercent": 13, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+            "secondary": {"usedPercent": 71, "windowDurationMins": 10080, "resetsAt": 1_800_400_000},
+        })
+        self.assertEqual(snapshot.remaining_percent, 87)
+        self.assertEqual(snapshot.secondary_remaining_percent, 29)
+        self.assertEqual(snapshot.secondary_window_minutes, 10080)
+        self.assertEqual(snapshot.display_remaining, 29)
+
+    def test_codex_without_secondary_still_works(self):
+        snapshot = quota_sources.parse_codex_rate_limits({"primary": {"usedPercent": 40}})
+        self.assertIsNone(snapshot.secondary_remaining_percent)
+        self.assertEqual(snapshot.display_remaining, 60)
+
+    def test_collect_runs_providers_in_parallel_and_keeps_last_good(self):
+        def slow(name, error=None):
+            def read():
+                time.sleep(0.3)
+                return quota_sources._unknown(name, name, 300, error) if error else quota_sources.QuotaSnapshot(
+                    name, name, 300, 10, 90, None, time.time(), False, None)
+            return read
+        old = quota_sources.QuotaSnapshot("grok", "Grok", 10080, 30, 70, None, 1.0, False, None)
+        originals = quota_sources.get_codex_quota, quota_sources.get_grok_quota, quota_sources.get_gemini_quota
+        quota_sources.get_codex_quota = slow("codex")
+        quota_sources.get_grok_quota = slow("grok", "boom")
+        quota_sources.get_gemini_quota = slow("gemini")
+        try:
+            started = time.monotonic()
+            result = quota_sources.collect_all({"grok": old})
+            elapsed = time.monotonic() - started
+        finally:
+            quota_sources.get_codex_quota, quota_sources.get_grok_quota, quota_sources.get_gemini_quota = originals
+        self.assertLess(elapsed, 0.8)
+        self.assertEqual(result["grok"].remaining_percent, 70)
+        self.assertTrue(result["grok"].stale)
+        self.assertEqual(result["codex"].remaining_percent, 90)
+
+
+class CardTests(unittest.TestCase):
+    def model(self, **changes):
+        base = dict(letter="C", title="GPT / Codex", status="生成中 · 58 tok/s", status_tone="live",
+                    remaining=64, used=36, window="每周", bars=(("5 小时窗口", 87.0), ("每周窗口", 64.0)),
+                    forecast_text="按当前速度约 2 小时后用完，早于重置 1 天", forecast_tone="warn",
+                    metrics=(("生成 TPS", "58.5 tok/s"), ("60 秒输出", "12.0 tok/s")),
+                    footer=("重置 10-16 18:00 · 2 小时后",), notes=("来源：客户端流式统计",), error=None, text="plain")
+        base.update(changes)
+        return CardModel(**base)
+
+    def test_card_renders_at_any_dpi_with_shadow_margin(self):
+        small, large = render_card(self.model(), 1.0), render_card(self.model(), 2.0)
+        self.assertEqual(small.mode, "RGBA")
+        self.assertAlmostEqual(large.width / small.width, 2.0, delta=0.02)
+        self.assertEqual(small.getpixel((0, 0))[3], 0)  # Transparent corner.
+        self.assertGreater(small.getpixel((small.width // 2, small.height // 2))[3], 200)
+
+    def test_card_grows_with_content_and_long_text_wraps(self):
+        short = render_card(self.model(error=None), 1.0)
+        long = render_card(self.model(error="读取失败：" + "很长的错误信息" * 12), 1.0)
+        self.assertEqual(short.width, long.width)
+        self.assertGreater(long.height, short.height + 30)
+
+    def test_unknown_and_text_cards_render(self):
+        render_card(self.model(remaining=None, used=None, bars=(("5 小时窗口", None),)), 1.25)
+        card = text_card("Title\nline")
+        self.assertEqual(card.as_text(), "Title\nline")
+        render_card(card, 1.0)
+
+    def test_equality_ignores_fallback_text(self):
+        self.assertEqual(self.model(text="a"), self.model(text="b"))
+
+
+if __name__ == "__main__":
+    unittest.main()

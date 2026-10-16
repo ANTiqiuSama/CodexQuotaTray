@@ -6,8 +6,11 @@ from unittest.mock import Mock, call, patch
 import pystray
 from PIL import Image
 
-from tray_app import PROVIDERS, QuotaTray
-from hover_details import HoverDetails, HoverIcon, TrackingTooltip, is_window_covered, tooltip_position, wintypes
+import tray_app
+from tray_app import PROVIDERS, QuotaTray, reset_countdown, startup_command
+from detail_card import CardModel
+from hover_details import DetailCardWindow, HoverDetails, HoverIcon, TrackingTooltip, is_window_covered, tooltip_position, wintypes
+from refresh_scheduler import RefreshScheduler
 from quota_sources import QuotaSnapshot
 
 
@@ -215,6 +218,65 @@ class HoverTests(unittest.TestCase):
                          "来源：", "重置时间：", "距离重置：", "更新时间："):
             self.assertIn(expected, text)
         self.assertGreater(len(text), 127)
+
+
+class FeatureIntegrationTests(unittest.TestCase):
+    def tray(self):
+        tray = QuotaTray.__new__(QuotaTray)
+        tray.snapshots = {"codex": QuotaSnapshot("codex", "Codex", 300, 13, 87, 1800000000, 1792132045,
+            False, None, 10080, 71, 29, 1800400000)}
+        tray.performance = {"providers": {"codex": {"label": "GPT / Codex", "active_sessions": 1,
+            "generation_tps": 58.5, "display_tps": 58.5, "output_tps_60": 12.0, "output_tokens_60": 720,
+            "last_sample_at": 1792132045, "basis": ["客户端流式统计"]}}}
+        return tray
+
+    def test_card_shows_binding_window_and_both_bars(self):
+        card = self.tray().hover_card("codex")
+        self.assertIsInstance(card, CardModel)
+        self.assertEqual(card.remaining, 29)
+        self.assertEqual(card.window, "每周")
+        self.assertEqual([label for label, _ in card.bars], ["5 小时窗口", "每周窗口"])
+        self.assertEqual(card.status_tone, "live")
+        self.assertIn("剩余 87%", card.as_text())
+
+    def test_weekly_countdown_uses_days(self):
+        with patch("tray_app.time.time", return_value=0):
+            self.assertEqual(reset_countdown(5 * 86400 + 3 * 3600 + 60), "5 天 3 小时")
+            self.assertEqual(reset_countdown(2 * 3600 + 300), "2 小时 5 分")
+
+    def test_startup_command_never_relies_on_file_association(self):
+        with patch.object(tray_app.sys, "frozen", False, create=True):
+            self.assertIn("-X utf8", startup_command())
+
+    def test_finished_generation_wakes_refresh_worker(self):
+        tray = self.tray()
+        tray.scheduler = RefreshScheduler(["codex"], 0)
+        tray.scheduler.take_due(0)
+        tray.scheduler.completed("codex", tray.snapshots["codex"], 0)
+        tray.wake = threading.Event()
+        tray.last_samples = {"codex": 100.0}
+        data = tray.performance["providers"]["codex"]
+        data["last_sample_at"] = 200.0
+        tray.feed_scheduler(tray.performance, 500)
+        self.assertTrue(tray.wake.is_set())
+        self.assertLessEqual(tray.scheduler.due["codex"], 510)
+
+    def test_steady_card_performs_no_window_calls(self):
+        card = DetailCardWindow.__new__(DetailCardWindow)
+        card.hwnd, card.visible, card.scale = 123, True, 1.0
+        card.content = "same"
+        card.image = SimpleNamespace(size=(368, 300))
+        card.position = None
+        card._work_area = Mock(return_value=(1, (0, 0, 1920, 1040)))
+        card._present = Mock()
+        with patch("hover_details.monitor_scale", return_value=1.0), \
+             patch("hover_details.is_window_covered", return_value=False), \
+             patch("hover_details.user.IsWindowVisible", return_value=True), \
+             patch("hover_details.user.SetWindowPos") as move:
+            for _ in range(20):
+                card.show("same", (1600, 1040, 1624, 1064))
+        card._present.assert_called_once()  # Initial placement only.
+        move.assert_not_called()
 
 
 class IconArtTests(unittest.TestCase):

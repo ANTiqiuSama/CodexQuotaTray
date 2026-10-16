@@ -6,30 +6,48 @@ import os
 from pathlib import Path
 import time
 
-from hover_details import (MonitorInfo, TrackingTooltip, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, TTM_TRACKACTIVATE, is_window_covered, user)
+from dataclasses import replace
+
+from detail_card import CardModel, text_card
+from hover_details import (DetailCardWindow, MonitorInfo, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, enable_thread_dpi_awareness, is_window_covered, user)
 
 
-def check_hover_runtime(text: str, destination: Path) -> int:
+def check_hover_runtime(content, destination: Path) -> int:
+    """Exercise the real detail card: topmost over a fullscreen window, focus
+    untouched, stable across continuous content updates."""
+    enable_thread_dpi_awareness()
+    model = text_card(content) if isinstance(content, str) else content
+    text = model.as_text()
+
+    def sample(label: str) -> CardModel:
+        return replace(model, notes=model.notes + (f"连续刷新验证：{label}",))
+
     user.GetForegroundWindow.restype = wintypes.HWND
     user.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
     user.GetWindowLongW.restype = wintypes.LONG
     user.IsWindowVisible.argtypes = [wintypes.HWND]
     user.IsWindowVisible.restype = wintypes.BOOL
     foreground = user.GetForegroundWindow()
-    popup = TrackingTooltip()
-    native_send = popup.send
+    popup = DetailCardWindow()
     native_setpos = user.SetWindowPos
-    calls = {"activate": 0, "deactivate": 0, "showwindow": 0}
-    def tracked_send(message, wparam=0, lparam=0):
-        if message == TTM_TRACKACTIVATE:
-            calls["activate" if wparam else "deactivate"] += 1
-        return native_send(message, wparam, lparam)
+    native_showwindow = user.ShowWindow
+    native_present = popup._present
+    calls = {"activate": 0, "deactivate": 0, "showwindow": 0, "renders": 0}
     def tracked_setpos(hwnd, after, x, y, width, height, flags):
         if hwnd == popup.hwnd and flags & 0x0040:
             calls["showwindow"] += 1
+            calls["activate"] += 1
         return native_setpos(hwnd, after, x, y, width, height, flags)
-    popup.send, user.SetWindowPos = tracked_send, tracked_setpos
+    def tracked_showwindow(hwnd, command):
+        if hwnd == popup.hwnd and command == 0:
+            calls["deactivate"] += 1
+        return native_showwindow(hwnd, command)
+    def tracked_present(*args, **kwargs):
+        calls["renders"] += 1
+        return native_present(*args, **kwargs)
+    user.SetWindowPos, user.ShowWindow = tracked_setpos, tracked_showwindow
+    popup._present = tracked_present
     fixture = None
     report = {"pid": os.getpid(), "foreground_before": foreground}
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -48,11 +66,11 @@ def check_hover_runtime(text: str, destination: Path) -> int:
             raise ctypes.WinError(ctypes.get_last_error())
         user.SetWindowPos(fixture, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)
         anchor = (work.right - 300, work.bottom + 8, work.right - 276, work.bottom + 32)
-        popup.show(text + "\n连续刷新验证：0", anchor)
+        popup.show(sample("0"), anchor)
         popup.pump()
         # Simulate a fullscreen/topmost application's later z-order change.
         user.SetWindowPos(fixture, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
-        popup.show(text + "\n连续刷新验证：0", anchor)
+        popup.show(sample("0"), anchor)
         popup.pump()
         rect = wintypes.RECT()
         user.GetWindowRect(popup.hwnd, ctypes.byref(rect))
@@ -64,6 +82,7 @@ def check_hover_runtime(text: str, destination: Path) -> int:
             "work_area": [work.left, work.top, work.right, work.bottom],
             "visible": bool(user.IsWindowVisible(popup.hwnd)),
             "topmost": bool(style & WS_EX_TOPMOST),
+            "layered": bool(style & WS_EX_LAYERED),
             "noactivate": bool(style & WS_EX_NOACTIVATE),
             "above_fullscreen_after_zorder_change": not is_window_covered(popup.hwnd, rect),
             "foreground_preserved_on_show": user.GetForegroundWindow() == foreground,
@@ -76,7 +95,7 @@ def check_hover_runtime(text: str, destination: Path) -> int:
         samples = []
         while time.monotonic() < deadline:
             popup.pump()
-            popup.show(text + f"\n连续刷新验证：{int(time.monotonic()-started)}", anchor)
+            popup.show(sample(str(int(time.monotonic() - started))), anchor)
             sample_rect = wintypes.RECT()
             user.GetWindowRect(popup.hwnd, ctypes.byref(sample_rect))
             samples.append({"visible": bool(user.IsWindowVisible(popup.hwnd)),
@@ -86,14 +105,17 @@ def check_hover_runtime(text: str, destination: Path) -> int:
         report["continuous_update_stable"] = bool(samples) and all(
             item["visible"] and item["rect"] == samples[0]["rect"] for item in samples)
         report["native_calls"] = dict(calls)
-        report["no_repeated_show_or_hide"] = calls["activate"] == 1 and calls["deactivate"] == 0 and calls["showwindow"] <= 2
+        # Content changes once per second here, so a handful of re-renders is
+        # expected; showing/hiding must not repeat.
+        report["no_repeated_show_or_hide"] = calls["activate"] <= 2 and calls["deactivate"] == 0 and calls["showwindow"] <= 2
         report["foreground_preserved_until_close"] = user.GetForegroundWindow() == foreground
     finally:
         popup.close()
         user.SetWindowPos = native_setpos
+        user.ShowWindow = native_showwindow
         if fixture:
             user.DestroyWindow(fixture)
-    fields = ("visible", "topmost", "noactivate", "above_fullscreen_after_zorder_change",
+    fields = ("visible", "topmost", "layered", "noactivate", "above_fullscreen_after_zorder_change",
               "foreground_preserved_on_show", "within_work_area", "continuous_update_stable", "no_repeated_show_or_hide")
     report["passed"] = all(report.get(key, False) for key in fields)
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
