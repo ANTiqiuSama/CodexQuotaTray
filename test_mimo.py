@@ -326,6 +326,22 @@ class LocalSourceTests(unittest.TestCase):
         self.assertEqual(self.monitor.health["MiMo Code"]["status"], "已接入")
 
 
+class BrowserStartupTests(unittest.TestCase):
+    def test_handoff_waits_for_late_port_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            port = Path(folder) / 'DevToolsActivePort'
+            def publish(_seconds):
+                port.write_text('12345\n/devtools/browser/test\n')
+            with patch.object(mimo_usage.time, 'sleep', side_effect=publish):
+                self.assertEqual(mimo_usage._wait_browser_port(port, time.monotonic() + 5),
+                                 ['12345', '/devtools/browser/test'])
+
+    def test_missing_port_times_out(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(RuntimeError, '调试端口'):
+                mimo_usage._wait_browser_port(Path(folder) / 'missing', time.monotonic() - 1)
+
+
 class ProviderTests(unittest.TestCase):
     def test_claude_routed_to_mimo_is_not_a_claude_subscription(self):
         with tempfile.TemporaryDirectory() as home, patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": home, "ANTHROPIC_BASE_URL": ""}):

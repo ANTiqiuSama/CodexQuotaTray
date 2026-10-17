@@ -767,6 +767,21 @@ def _summary(data: dict) -> str:
     return " ".join(parts)
 
 
+def _wait_browser_port(port_file: Path, deadline: float) -> list[str]:
+    # Edge may hand off to a different process (including de-elevation).
+    # The launcher exit code does not describe the browser's lifetime.
+    startup_deadline = min(deadline, time.monotonic() + 20.0)
+    while time.monotonic() < startup_deadline:
+        try:
+            lines = port_file.read_text().splitlines()
+            if len(lines) >= 2 and lines[0].isdigit() and lines[1].startswith('/devtools/'):
+                return lines
+        except OSError:
+            pass
+        time.sleep(0.2)
+    raise RuntimeError("浏览器未开启调试端口（请检查 MiMo 专用浏览器窗口及配置是否被占用）")
+
+
 def login(interactive: bool = True, timeout: float = 600.0, raw: dict | None = None) -> PlanStatus:
     """Open the console in an app-owned Edge profile and read the plan from
     inside the page once logged in.  Saves what a direct read needs (platform
@@ -791,13 +806,7 @@ def login(interactive: bool = True, timeout: float = 600.0, raw: dict | None = N
     deadline = time.monotonic() + (timeout if interactive else 45.0)
     last = ""
     try:
-        while time.monotonic() < deadline and not port_file.exists():
-            if process.poll() is not None and not port_file.exists():
-                raise RuntimeError("浏览器已退出（可能已有同一配置的 MiMo 登录窗口在运行，请先关闭它）")
-            time.sleep(0.2)
-        if not port_file.exists():
-            raise RuntimeError("浏览器未开启调试端口")
-        lines = port_file.read_text().split("\n")
+        lines = _wait_browser_port(port_file, deadline)
         socket_ = WebSocket(f"ws://127.0.0.1:{int(lines[0])}{lines[1].strip()}")
         socket_.events = []
         attached: dict = {}
@@ -842,8 +851,6 @@ def login(interactive: bool = True, timeout: float = 600.0, raw: dict | None = N
                     plan.fetched_at = time.time()
                     globals()["_headless_failed_at"] = 0.0
                     return plan
-            if process.poll() is not None:
-                raise LoginRequired("登录窗口已关闭")
             time.sleep(2.0)
         raise LoginRequired("登录超时（详情见 %LOCALAPPDATA%\\CodexQuotaTray\\mimo-login.log）" if interactive else
                             "MiMo 控制台会话已过期")
