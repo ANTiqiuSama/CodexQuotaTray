@@ -264,8 +264,9 @@ class QuotaTray:
         view = mimo_tracker().view()
         now = time.time()
         live = data.get("active_sessions", 0) > 0
+        tps = data.get("display_tps")
         if live:
-            status, tone = "使用中", "live"
+            status, tone = ("生成中" + (f" · {tps:.0f} tok/s" if tps is not None else "")), "live"
         elif snapshot.stale:
             status, tone = "旧数据", "stale"
         elif view.remaining is None:

@@ -142,6 +142,10 @@ def proto_seconds(data: bytes, *, epoch=False) -> float | None:
     return value if epoch or value <= 86400 else None
 
 
+MIN_TPS_TOKENS = 16      # shorter replies give meaningless rates
+MIN_TPS_SECONDS = 0.3
+
+
 @dataclass(frozen=True)
 class Observation:
     identity: str
@@ -208,6 +212,7 @@ class TpsMonitor:
         self.grok_root = self.home / ".grok" if home else Path(os.environ.get("GROK_HOME", self.home / ".grok"))
         self.claude_root = self.home / ".claude" if home else providers.claude_home()
         self.claude_pending: dict[str, dict[str, Any]] = {}
+        self.claude_last_input: dict[str, float] = {}   # session -> last user / tool-result record
         self.home_override = home is not None
         self.mimocode_paths: list[Path] | None = None
         self.mimocode_scanned = 0.0
@@ -352,6 +357,7 @@ class TpsMonitor:
             if pending["session"] == session and mid != current:
                 self._claude_emit(mid, now)
         if kind == "user":
+            self.claude_last_input[session] = moment
             if moment > now - 120:
                 self.activity[session] = ("claude", moment, "请求中")
             return
@@ -362,7 +368,7 @@ class TpsMonitor:
             return
         pending = self.claude_pending.setdefault(current, {
             "session": session, "model": model, "last": moment, "output": 0, "stop": None, "seen_at": now,
-            "input": 0, "cached": 0,
+            "input": 0, "cached": 0, "requested": self.claude_last_input.get(session),
         })
         uncached = (number(usage.get("input_tokens"), 0) or 0) + (number(usage.get("cache_creation_input_tokens"), 0) or 0)
         pending["input"] = max(pending["input"], int(uncached))
@@ -383,8 +389,17 @@ class TpsMonitor:
             return
         provider = provider_for(pending["model"])
         provider = provider if provider != "other" else "claude"   # Claude Code sessions default to Claude
+        tps, basis = None, "读取Claude Code真实输出计数；不推算TPS"
+        requested = pending.get("requested")
+        if provider == "mimo" and requested and pending["output"] >= MIN_TPS_TOKENS:
+            # Claude Code routed to MiMo: the transcript has no streaming times,
+            # only when the request input was written and when the reply ended.
+            seconds = pending["last"] - requested
+            if MIN_TPS_SECONDS <= seconds <= 600:
+                tps = round(pending["output"] / seconds, 1)
+                basis = "Claude Code 端到端速率（真实输出token数÷请求发出至回复结束，含首字延迟，偏低）"
         self.add(Observation(key("claude", mid), "Claude Code", pending["session"], provider, pending["model"],
-                             pending["last"], pending["output"], None, "读取Claude Code真实输出计数；不推算TPS", True, None,
+                             pending["last"], pending["output"], None, basis, True, tps,
                              pending.get("input", 0), pending.get("cached", 0)), now)
         if pending["stop"] == "end_turn" and pending["last"] > now - 3:
             self.activity[pending["session"]] = (provider, pending["last"], "刚完成生成")
@@ -413,6 +428,41 @@ class TpsMonitor:
                 continue
         return found
 
+    @staticmethod
+    def _mimocode_spans(path: Path, message_ids: list) -> dict:
+        """Generation seconds per message from its parts (OpenCode format):
+        text / reasoning parts carry time.start / time.end; a tool part's
+        state.time.start marks the end of streaming its arguments."""
+        if not message_ids:
+            return {}
+        db = readonly_db(path)
+        try:
+            marks = ",".join("?" * len(message_ids))
+            rows = db.execute(f"SELECT message_id, data FROM part WHERE message_id IN ({marks})", list(message_ids)).fetchall()
+        except sqlite3.Error:
+            return {}
+        finally:
+            db.close()
+        bounds: dict = {}
+        for message_id, data in rows:
+            try:
+                part = json.loads(data)
+            except (TypeError, ValueError):
+                continue
+            kind = part.get("type")
+            if kind in ("text", "reasoning"):
+                times = part.get("time") or {}
+                start, end = timestamp(times.get("start")), timestamp(times.get("end"))
+            elif kind == "tool":
+                start = end = timestamp(((part.get("state") or {}).get("time") or {}).get("start"))
+            else:
+                continue
+            if start is None or end is None or end < start:
+                continue
+            low, high = bounds.get(message_id, (start, end))
+            bounds[message_id] = (min(low, start), max(high, end))
+        return {message_id: high - low for message_id, (low, high) in bounds.items()}
+
     def _mimocode(self, now: float):
         """MiMo Code (an OpenCode fork) stores each message as JSON in SQLite;
         read token counts of completed assistant messages only."""
@@ -437,6 +487,7 @@ class TpsMonitor:
                 rows = db.execute("SELECT id, session_id, time_updated, data FROM message WHERE time_updated > ? ORDER BY time_updated LIMIT 2000", (since,)).fetchall()
             finally:
                 db.close()
+            finished = []
             for ident, session, updated, data in rows:
                 newest = max(newest, updated or 0)
                 try:
@@ -447,8 +498,14 @@ class TpsMonitor:
                     continue
                 completed = timestamp(((message.get("time") or {}).get("completed")))
                 tokens = message.get("tokens") or {}
+                moment = timestamp(updated)
+                if completed is None and moment and moment > now - 120:
+                    self.activity[str(session)] = ("mimo" if provider_for(str(message.get("modelID") or "")) == "mimo" else "other", moment, "生成中")
                 if completed is None or not tokens:
                     continue
+                finished.append((ident, session, message, completed, tokens))
+            spans = self._mimocode_spans(path, [item[0] for item in finished])
+            for ident, session, message, completed, tokens in finished:
                 model = str(message.get("modelID") or "")
                 provider_id = str(message.get("providerID") or "").lower()
                 provider = provider_for(model)
@@ -456,11 +513,22 @@ class TpsMonitor:
                     provider = "other"   # e.g. the free MiMo Auto channel: not plan Credits
                 cache = tokens.get("cache") or {}
                 output = (number(tokens.get("output"), 0) or 0) + (number(tokens.get("reasoning"), 0) or 0)
+                tps, basis = None, "读取MiMo Code真实计数；该消息缺少流式时间"
+                span = spans.get(ident)
+                if span and output >= MIN_TPS_TOKENS and span >= MIN_TPS_SECONDS:
+                    tps = round(output / span, 1)
+                    basis = "MiMo Code 流式时间（真实输出token数÷首个输出至最后输出，不含首字延迟和工具执行）"
                 self.add(Observation(key("mimocode", ident), "MiMo Code", str(session), provider, model, completed, int(output), None,
-                                     "读取MiMo Code真实计数；不推算TPS", True, None,
+                                     basis, True, tps,
                                      int((number(tokens.get("input"), 0) or 0) + (number(cache.get("write"), 0) or 0)),
                                      int(number(cache.get("read"), 0) or 0)), now)
             self.mimocode_cursor[path] = newest
+            for _, session, _, completed, _ in finished:
+                if self.activity.get(str(session), (None, 0, None))[1] <= completed:
+                    if completed > now - 3:
+                        self.activity[str(session)] = ("mimo", completed, "刚完成生成")
+                    else:
+                        self.activity.pop(str(session), None)
         if self.mimocode_paths:
             self.health["MiMo Code"] = {"status": "已接入", "databases": len(self.mimocode_paths)}
 
@@ -537,7 +605,7 @@ class TpsMonitor:
             source = "Codex · Gemini桥接回传" if bridge_copy else "Codex"
             client_tps = None
             basis = "客户端暂未取得完整流式计数"
-            if provider_for(model) == "codex":
+            if provider_for(model) in ("codex", "mimo"):
                 points = [point for point in self.client_stream_starts.get(session, []) if previous < point <= moment]
                 if points and moment > points[0]:
                     client_tps = round(output / (moment - points[0]), 1)

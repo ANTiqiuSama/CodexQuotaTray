@@ -351,6 +351,80 @@ class BrowserStartupTests(unittest.TestCase):
                 mimo_usage._wait_browser_port(Path(folder) / 'missing', time.monotonic() - 1)
 
 
+class MimoTpsTests(unittest.TestCase):
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.now = time.time()
+        self.monitor = TpsMonitor(home=self.home)
+        self.monitor.started_at = self.now - 100
+
+    def test_mimo_code_parts_give_streaming_tps_and_live_activity(self):
+        folder = self.home / ".local/share/mimocode"
+        folder.mkdir(parents=True)
+        db = sqlite3.connect(folder / "mimocode.db")
+        db.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+        db.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+        ms = int(self.now * 1000)
+        done = {"role": "assistant", "modelID": "mimo-v2.6-pro", "providerID": "xiaomi",
+                "tokens": {"output": 300, "reasoning": 100, "cache": {}}, "time": {"created": ms - 20000, "completed": ms - 1000}}
+        live = {"role": "assistant", "modelID": "mimo-v2.6-pro", "tokens": {}, "time": {"created": ms - 2000}}
+        db.execute("INSERT INTO message VALUES ('m1', 's1', ?, ?, ?)", (ms - 20000, ms - 1000, json.dumps(done)))
+        db.execute("INSERT INTO message VALUES ('m2', 's2', ?, ?, ?)", (ms - 2000, ms - 500, json.dumps(live)))
+        parts = [  # 5 s before the first token (not counted); 2 s thinking, 6 s text, tool args until 9 s
+            {"type": "step-start"},
+            {"type": "reasoning", "time": {"start": ms - 15000, "end": ms - 13000}},
+            {"type": "text", "time": {"start": ms - 13000, "end": ms - 7000}},
+            {"type": "tool", "state": {"status": "completed", "time": {"start": ms - 6000, "end": ms - 1500}}},
+        ]
+        db.executemany("INSERT INTO part VALUES (?, 'm1', 's1', 0, 0, ?)", [(f"p{i}", json.dumps(p)) for i, p in enumerate(parts)])
+        db.commit()
+        db.close()
+        self.monitor._mimocode(self.now)
+        item = self.monitor.events[-1]
+        self.assertEqual((item.provider, item.output_tokens), ("mimo", 400))
+        self.assertAlmostEqual(item.native_tps, 400 / 9, places=1)
+        self.assertIn("MiMo Code 流式时间", item.basis)
+        self.assertEqual(self.monitor.activity["s2"][0], "mimo")
+        data = self.monitor.snapshot(self.now)["providers"]["mimo"]
+        self.assertAlmostEqual(data["display_tps"], 44.4, places=1)
+
+    def test_mimo_code_without_part_table_still_counts(self):
+        folder = self.home / ".local/share/mimocode"
+        folder.mkdir(parents=True)
+        db = sqlite3.connect(folder / "mimocode.db")
+        db.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+        ms = int(self.now * 1000)
+        db.execute("INSERT INTO message VALUES ('m', 's', 0, ?, ?)", (ms - 100, json.dumps(
+            {"role": "assistant", "modelID": "mimo-v2.6-pro", "tokens": {"output": 50}, "time": {"completed": ms - 200}})))
+        db.commit()
+        db.close()
+        self.monitor._mimocode(self.now)
+        self.assertIsNone(self.monitor.events[-1].native_tps)
+
+    def test_claude_code_routed_to_mimo_gets_end_to_end_rate(self):
+        self.monitor._claude_record({"type": "user", "timestamp": self.now - 11, "message": {}}, "sess", self.now)
+        message = {"id": "m1", "model": "mimo-v2.6-pro", "stop_reason": "end_turn", "usage": {"output_tokens": 500}}
+        self.monitor._claude_record({"type": "assistant", "timestamp": self.now - 1, "message": message}, "sess", self.now)
+        self.monitor._claude_flush(self.now)
+        item = self.monitor.events[-1]
+        self.assertEqual(item.native_tps, 50.0)
+        self.assertIn("含首字延迟", item.basis)
+
+    def test_real_claude_models_still_have_no_invented_tps(self):
+        self.monitor._claude_record({"type": "user", "timestamp": self.now - 11, "message": {}}, "sess", self.now)
+        message = {"id": "m2", "model": "claude-opus-4", "stop_reason": "end_turn", "usage": {"output_tokens": 500}}
+        self.monitor._claude_record({"type": "assistant", "timestamp": self.now - 1, "message": message}, "sess", self.now)
+        self.monitor._claude_flush(self.now)
+        self.assertIsNone(self.monitor.events[-1].native_tps)
+
+    def test_codex_with_mimo_model_uses_client_stream_time(self):
+        self.monitor.context["s"] = {"model": "mimo-v2.6-pro", "source": "Codex"}
+        self.monitor.client_stream_starts["s"] = [self.now - 11]
+        self.monitor._codex_record({"timestamp": self.now - 1, "type": "token_usage_record", "payload": {
+            "thread_id": "s", "response_id": "r", "usage": {"output_tokens": 200, "input_tokens": 10, "cached_input_tokens": 0}}}, "s", self.now)
+        self.assertEqual(self.monitor.events[-1].native_tps, 20.0)
+
+
 class ProviderTests(unittest.TestCase):
     def test_claude_routed_to_mimo_is_not_a_claude_subscription(self):
         with tempfile.TemporaryDirectory() as home, patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": home, "ANTHROPIC_BASE_URL": ""}):
