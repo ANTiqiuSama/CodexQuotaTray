@@ -69,12 +69,21 @@ class ConsoleParsingTests(unittest.TestCase):
         self.assertEqual(plan.fetched_at, 100.0)
 
     def test_unwrapped_percent_only_and_team_payloads(self):
-        plan = parse_plan({"items": [{"name": "x", "used": 25, "percent": 25}]}, {"settlementType": "MONTHLY_AUTO",
-                          "currentPeriodEnd": "2026-07-15T00:00:00+08:00"})
+        plan = parse_plan({"items": [{"name": "x", "used": 25, "percent": 25}]}, {"currentPeriodEnd": "2027-06-15T00:00:00+08:00"})
         self.assertEqual((plan.total, plan.used), (100, 25))
         self.assertEqual(plan.period_start, datetime(2026, 6, 15, tzinfo=BEIJING).timestamp())
         team = parse_plan(ok({"creditsTotal": 500, "creditsUsed": 50, "usedPercent": 10}), ok(None))
         self.assertEqual((team.total, team.used), (500, 50))
+
+    def test_always_one_yearly_pool(self):
+        # A monthly billing cycle is ignored: the plan expiry ends a one-year period.
+        detail = {"settlementType": "MONTHLY_AUTO", "currentPeriodStart": "2026-06-01", "currentPeriodEnd": "2026-07-01",
+                  "expireTime": "2027-03-01 00:00:00"}
+        plan = parse_plan(USAGE, detail)
+        self.assertEqual(plan.period_end, datetime(2027, 3, 1, tzinfo=BEIJING).timestamp())
+        self.assertEqual(plan.period_start, datetime(2026, 3, 1, tzinfo=BEIJING).timestamp())
+        only_month = parse_plan(USAGE, {"currentPeriodStart": "2026-06-01", "currentPeriodEnd": "2026-07-01"})
+        self.assertEqual(only_month.period_start, datetime(2025, 7, 1, tzinfo=BEIJING).timestamp())
 
     def test_errors(self):
         with self.assertRaises(LoginRequired):

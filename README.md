@@ -46,13 +46,13 @@ A 来源面向 **Claude Code 的 CLI 和本地会话记录**。Claude 桌面应�
 
 ### Xiaomi MiMo Token Plan
 
-Token Plan 按 Credits 计费（月付或年付，整期一个额度池），没有 5 小时/每周窗口。X 图标（小米橙）的外环因此显示**今日预算**：剩余 Credits ÷ 到期前剩余天数 = 今天可用的量，外环表示今天还剩多少；环上的象牙色刻度是“按时间今天应剩的位置”，外环短于刻度说明今天用得偏快。卡片另列整期额度（附“时间已过 x%”）、今日已用 / 今日预算 / 剩余 Credits / 日均消耗、到期日、本机今日各来源用量，并按“整期平均”和“最近 7 天本机日均”中较快者预测是否会提前用完。
+Token Plan 按 Credits 计费，本程序统一按**年度**一个额度池计算（周期为套餐到期日前的一年；控制台若有按月的账期不单独显示），没有 5 小时/每周窗口。X 图标（小米橙）的外环因此显示**今日预算**：剩余 Credits ÷ 到期前剩余天数 = 今天可用的量，外环表示今天还剩多少；环上的象牙色刻度是“按时间今天应剩的位置”，外环短于刻度说明今天用得偏快。卡片另列整期额度（附“时间已过 x%”）、今日已用 / 今日预算 / 剩余 Credits / 日均消耗、到期日、本机今日各来源用量，并按“整期平均”和“最近 7 天本机日均”中较快者预测是否会提前用完。
 
 数据来源（按优先级）：
 
 1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。右键 X 图标选“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口；登录后程序在控制台页面内读取套餐（与网页本身的登录方式无关），成功后窗口自动关闭并弹出结果。程序只保留 `platform.xiaomimimo.com` 的 cookie 和控制台接口请求自带的令牌请求头（如有），用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；之后直接读取接口；被拒绝（过期或需要更多凭据）时用同一配置无窗口地在页面内读取一次并更新会话，仍失败才提示重新登录（6 小时内不重复尝试）。“退出 MiMo 登录”删除保存的会话。
 2. **本机记录（实时，仅本机）**：把 Codex、Claude Code、MiMo Code（`mimocode.db`）中 `mimo-*` 请求的缓存命中 / 未命中输入和输出 token 按官方价格表换算为 Credits（v2.6-pro / v2.5-pro：2.5 / 300 / 600；v2.6-flash / v2.5：2 / 100 / 200；北京时间 0:00–8:00 ×0.8；未收录型号按 pro 估算并注明），记入 `mimo-ledger.json`。两次控制台读取之间，显示值 = 最近一次控制台“已用” + 本机此后增量，下次读取时校准。
-3. **手动配置（不登录）**：`%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`、`settlement`（`YEARLY` / `MONTHLY`）；用量只来自本机记录。
+3. **手动配置（不登录）**：`%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`（未给 `period_start` 时按到期日前一年计算）；用量只来自本机记录。
 
 Claude Code 通过 `ANTHROPIC_BASE_URL`（环境变量或 `~/.claude/settings.json`）指向 `xiaomimimo.com` 时没有 Claude 订阅可读，A 不会自动出现，这些会话计入 X。未显式指定来源时，X 在已登录/已配置 MiMo、Codex `config.toml` 或 Claude Code 指向 `xiaomimimo.com`、或存在 MiMo Code 数据目录时自动加入。程序不会用 Token Plan 的 API Key 发请求探测额度（套餐只允许在编程工具中使用，探测也会消耗 Credits）。
 
@@ -178,6 +178,12 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 
 环境变量在程序启动时读取。退出旧托盘后，从包含新变量的终端或登录环境重新启动。恢复自动检测时，清除 `CODEX_QUOTA_PROVIDERS`；未设置该变量时，默认 C/G/M，并按检测结果加入 Claude Code。
 
+### 图标自动排序
+
+托盘图标按“额度恢复时间”从近到远自左向右排列：每个来源取当前限制使用的那个窗口（剩余更少的窗口）的重置时间；MiMo 按年度额度的到期时间，不按今日预算；重置时间未知的排在其后，**已用完的排在最后**。重置时间变化或额度用完/恢复时自动重排；为避免抖动，两次重排至少间隔 2 分钟，鼠标停在图标上或详情卡片打开时不重排。
+
+Windows 没有移动通知区域图标的接口，程序通过删除后重新添加图标来排序，固定（显示在任务栏上）的设置会保留。重新添加的图标在 Windows 10/11 上通常出现在左端；如果你的系统顺序正好相反，设置 `CODEX_QUOTA_TRAY_ORDER=auto-reverse`；设为 `fixed` 则按注册表顺序固定不动。手动拖动的位置会在下次重排时被覆盖。
+
 ### 配置项对照
 
 | 变量 | 用途 |
@@ -190,6 +196,7 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 | `CODEX_HOME` | Codex 本地日志与会话数据根目录 |
 | `GROK_HOME` | Grok 本地记录根目录 |
 | `CLAUDE_CONFIG_DIR` | Claude Code 数据根目录，默认 `~/.claude` |
+| `CODEX_QUOTA_TRAY_ORDER` | 图标排序：`auto`（默认，恢复时间近的在左，用完的在最后）、`auto-reverse`（系统插入方向相反时使用）、`fixed`（固定顺序） |
 | `CODEX_QUOTA_MIMO_BROWSER` | MiMo 登录窗口使用的 Edge/Chrome 路径 |
 | `CODEX_QUOTA_MIMO_PLATFORM` | MiMo 控制台地址，默认 `https://platform.xiaomimimo.com`（测试用） |
 | `CODEX_QUOTA_LEGACY_DPI=1` | 关闭悬停线程的 Per-Monitor V2 模式，供旧显示环境排错 |

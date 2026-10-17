@@ -83,8 +83,6 @@ def window_label(minutes: int | None) -> str:
         return "每周"
     if 524_000 <= minutes <= 528_000:
         return "年度"
-    if 40_000 <= minutes <= 45_000:
-        return "月度"
     if minutes % 1440 == 0:
         return f"{minutes // 1440} 天"
     if minutes % 60 == 0:
@@ -127,6 +125,33 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
     return f"{snapshot.label}: {status}{stale}"
 
 
+# Tray order: soonest quota refresh first, exhausted quotas last.
+# CODEX_QUOTA_TRAY_ORDER: "auto" (default), "auto-reverse" (if this Windows
+# inserts re-added icons on the right instead of the left), "fixed" (registry order).
+TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
+REORDER_MIN_SECONDS = 120
+
+
+def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
+    """(remaining %, reset time) of the window that limits use.  MiMo counts
+    its yearly pool; the daily budget is advice, not a quota refresh."""
+    if snapshot.provider == "mimo" or snapshot.secondary_remaining_percent is None:
+        return snapshot.remaining_percent, snapshot.resets_at
+    if snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent:
+        return snapshot.secondary_remaining_percent, snapshot.secondary_resets_at
+    return snapshot.remaining_percent, snapshot.resets_at
+
+
+def tray_order(snapshots: dict[str, QuotaSnapshot], keys: list[str]) -> list[str]:
+    """Left to right: soonest refresh first; unknown reset next; used-up last."""
+    def rank(provider: str):
+        remaining, reset = binding_reset(snapshots[provider])
+        exhausted = remaining is not None and remaining < 0.5
+        group = 2 if exhausted else (0 if reset else 1)
+        return group, reset or float("inf"), keys.index(provider)
+    return sorted(keys, key=rank)
+
+
 def startup_command() -> str:
     if getattr(sys, "frozen", False):
         return f'"{Path(sys.executable).resolve()}"'
@@ -157,6 +182,8 @@ class QuotaTray:
         self.saved_signature: str | None = None
         self.saved_at = 0.0
         self.mimo_view_at = 0.0
+        self.shown_order: list[str] = []
+        self.reordered_at = 0.0
         self.migrate_startup()
         self.icons = {
             provider: HoverIcon(
@@ -436,6 +463,35 @@ class QuotaTray:
         for provider, letter in PROVIDERS.items():
             self.update_icon(provider, letter)
             self.icons[provider].update_menu()
+        self.maybe_reorder(time.time())
+
+    def wanted_order(self) -> list[str]:
+        keys = list(PROVIDERS)
+        return keys if TRAY_ORDER_MODE == "fixed" else tray_order(self.snapshots, keys)
+
+    def maybe_reorder(self, now: float, force: bool = False) -> bool:
+        """Re-add the tray icons so Windows shows them in wanted_order().
+        Windows has no API to move an icon; deleting and adding it again puts
+        it at the insertion end (left on Windows 10/11), keeping its pinning."""
+        icons = getattr(self, "icons", None)
+        if not icons or (TRAY_ORDER_MODE == "fixed" and not force):
+            return False
+        wanted = self.wanted_order()
+        if wanted == self.shown_order and not force:
+            return False
+        if not force and now - self.reordered_at < REORDER_MIN_SECONDS:
+            return False
+        if any(getattr(icon, "details_visible", False) or getattr(icon, "hover_open", False) for icon in icons.values()):
+            return False   # never pull an icon away from under the pointer
+        add_order = wanted if TRAY_ORDER_MODE == "auto-reverse" else list(reversed(wanted))
+        with self.ui_lock:
+            for provider in wanted:
+                icons[provider].visible = False
+            for provider in add_order:
+                icons[provider].visible = True
+        self.shown_order, self.reordered_at = wanted, now
+        log.info("tray order: %s", ", ".join(wanted))
+        return True
 
     def update_icon(self, provider: str, letter: str) -> None:
         # The refresh worker and the 1 s TPS loop both land here. pystray
@@ -539,6 +595,9 @@ class QuotaTray:
                 self.feed_scheduler(self.performance, now)
                 if "mimo" in PROVIDERS:
                     self.update_mimo_locally(now)
+                if now - getattr(self, "order_checked_at", 0.0) >= 30:
+                    self.order_checked_at = now
+                    self.maybe_reorder(now)   # resets pass between refreshes
                 for provider, letter in PROVIDERS.items():
                     if self.icons[provider].visible:
                         self.update_icon(provider, letter)
@@ -680,12 +739,19 @@ class QuotaTray:
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
         hover = HoverDetails(self.icons, self.hover_card, self.stop_event)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
+        ready = {provider: threading.Event() for provider in self.icons}
         threads = [
-            threading.Thread(target=icon.run, name=f"tray-{provider}", daemon=True)
+            threading.Thread(target=icon.run, kwargs={"setup": lambda _icon, done=ready[provider]: done.set()},
+                             name=f"tray-{provider}", daemon=True)
             for provider, icon in self.icons.items()
         ]
         for thread in threads:
             thread.start()
+        deadline = time.monotonic() + 15
+        for event in ready.values():
+            event.wait(max(0.0, deadline - time.monotonic()))
+        # Show every icon once, already in the wanted order.
+        self.maybe_reorder(time.time(), force=True)
         for thread in threads:
             thread.join()
 

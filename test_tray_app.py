@@ -305,3 +305,55 @@ class IconArtTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrayOrderTests(unittest.TestCase):
+    @staticmethod
+    def snap(provider, remaining, reset, second=None, second_reset=None):
+        from quota_sources import QuotaSnapshot
+        return QuotaSnapshot(provider, provider, 300, None if remaining is None else 100 - remaining, remaining, reset,
+                             1.0, False, None, 10080 if second is not None else None,
+                             None if second is None else 100 - second, second, second_reset)
+
+    def test_soonest_refresh_first_unknown_next_exhausted_last(self):
+        import tray_app
+        snapshots = {
+            "codex": self.snap("codex", 80, 5000, second=40, second_reset=9000),   # weekly window binds
+            "grok": self.snap("grok", 0, 1000),                                     # used up
+            "gemini": self.snap("gemini", 50, 3000),
+            "claude": self.snap("claude", None, None),
+            "mimo": self.snap("mimo", 60, 99999, second=5, second_reset=2000),      # daily budget is not a refresh
+        }
+        self.assertEqual(tray_app.tray_order(snapshots, list(snapshots)), ["gemini", "codex", "mimo", "claude", "grok"])
+
+    def test_reorder_readds_icons_reversed_and_waits_between_moves(self):
+        import tray_app
+        tray = QuotaTray.__new__(QuotaTray)
+        events = []
+
+        class FakeIcon:
+            details_visible = hover_open = False
+            def __init__(self, name):
+                self.name, self._visible = name, True
+            @property
+            def visible(self):
+                return self._visible
+            @visible.setter
+            def visible(self, value):
+                events.append((self.name, value))
+                self._visible = value
+        keys = ["codex", "grok"]
+        tray.icons = {key: FakeIcon(key) for key in keys}
+        tray.shown_order, tray.reordered_at = [], 0.0
+        tray.snapshots = {"codex": self.snap("codex", 50, 900), "grok": self.snap("grok", 50, 100)}
+        with patch.object(tray_app, "PROVIDERS", {"codex": "C", "grok": "G"}), patch.object(tray_app, "TRAY_ORDER_MODE", "auto"):
+            self.assertTrue(tray.maybe_reorder(1000.0))
+            self.assertEqual(events, [("grok", False), ("codex", False), ("codex", True), ("grok", True)])
+            self.assertEqual(tray.shown_order, ["grok", "codex"])
+            tray.snapshots["codex"] = self.snap("codex", 50, 50)
+            self.assertFalse(tray.maybe_reorder(1010.0))          # too soon after the last move
+            tray.icons["codex"].hover_open = True
+            self.assertFalse(tray.maybe_reorder(2000.0))          # pointer is on an icon
+            tray.icons["codex"].hover_open = False
+            self.assertTrue(tray.maybe_reorder(2000.0))
+            self.assertEqual(tray.shown_order, ["codex", "grok"])

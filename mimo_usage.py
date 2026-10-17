@@ -227,21 +227,29 @@ def parse_time(value: Any) -> float | None:
     return None
 
 
-def _period_start(end: float | None, settlement: str, subscribe: str) -> float | None:
-    if end is None:
-        return None
-    kind = f"{settlement} {subscribe}".upper()
+YEAR_SPAN_MIN = 300 * 86400
+
+
+def _year_before(end: float) -> float:
     moment = datetime.fromtimestamp(end, BEIJING)
-    if "YEAR" in kind:
-        try:
-            return moment.replace(year=moment.year - 1).timestamp()
-        except ValueError:  # 29 Feb
-            return (moment - timedelta(days=365)).timestamp()
-    month, year = (moment.month - 1, moment.year) if moment.month > 1 else (12, moment.year - 1)
     try:
-        return moment.replace(year=year, month=month).timestamp()
-    except ValueError:
-        return (moment - timedelta(days=30)).timestamp()
+        return moment.replace(year=moment.year - 1).timestamp()
+    except ValueError:  # 29 Feb
+        return (moment - timedelta(days=365)).timestamp()
+
+
+def _period_start(end: float | None, settlement: str = "", subscribe: str = "") -> float | None:
+    """Token Plan is tracked as one yearly pool (the console's monthly billing
+    cycle, if any, is not shown): the period is the year before the end."""
+    return None if end is None else _year_before(end)
+
+
+def _yearly_period(start: float | None, end: float | None) -> tuple[float | None, float | None]:
+    if end is None:
+        return start, end
+    if start is None or end - start < YEAR_SPAN_MIN:
+        start = _year_before(end)
+    return start, end
 
 
 def parse_plan(usage_payload: Any, detail_payload: Any, now: float | None = None) -> PlanStatus:
@@ -278,8 +286,13 @@ def parse_plan(usage_payload: Any, detail_payload: Any, now: float | None = None
         raise ValueError("MiMo 控制台未返回套餐用量（可能尚未订阅 Token Plan）")
     settlement = str(detail.get("settlementType") or "")
     subscribe = str(detail.get("subscribeType") or "")
-    end = parse_time(detail.get("currentPeriodEnd") or detail.get("expiredAt") or detail.get("expireTime"))
-    start = parse_time(detail.get("currentPeriodStart") or detail.get("startTime")) or _period_start(end, settlement, subscribe)
+    # The plan's own expiry is the end of the yearly pool; a monthly
+    # "currentPeriodEnd" never shortens it.
+    ends = [parse_time(detail.get(k)) for k in ("currentPeriodEnd", "expiredAt", "expireTime", "expireAt", "endTime",
+                                                 "planEndTime", "subscriptionEndTime", "subscribeEndTime")]
+    ends = [value for value in ends if value]
+    end = max(ends) if ends else None
+    start, end = _yearly_period(parse_time(detail.get("currentPeriodStart") or detail.get("startTime")), end)
     return PlanStatus(
         total=total or None, used=used if counted else None,
         plan_name=str(detail.get("planName") or ""), plan_code=str(detail.get("planCode") or ""),
@@ -338,7 +351,7 @@ def manual_plan(path: Path | None = None) -> PlanStatus | None:
     if not total:
         return None
     end = parse_time(config.get("period_end"))
-    start = parse_time(config.get("period_start")) or _period_start(end, str(config.get("settlement") or "YEARLY"), "")
+    start, end = _yearly_period(parse_time(config.get("period_start")), end)
     status = PlanStatus(total, _number(config.get("used_credits")) or 0.0, str(config.get("plan_name") or "手动配置"),
                         period_start=start, period_end=end, settlement=str(config.get("settlement") or ""), source="manual")
     status.fetched_at = parse_time(config.get("used_at")) or start or 0.0
