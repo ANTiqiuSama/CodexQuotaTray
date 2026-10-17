@@ -23,6 +23,12 @@ history.json
 app.log
 app.log.*
 diagnostics.txt
+mimo-session.bin
+mimo-ledger.json
+mimo-days.json
+mimo-edge-profile/
+mimo.json
+*.raw.json
 
 # Local credentials and desktop metadata
 .env

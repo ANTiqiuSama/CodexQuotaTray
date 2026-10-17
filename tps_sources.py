@@ -27,7 +27,7 @@ PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Lo
 RECENT_SECONDS = 86400          # Only files touched within a day can matter.
 FORGET_SECONDS = 2 * 86400      # Readers idle this long are released.
 SLOW_DISCOVERY_SECONDS = 30     # Process list and full-history globbing.
-PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "other": "其他模型"}
+PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "mimo": "Xiaomi MiMo", "other": "其他模型"}
 CLAUDE_IDLE_FLUSH = 30          # Emit an unfinished Claude message after this much silence.
 CLAUDE_STALE_ACTIVITY = 90      # Drop "generating" when a session went quiet this long.
 
@@ -56,6 +56,8 @@ def timestamp(value: Any) -> float | None:
 
 def provider_for(model: str) -> str:
     model = model.lower()
+    if "mimo" in model:
+        return "mimo"
     if "claude" in model or "anthropic" in model:
         return "claude"
     if "gemini" in model:
@@ -153,6 +155,8 @@ class Observation:
     basis: str = "缺少生成耗时"
     count_in_rate: bool = True
     native_tps: float | None = None
+    input_tokens: int | None = None      # uncached input (for MiMo Credit accounting)
+    cached_tokens: int | None = None     # cache-hit input
 
 
 class JsonlReader:
@@ -204,6 +208,10 @@ class TpsMonitor:
         self.grok_root = self.home / ".grok" if home else Path(os.environ.get("GROK_HOME", self.home / ".grok"))
         self.claude_root = self.home / ".claude" if home else providers.claude_home()
         self.claude_pending: dict[str, dict[str, Any]] = {}
+        self.home_override = home is not None
+        self.mimocode_paths: list[Path] | None = None
+        self.mimocode_scanned = 0.0
+        self.mimocode_cursor: dict[Path, float] = {}
         self.antigravity_bridge = (self.home / "AppData/Local/Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/codex-grok-bridge/app/src/antigravity.mjs").is_file()
         self.readers: dict[Path, JsonlReader] = {}
         self.context: dict[str, dict[str, Any]] = {}
@@ -348,12 +356,17 @@ class TpsMonitor:
                 self.activity[session] = ("claude", moment, "请求中")
             return
         model = message.get("model") or ""
-        output = number((message.get("usage") or {}).get("output_tokens"))
+        usage = message.get("usage") or {}
+        output = number(usage.get("output_tokens"))
         if output is None or not current or model == "<synthetic>":
             return
         pending = self.claude_pending.setdefault(current, {
             "session": session, "model": model, "last": moment, "output": 0, "stop": None, "seen_at": now,
+            "input": 0, "cached": 0,
         })
+        uncached = (number(usage.get("input_tokens"), 0) or 0) + (number(usage.get("cache_creation_input_tokens"), 0) or 0)
+        pending["input"] = max(pending["input"], int(uncached))
+        pending["cached"] = max(pending["cached"], int(number(usage.get("cache_read_input_tokens"), 0) or 0))
         # Content blocks of one message are written as separate lines; the
         # usage on the last one is final, so keep the largest count seen.
         pending["last"] = max(pending["last"], moment)
@@ -361,16 +374,20 @@ class TpsMonitor:
         pending["stop"] = message.get("stop_reason") or pending["stop"]
         pending["seen_at"] = now
         if moment > now - 120:
-            self.activity[session] = ("claude", moment, "生成中")
+            kind = provider_for(model)
+            self.activity[session] = (kind if kind != "other" else "claude", moment, "生成中")
 
     def _claude_emit(self, mid: str, now: float):
         pending = self.claude_pending.pop(mid, None)
         if not pending or pending["output"] <= 0:
             return
-        self.add(Observation(key("claude", mid), "Claude Code", pending["session"], "claude", pending["model"],
-                             pending["last"], pending["output"], None, "读取Claude Code真实输出计数；不推算TPS"), now)
+        provider = provider_for(pending["model"])
+        provider = provider if provider != "other" else "claude"   # Claude Code sessions default to Claude
+        self.add(Observation(key("claude", mid), "Claude Code", pending["session"], provider, pending["model"],
+                             pending["last"], pending["output"], None, "读取Claude Code真实输出计数；不推算TPS", True, None,
+                             pending.get("input", 0), pending.get("cached", 0)), now)
         if pending["stop"] == "end_turn" and pending["last"] > now - 3:
-            self.activity[pending["session"]] = ("claude", pending["last"], "刚完成生成")
+            self.activity[pending["session"]] = (provider, pending["last"], "刚完成生成")
 
     def _claude_flush(self, now: float):
         for mid, pending in list(self.claude_pending.items()):
@@ -378,8 +395,74 @@ class TpsMonitor:
                 self._claude_emit(mid, now)
         waiting = {pending["session"] for pending in self.claude_pending.values()}
         for session, (provider, moment, state) in list(self.activity.items()):
-            if provider == "claude" and state != "刚完成生成" and session not in waiting and now - moment > CLAUDE_STALE_ACTIVITY:
+            claude_session = self.context.get(session, {}).get("source") == "Claude Code"
+            if (provider == "claude" or claude_session) and state != "刚完成生成" and session not in waiting and now - moment > CLAUDE_STALE_ACTIVITY:
                 self.activity.pop(session, None)
+
+    def _mimocode_databases(self) -> list[Path]:
+        roots = [self.home / ".local/share/mimocode"]
+        if not self.home_override:
+            for env in ("XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA"):
+                if os.environ.get(env):
+                    roots.append(Path(os.environ[env]) / "mimocode")
+        found = []
+        for root in roots:
+            try:
+                found += [path for path in root.glob("mimocode*.db") if path.is_file()]
+            except OSError:
+                continue
+        return found
+
+    def _mimocode(self, now: float):
+        """MiMo Code (an OpenCode fork) stores each message as JSON in SQLite;
+        read token counts of completed assistant messages only."""
+        if self.mimocode_paths is None or now - self.mimocode_scanned >= SLOW_DISCOVERY_SECONDS:
+            self.mimocode_paths = self._mimocode_databases()
+            self.mimocode_scanned = now
+        for path in self.mimocode_paths:
+            try:
+                version = (path.stat().st_mtime_ns, path.stat().st_size)
+                wal = path.with_name(path.name + "-wal")
+                if wal.exists():
+                    version += (wal.stat().st_mtime_ns, wal.stat().st_size)
+            except OSError:
+                continue
+            if self.database_versions.get(path) == version:
+                continue
+            self.database_versions[path] = version
+            since = self.mimocode_cursor.get(path, (now - 86400) * 1000)
+            newest = since
+            db = readonly_db(path)
+            try:
+                rows = db.execute("SELECT id, session_id, time_updated, data FROM message WHERE time_updated > ? ORDER BY time_updated LIMIT 2000", (since,)).fetchall()
+            finally:
+                db.close()
+            for ident, session, updated, data in rows:
+                newest = max(newest, updated or 0)
+                try:
+                    message = json.loads(data)
+                except (TypeError, ValueError):
+                    continue
+                if message.get("role") != "assistant":
+                    continue
+                completed = timestamp(((message.get("time") or {}).get("completed")))
+                tokens = message.get("tokens") or {}
+                if completed is None or not tokens:
+                    continue
+                model = str(message.get("modelID") or "")
+                provider_id = str(message.get("providerID") or "").lower()
+                provider = provider_for(model)
+                if provider == "mimo" and "token-plan" not in provider_id and provider_id not in ("", "xiaomi"):
+                    provider = "other"   # e.g. the free MiMo Auto channel: not plan Credits
+                cache = tokens.get("cache") or {}
+                output = (number(tokens.get("output"), 0) or 0) + (number(tokens.get("reasoning"), 0) or 0)
+                self.add(Observation(key("mimocode", ident), "MiMo Code", str(session), provider, model, completed, int(output), None,
+                                     "读取MiMo Code真实计数；不推算TPS", True, None,
+                                     int((number(tokens.get("input"), 0) or 0) + (number(cache.get("write"), 0) or 0)),
+                                     int(number(cache.get("read"), 0) or 0)), now)
+            self.mimocode_cursor[path] = newest
+        if self.mimocode_paths:
+            self.health["MiMo Code"] = {"status": "已接入", "databases": len(self.mimocode_paths)}
 
     def _codex_logs(self, now: float):
         path = self.codex_root / "logs_2.sqlite"
@@ -459,7 +542,10 @@ class TpsMonitor:
                 if points and moment > points[0]:
                     client_tps = round(output / (moment - points[0]), 1)
                     basis = "客户端流式统计（真实输出token数÷首个输出项至计数完成的时间，含思考和工具调用输出）"
-            self.add(Observation(identity, source, session, provider_for(model), model, moment, int(output), None, basis, True, client_tps), now)
+            cached = number(usage.get("cached_input_tokens"), 0) or 0
+            uncached = max(0, (number(usage.get("input_tokens"), 0) or 0) - cached)  # OpenAI input includes cache hits
+            self.add(Observation(identity, source, session, provider_for(model), model, moment, int(output), None, basis, True, client_tps,
+                                 int(uncached), int(cached)), now)
             context["response_has_tool_call"] = False
             context["response_has_reasoning"] = False
             self.completed_at[session] = max(moment, previous)
@@ -671,6 +757,10 @@ class TpsMonitor:
                 self.health[self.context.get(session or "", {}).get("source", "记录读取")] = {"status": "部分记录不可读取"}
         self._claude_flush(now)
         try:
+            self._mimocode(now)
+        except (OSError, sqlite3.Error):
+            self.health["MiMo Code"] = {"status": "部分数据库不可读取"}
+        try:
             self._antigravity(now)
         except (OSError, sqlite3.Error):
             self.health["Antigravity"] = {"status": "部分数据库不可读取"}
@@ -710,7 +800,7 @@ class TpsMonitor:
 
 
 def running_software() -> list[dict[str, Any]]:
-    names = {"chatgpt.exe": "ChatGPT / Codex 桌面", "codex.exe": "Codex 引擎", "grok.exe": "Grok CLI", "agy.exe": "Antigravity CLI", "antigravity.exe": "Antigravity 桌面", "gemini.exe": "Gemini CLI", "claude.exe": "Claude Code", "cursor.exe": "Cursor", "ollama.exe": "Ollama", "lm studio.exe": "LM Studio", "copilot.exe": "Copilot CLI", "opencode.exe": "OpenCode"}
+    names = {"chatgpt.exe": "ChatGPT / Codex 桌面", "codex.exe": "Codex 引擎", "grok.exe": "Grok CLI", "agy.exe": "Antigravity CLI", "antigravity.exe": "Antigravity 桌面", "gemini.exe": "Gemini CLI", "claude.exe": "Claude Code", "cursor.exe": "Cursor", "ollama.exe": "Ollama", "lm studio.exe": "LM Studio", "copilot.exe": "Copilot CLI", "opencode.exe": "OpenCode", "mimo.exe": "MiMo Code"}
     counts: dict[str, int] = {}
     for process in psutil.process_iter(["name"]):
         name = (process.info.get("name") or "").lower()
@@ -719,13 +809,13 @@ def running_software() -> list[dict[str, Any]]:
         elif name in ("node.exe", "node"):
             try:
                 command = " ".join(process.cmdline()).lower().replace("\\", "/")
-                for marker, app in (("@google/gemini-cli", "Gemini CLI"), ("@anthropic-ai/claude-code", "Claude Code"), ("@qwen-code", "Qwen Code"), ("@github/copilot", "Copilot CLI")):
+                for marker, app in (("@google/gemini-cli", "Gemini CLI"), ("@anthropic-ai/claude-code", "Claude Code"), ("@qwen-code", "Qwen Code"), ("@github/copilot", "Copilot CLI"), ("@mimo-ai/", "MiMo Code")):
                     if marker in command:
                         counts[app] = counts.get(app, 0) + 1
                         break
             except (psutil.Error, OSError):
                 pass
-    supported = {"ChatGPT / Codex 桌面", "Codex 引擎", "Grok CLI", "Antigravity CLI", "Antigravity 桌面", "Claude Code"}
+    supported = {"ChatGPT / Codex 桌面", "Codex 引擎", "Grok CLI", "Antigravity CLI", "Antigravity 桌面", "Claude Code", "MiMo Code"}
     return [{"name": name, "processes": count, "status": "读取本地记录" if name in supported else "暂无可核验的本地TPS信号"} for name, count in sorted(counts.items())]
 
 

@@ -44,7 +44,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(IDLE["claude"], IDLE["grok"])
         self.assertEqual(SETTLE["claude"], 20)
         self.assertEqual(accent("A"), providers.get("claude").accent)
-        self.assertEqual(set(ACCENTS), {"C", "G", "M", "A"})
+        self.assertEqual(set(ACCENTS), {"C", "G", "M", "A", "X"})
         # Danger is no longer Claude's clay, so a low Claude ring stays distinct.
         self.assertNotEqual(ROSE, accent("A"))
         self.assertEqual(quota_icon(50, "A").size, (64, 64))

@@ -32,6 +32,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 | G | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
 | M | Gemini / Antigravity | `agy --print /usage --output-format json`，读取 `gemini-5h` 桶 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数 | 当前读取器没有取得可核验的原生生成 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
 | A | Claude Code，可选 | 临时 Claude Code 会话执行 `/usage`，解析当前会话与每周订阅窗口 | 读取本地会话的 `message.usage.output_tokens` | 解析、去重与错误路径已有测试；真实订阅账号额度尚缺端到端验收；免费桌面端额度未接入 |
+| X | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
 
 额度、输出计数和生成速率来自不同信号。能读到额度，不代表同一来源也提供生成 TPS；没有近期记录也不能证明没有使用。
 
@@ -42,6 +43,18 @@ A 来源面向 **Claude Code 的 CLI 和本地会话记录**。Claude 桌面应�
 若你使用 Claude 免费桌面端，可先配置 `codex,grok,gemini`。启用 A 时，应准备能正常执行 `/usage` 的 Claude Code 登录环境。API Key 计费环境没有这类订阅额度窗口，程序会报告未知或读取失败。
 
 未显式指定来源时，Claude 会在检测到 CLI 或 Claude Code 项目记录目录后自动加入，否则保持关闭。只存在记录目录而缺少可执行文件时，额度仍可能显示未知。显式设置 `CODEX_QUOTA_PROVIDERS` 可以固定显示范围。
+
+### Xiaomi MiMo Token Plan
+
+Token Plan 按 Credits 计费（月付或年付，整期一个额度池），没有 5 小时/每周窗口。X 图标（小米橙）的外环因此显示**今日预算**：剩余 Credits ÷ 到期前剩余天数 = 今天可用的量，外环表示今天还剩多少；环上的象牙色刻度是“按时间今天应剩的位置”，外环短于刻度说明今天用得偏快。卡片另列整期额度（附“时间已过 x%”）、今日已用 / 今日预算 / 剩余 Credits / 日均消耗、到期日、本机今日各来源用量，并按“整期平均”和“最近 7 天本机日均”中较快者预测是否会提前用完。
+
+数据来源（按优先级）：
+
+1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。右键 X 图标选“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口，登录后自动关闭。程序只保留 `platform.xiaomimimo.com` 的 cookie，用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；过期时先用同一配置无窗口静默续期，失败才提示重新登录。“退出 MiMo 登录”删除保存的会话。
+2. **本机记录（实时，仅本机）**：把 Codex、Claude Code、MiMo Code（`mimocode.db`）中 `mimo-*` 请求的缓存命中 / 未命中输入和输出 token 按官方价格表换算为 Credits（v2.6-pro / v2.5-pro：2.5 / 300 / 600；v2.6-flash / v2.5：2 / 100 / 200；北京时间 0:00–8:00 ×0.8；未收录型号按 pro 估算并注明），记入 `mimo-ledger.json`。两次控制台读取之间，显示值 = 最近一次控制台“已用” + 本机此后增量，下次读取时校准。
+3. **手动配置（不登录）**：`%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`、`settlement`（`YEARLY` / `MONTHLY`）；用量只来自本机记录。
+
+Claude Code 通过 `ANTHROPIC_BASE_URL`（环境变量或 `~/.claude/settings.json`）指向 `xiaomimimo.com` 时没有 Claude 订阅可读，A 不会自动出现，这些会话计入 X。未显式指定来源时，X 在已登录/已配置 MiMo、Codex `config.toml` 或 Claude Code 指向 `xiaomimimo.com`、或存在 MiMo Code 数据目录时自动加入。程序不会用 Token Plan 的 API Key 发请求探测额度（套餐只允许在编程工具中使用，探测也会消耗 Credits）。
 
 ## 安装与启动
 
@@ -169,7 +182,7 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 
 | 变量 | 用途 |
 | --- | --- |
-| `CODEX_QUOTA_PROVIDERS` | 显示的来源键，支持 `codex,grok,gemini,claude`；按注册表顺序显示 |
+| `CODEX_QUOTA_PROVIDERS` | 显示的来源键，支持 `codex,grok,gemini,claude,mimo`；按注册表顺序显示 |
 | `CODEX_QUOTA_CODEX_EXE` | 用于额度查询的 `codex` App Server 可执行文件路径 |
 | `CODEX_QUOTA_GROK_EXE` | 用于额度查询的 Grok CLI 路径 |
 | `CODEX_QUOTA_GEMINI_EXE` | 提供对应 `/usage` JSON 的 `agy` 可执行文件路径 |
@@ -177,6 +190,8 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 | `CODEX_HOME` | Codex 本地日志与会话数据根目录 |
 | `GROK_HOME` | Grok 本地记录根目录 |
 | `CLAUDE_CONFIG_DIR` | Claude Code 数据根目录，默认 `~/.claude` |
+| `CODEX_QUOTA_MIMO_BROWSER` | MiMo 登录窗口使用的 Edge/Chrome 路径 |
+| `CODEX_QUOTA_MIMO_PLATFORM` | MiMo 控制台地址，默认 `https://platform.xiaomimimo.com`（测试用） |
 | `CODEX_QUOTA_LEGACY_DPI=1` | 关闭悬停线程的 Per-Monitor V2 模式，供旧显示环境排错 |
 
 路径应指向实际安装位置，例如：
@@ -202,8 +217,12 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `app.log` | 运行错误日志，达到约 1 MB 后轮转，保留两份备份 |
 | `diagnostics.txt` | 从菜单生成的诊断信息 |
 | `claude-probe/` | Claude Code 临时额度探测的工作目录 |
+| `mimo-session.bin` | MiMo 控制台 cookie（仅 platform 域，DPAPI 加密） |
+| `mimo-edge-profile/` | MiMo 登录用的应用自有浏览器配置 |
+| `mimo-ledger.json`、`mimo-days.json` | 本机 MiMo Credits 账本（40 天）与每日首次控制台读数 |
+| `mimo.json` | 可选的 MiMo 手动套餐配置 |
 
-TPS 读取器会在内存解析本地会话记录。`performance.json` 保存数值投影、模型名等统计字段，不包含已解析的消息正文。程序不直接打开客户端的 `auth.json` 或提取 token、cookie；登录由已有客户端处理。
+TPS 读取器会在内存解析本地会话记录。`performance.json` 保存数值投影、模型名等统计字段，不包含已解析的消息正文。程序不直接打开客户端的 `auth.json` 或提取 token、cookie；登录由已有客户端处理。唯一例外是 MiMo：控制台会话 cookie 由程序自己的登录窗口取得，并加密保存在上表位置。
 
 日志与诊断可能包含本地路径、错误文本、账户用量和软件状态。`--check-claude --raw` 额外保存终端文本，仅自动遮盖邮箱，其他内容仍需在共享前检查。仓库的 `.gitignore` 排除了运行缓存、日志、构建输出和常见本地凭据文件。
 
@@ -239,10 +258,11 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 .\outputs\CodexQuotaTray.exe --check-tps work/checks/tps.json
 .\outputs\CodexQuotaTray.exe --check-grok work/checks/grok.json
 .\outputs\CodexQuotaTray.exe --check-claude work/checks/claude.json
+.\outputs\CodexQuotaTray.exe --check-mimo work/checks/mimo.json
 .\outputs\CodexQuotaTray.exe --check-hover work/checks/hover.json
 ```
 
-`--check-tps` 读取两次本地统计；`--check-grok`、`--check-claude` 检查对应真实额度链路。额度读取失败时返回非零退出码，并保留结果中的错误说明。
+`--check-tps` 读取两次本地统计；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。额度读取失败时返回非零退出码，并保留结果中的错误说明。
 
 `--check-hover` 会短暂显示约 4 秒的置顶全屏测试窗口，验证卡片覆盖、连续更新与焦点保持，随后自动关闭。它不移动真实鼠标。
 
@@ -260,6 +280,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
 | Claude 没有显示 | 检查是否被显式来源列表排除，以及 CLI 路径或项目记录目录是否被检测到 |
 | Claude 有图标却没有额度 | 检查 Claude Code 的登录与订阅窗口；免费桌面端不通过该读取器接入 |
+| X 显示“未登录” | 右键 X 选“登录小米 MiMo…”，或运行 `--mimo-login`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
 | 卡片在全屏应用中没有出现 | 先让任务栏图标可见；独占全屏和安全桌面尚不保证覆盖 |
 | 中文出现方框或显示模糊 | 检查系统中文字体，必要时用 legacy DPI 选项排错 |
 | 构建提示 EXE 被占用 | 退出正在运行的目标程序，或构建到另一输出目录 |
@@ -277,6 +298,7 @@ icon_art.py           额度与 TPS 圆盘绘制、字体缓存
 detail_card.py        卡片数据模型与 Pillow 渲染
 hover_details.py      Win32 分层窗口、DPI、悬停及文字提示回退
 hover_check.py        原生卡片显示自检
+mimo_usage.py         MiMo 控制台读取、登录、Credits 账本与今日预算
 tray_app.py           程序入口、菜单、线程协调与登录启动项
 test_*.py             额度、速率、卡片、调度及 Claude 回归用例
 build.ps1             测试与 PyInstaller 构建入口
@@ -290,7 +312,7 @@ build.ps1             测试与 PyInstaller 构建入口
 
 ```powershell
 python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py `
-  test_tray_app.py test_features.py test_claude.py
+  test_tray_app.py test_features.py test_claude.py test_mimo.py
 ```
 
 2026-10-16，本机 Windows 11 / Python 3.12.10 对代码版本 `d5a553a`（合入提交 `ea19ed0`）运行 **97 项测试，全部通过**。测试覆盖解析、计数去重、来源注册表、图标、卡片、刷新调度和预测计算；这是一份本机验证记录。
