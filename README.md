@@ -10,7 +10,9 @@ Windows 通知区域程序，显示 Codex、Grok 和 Gemini（5 小时窗口）�
 
 - Claude（已做好接入准备，检测到 Claude Code 时自动显示，图标字母 A、陶土色）：每次刷新在应用自有的空文件夹 `%LOCALAPPDATA%\CodexQuotaTray\claude-probe` 中启动临时 `claude --strict-mcp-config` 会话并执行 `/usage`，读取 “Current session”（5 小时，主窗口）和 “Current week (all models)”（每周，次窗口）的已用百分比与重置时间；首次在该文件夹运行时自动确认“信任此文件夹”。API Key 计费账号没有订阅额度，会显示明确的提示。
 
-程序不会读取或输出 `auth.json`、token、cookie、账号 ID 等凭据或身份信息。
+- Xiaomi MiMo Token Plan（检测到使用 MiMo 时自动显示，图标字母 X、小米橙）：详见下方“Xiaomi MiMo Token Plan”。
+
+程序不会读取或输出 `auth.json`、token、cookie、账号 ID 等凭据或身份信息（MiMo 控制台会话 cookie 仅以 Windows DPAPI 加密保存在本机，见下文）。
 
 ## 使用
 
@@ -30,8 +32,26 @@ python -X utf8 tray_app.py
 所有来源登记在 `providers.py` 的 `SPECS` 表中（键、图标字母、名称、主色、刷新间隔、打开方式）；托盘图标、菜单、刷新调度、颜色都由这张表生成。新增来源只需在表中加一项，并在 `quota_sources.py` 中提供额度读取函数（可选：在 `tps_sources.py` 中加入本地 token 记录读取）。
 
 - 默认显示 Codex、Grok、Gemini；Claude 在找到 `claude.exe`/`claude.cmd` 或 `~\.claude\projects` 时自动显示。
-- 环境变量 `CODEX_QUOTA_PROVIDERS=codex,grok,gemini,claude` 可指定要显示的来源；`CODEX_QUOTA_CLAUDE_EXE` 可指定 Claude Code 路径，`CLAUDE_CONFIG_DIR` 与 Claude Code 自身的设置一致。
+- 环境变量 `CODEX_QUOTA_PROVIDERS=codex,grok,gemini,claude,mimo` 可指定要显示的来源；`CODEX_QUOTA_CLAUDE_EXE` 可指定 Claude Code 路径，`CLAUDE_CONFIG_DIR` 与 Claude Code 自身的设置一致。
 - `CodexQuotaTray.exe --check-claude <结果文件.json> [--raw]` 单独检查 Claude 额度读取；加 `--raw` 时另存一份去除邮箱的 `/usage` 屏幕文本，便于 Claude Code 更新界面后核对解析规则。
+
+## Xiaomi MiMo Token Plan
+
+Token Plan 是按 Credits 计费的订阅（月付或年付，整期一个额度池），没有 5 小时/每周窗口。因此 X 图标的外环显示**今日预算**：剩余 Credits ÷ 到期前剩余天数 = 今天可用的量，外环表示今天还剩多少；环上的象牙色刻度是“按时间今天应剩的位置”（随一天过去从 12 点顺时针移动），外环短于刻度说明今天用得偏快。
+
+数据来源（按优先级）：
+
+1. **控制台（精确，包含所有设备）**：读取 `platform.xiaomimimo.com` 套餐页面所用的 `GET /api/v1/tokenPlan/usage` 和 `/api/v1/tokenPlan/detail`（只读）。这两个接口不是公开 API，需要小米账号登录的控制台会话：右键 X 图标选择“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置（`%LOCALAPPDATA%\CodexQuotaTray\mimo-edge-profile`）中打开控制台窗口，登录后自动关闭；程序只保留 `platform.xiaomimimo.com` 自己的 cookie，用 Windows DPAPI（当前用户）加密存为 `mimo-session.bin`，从不接触小米账号密码或 `account.xiaomi.com` 的 cookie。会话过期时先用同一配置无窗口地静默续期，失败才提示重新登录；“退出 MiMo 登录”删除保存的会话。
+2. **本机记录（实时，仅本机）**：从 Codex、Claude Code、MiMo Code（`mimocode.db`）的本地记录读取 `mimo-*` 模型每次请求的输入（命中/未命中缓存）和输出 token 数，按官方价格表换算成 Credits（v2.6-pro / v2.5-pro：命中 2.5、未命中 300、输出 600；v2.6-flash / v2.5：2、100、200；北京时间 0:00–8:00 ×0.8；未收录的新型号按 pro 价格估算并注明），记入 `mimo-ledger.json`（保留 40 天）。两次控制台读取之间，显示值 = 最近一次控制台“已用” + 本机此后的增量，所以生成后图标立即变化，下次读控制台时再校准。
+3. **手动配置（不登录）**：在 `%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01", "period_start": "可选", "used_credits": 可选, "plan_name": "可选", "settlement": "YEARLY 或 MONTHLY"}`，用量只来自本机记录。
+
+详情卡片显示：今日预算条和整期额度条（附“时间已过 x%”）、今日已用 / 今日预算 / 剩余 Credits / 日均消耗、到期日期、本机今日各来源用量、控制台更新时间与套餐名；预测按“整期平均”和“最近 7 天本机日均”中较快者估算是否会在到期前用完。今日已用取“本机今日记录”和“控制台今日增量（覆盖其他设备）”中的较大值。
+
+- Claude Code 通过 `ANTHROPIC_BASE_URL`（环境变量或 `~\.claude\settings.json`）指向 `xiaomimimo.com` 时，没有 Claude 订阅可读，A 图标不会自动出现，这些会话的用量计入 X。
+- 自动显示条件：已登录/已配置 MiMo、Codex 的 `config.toml` 或 Claude Code 指向 `xiaomimimo.com`、或存在 MiMo Code 数据目录；也可在 `CODEX_QUOTA_PROVIDERS` 中加入 `mimo`。
+- `CodexQuotaTray.exe --check-mimo <结果文件.json> [--raw]` 单独检查控制台读取；`--raw` 另存去除身份字段的原始接口响应（`.raw.json`），便于核对解析规则。
+- `CODEX_QUOTA_MIMO_BROWSER` 指定登录用的浏览器路径；`CODEX_QUOTA_MIMO_PLATFORM` 可改控制台地址（测试用）。
+- 程序不会用 Token Plan 的 API Key 发请求探测额度（套餐规定只能在编程工具中使用，且探测本身也消耗 Credits）。
 
 ## 按需刷新
 
@@ -93,7 +113,7 @@ python -X utf8 tray_app.py
 ## 构建与测试
 
 ```powershell
-python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py test_claude.py
+python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py test_claude.py test_mimo.py
 .\build.ps1 -DistPath .\outputs
 ```
 

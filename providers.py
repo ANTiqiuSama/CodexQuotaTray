@@ -43,8 +43,35 @@ def find_claude() -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def claude_routes_to_mimo() -> bool:
+    """Claude Code pointed at MiMo's Anthropic-compatible endpoint has no
+    Claude subscription to read; its sessions are counted as MiMo instead."""
+    if "xiaomimimo" in os.environ.get("ANTHROPIC_BASE_URL", ""):
+        return True
+    return any("xiaomimimo" in _read(claude_home() / name) for name in ("settings.json", "settings.local.json"))
+
+
 def _claude_installed() -> bool:
+    if claude_routes_to_mimo():
+        return False
     return find_claude() is not None or (claude_home() / "projects").is_dir()
+
+
+def _mimo_used() -> bool:
+    data = _local_appdata() / "CodexQuotaTray"
+    if (data / "mimo-session.bin").is_file() or (data / "mimo.json").is_file():
+        return True
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    if "xiaomimimo" in _read(codex_home / "config.toml") or claude_routes_to_mimo():
+        return True
+    return any((root / "mimocode").is_dir() for root in (Path.home() / ".local/share", _local_appdata()))
 
 
 @dataclass(frozen=True)
@@ -89,6 +116,15 @@ SPECS: tuple[ProviderSpec, ...] = (
         ("cli", find_claude),
         default=False, detect=_claude_installed,
         source_note="临时 Claude Code 会话 /usage（当前会话 5 小时 + 每周）",
+    ),
+    ProviderSpec(
+        # Token Plan: one Credits pool per billing period (a whole year for
+        # annual plans).  The console read is a cheap HTTPS call; local token
+        # records move the figure in between (see mimo_usage.py).
+        "mimo", "X", "Xiaomi MiMo", None, (255, 112, 30, 255), 20 * 60, 5 * 60, 30,
+        ("url", lambda: "https://platform.xiaomimimo.com/console/plan-manage"),
+        default=False, detect=_mimo_used,
+        source_note="MiMo 控制台套餐用量（登录后只读）+ 本机 Codex / Claude Code / MiMo Code 记录折算 Credits",
     ),
 )
 BY_KEY = {spec.key: spec for spec in SPECS}

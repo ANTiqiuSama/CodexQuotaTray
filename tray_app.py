@@ -20,6 +20,8 @@ from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
 from icon_art import color_for, live_icon, quota_icon  # noqa: F401  (color_for re-exported)
 from quota_sources import (
+    mimo_snapshot,
+    mimo_tracker,
     QuotaSnapshot,
     collect,
     dump_snapshot,
@@ -29,6 +31,7 @@ from quota_sources import (
     placeholder,
     save_cached_snapshots,
 )
+import mimo_usage
 import providers as provider_registry
 from refresh_scheduler import RefreshScheduler
 from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
@@ -41,12 +44,28 @@ PERFORMANCE_SAVE_SECONDS = 60
 # Shown providers (key -> icon letter), in registry order; see providers.py.
 PROVIDERS = {key: provider_registry.get(key).letter for key in provider_registry.enabled_keys()}
 LAUNCHERS = {spec.key: spec.launch for spec in provider_registry.SPECS}
+PACED_PROVIDERS = {"mimo"}
 log = logging.getLogger(APP_NAME)
+
+
+def pace_marker(snapshot: QuotaSnapshot, now: float | None = None) -> float | None:
+    """For pooled plans (MiMo): where the binding ring should end if Credits
+    were spent evenly - the share of its window that is still ahead."""
+    if snapshot.provider not in PACED_PROVIDERS or snapshot.display_remaining is None:
+        return None
+    now = now or time.time()
+    use_secondary = (snapshot.secondary_remaining_percent is not None and
+                     (snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent))
+    minutes = snapshot.secondary_window_minutes if use_secondary else snapshot.window_minutes
+    ends = snapshot.secondary_resets_at if use_secondary else snapshot.resets_at
+    if not minutes or not ends:
+        return None
+    return max(0.0, min(100.0, 100.0 * (ends - now) / (minutes * 60)))
 
 
 def make_provider_icon(snapshot: QuotaSnapshot, letter: str) -> Image.Image:
     # The ring follows the binding window (e.g. Codex weekly when it is lower).
-    return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale)
+    return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale, marker=pace_marker(snapshot))
 
 
 def make_tps_icon(performance: dict, letter: str) -> Image.Image:
@@ -62,6 +81,10 @@ def window_label(minutes: int | None) -> str:
         return ""
     if minutes == 10080:
         return "每周"
+    if 524_000 <= minutes <= 528_000:
+        return "年度"
+    if 40_000 <= minutes <= 45_000:
+        return "月度"
     if minutes % 1440 == 0:
         return f"{minutes // 1440} 天"
     if minutes % 60 == 0:
@@ -98,7 +121,8 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
     else:
         status = f"剩余 {snapshot.remaining_percent:.0f}% · 已用 {snapshot.used_percent:.0f}%"
         if snapshot.secondary_remaining_percent is not None:
-            status += f" · {window_label(snapshot.secondary_window_minutes) or '第二窗口'}剩余 {snapshot.secondary_remaining_percent:.0f}%"
+            second = "今日预算" if snapshot.provider == "mimo" else (window_label(snapshot.secondary_window_minutes) or "第二窗口")
+            status += f" · {second}剩余 {snapshot.secondary_remaining_percent:.0f}%"
     stale = " · 旧数据" if snapshot.stale else ""
     return f"{snapshot.label}: {status}{stale}"
 
@@ -132,6 +156,7 @@ class QuotaTray:
         self.last_samples: dict[str, float | None] = {}
         self.saved_signature: str | None = None
         self.saved_at = 0.0
+        self.mimo_view_at = 0.0
         self.migrate_startup()
         self.icons = {
             provider: HoverIcon(
@@ -158,6 +183,8 @@ class QuotaTray:
 
     def headline_forecast(self, provider: str) -> tuple[str, str]:
         """The most urgent forecast, prefixed with its window when there are two."""
+        if provider == "mimo":
+            return self.mimo_forecast()
         items = self.forecasts(provider)
         if not items:
             return "", "unknown"
@@ -174,6 +201,12 @@ class QuotaTray:
         snapshot = self.snapshots[provider]
         data = self.performance["providers"][provider]
         lines = [data["label"], quota_line(snapshot)]
+        if provider == "mimo":
+            view = mimo_tracker().view()
+            lines.append(f"今日已用 {mimo_usage.credits_text(view.today_used)} / 预算 {mimo_usage.credits_text(view.today_budget)}"
+                         f" · 剩余 {mimo_usage.credits_text(view.remaining)} Credits")
+            if view.error:
+                lines.append(view.error)
         if self.forecast_line(provider):
             lines.append(self.forecast_line(provider))
         lines += ["", self.performance_line(provider),
@@ -183,7 +216,75 @@ class QuotaTray:
             lines.extend(("", "读取状态：" + snapshot.error))
         return "\n".join(lines)
 
+    def mimo_forecast(self) -> tuple[str, str]:
+        view = mimo_tracker().view()
+        if view.remaining is None:
+            return "", "unknown"
+        if not view.pace_daily:
+            return "正在积累用量记录，稍后给出节奏预测", "unknown"
+        if view.period_end and view.exhausts_at and view.exhausts_at < view.period_end:
+            early = (view.period_end - view.exhausts_at) / 86400
+            when = datetime.fromtimestamp(view.exhausts_at).strftime("%Y-%m-%d")
+            return f"按近期速度约 {when} 用完，比到期早 {early:.0f} 天", "danger" if early > 30 else "warn"
+        if view.period_end:
+            left = view.remaining - view.pace_daily * max(0.0, (view.period_end - time.time()) / 86400)
+            share = max(0.0, 100.0 * left / view.total) if view.total else 0.0
+            return f"按近期速度可用到到期，预计剩余 {share:.0f}%", "ok"
+        return f"日均消耗 {mimo_usage.credits_text(view.pace_daily)}", "ok"
+
+    def mimo_card(self, snapshot: QuotaSnapshot, data: dict, letter: str) -> CardModel:
+        view = mimo_tracker().view()
+        now = time.time()
+        live = data.get("active_sessions", 0) > 0
+        if live:
+            status, tone = "使用中", "live"
+        elif snapshot.stale:
+            status, tone = "旧数据", "stale"
+        elif view.remaining is None:
+            status, tone = ("未登录" if view.error and "未登录" in view.error else "读取失败"), "error"
+        else:
+            status, tone = "空闲", "idle"
+        period = window_label(snapshot.window_minutes) or "本期"
+        bars = []
+        if view.today_budget_left_percent is not None:
+            bars.append(("今日预算", view.today_budget_left_percent))
+        if snapshot.remaining_percent is not None:
+            elapsed = f"（时间已过 {view.time_percent:.0f}%）" if view.time_percent is not None else ""
+            bars.append((f"{period}额度{elapsed}", snapshot.remaining_percent))
+        binding = "今日预算" if snapshot.secondary_remaining_percent is not None and (
+            snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent) else f"{period}额度"
+        used = (100.0 - snapshot.display_remaining) if snapshot.display_remaining is not None else None
+        forecast_text, forecast_tone = self.mimo_forecast()
+        metrics = (
+            ("今日已用", mimo_usage.credits_text(view.today_used)),
+            ("今日预算", mimo_usage.credits_text(view.today_budget)),
+            ("剩余 Credits", mimo_usage.credits_text(view.remaining)),
+            ("日均消耗", mimo_usage.credits_text(view.pace_daily)),
+        )
+        footer = []
+        if view.period_end:
+            footer.append(f"到期  {datetime.fromtimestamp(view.period_end).strftime('%Y-%m-%d')} · {duration_text(view.period_end - now)}后")
+        if view.by_source:
+            footer.append("本机今日  " + " · ".join(f"{name} {mimo_usage.credits_text(value)}" for name, value in list(view.by_source.items())[:3]))
+        updated = datetime.fromtimestamp(view.anchor_at).strftime("%H:%M") if view.anchor_at else "未知"
+        plan = self.scheduler.describe("mimo", now) if self.scheduler else ""
+        source = "手动配置" if view.source == "manual" else "控制台"
+        footer.append(f"{source}更新 {updated}" + (f" · {plan}" if plan else ""))
+        notes = []
+        if view.plan_name:
+            notes.append(f"套餐：{view.plan_name}")
+        if mimo_usage.is_night(now):
+            notes.append("当前为夜间时段（0:00–8:00），按 0.8 倍扣 Credits")
+        if view.estimated:
+            notes.append("含未收录价格的 MiMo 型号，按 pro 价格估算")
+        error = view.error if view.remaining is None or snapshot.stale else None
+        return CardModel(letter, "Xiaomi MiMo", status, tone, snapshot.display_remaining, used, binding,
+            tuple(bars), forecast_text, forecast_tone, metrics, tuple(footer), tuple(notes),
+            error, text=self.hover_text("mimo"))
+
     def hover_card(self, provider: str) -> CardModel:
+        if provider == "mimo":
+            return self.mimo_card(self.snapshots[provider], self.performance["providers"][provider], PROVIDERS[provider])
         snapshot = self.snapshots[provider]
         data = self.performance["providers"][provider]
         letter = PROVIDERS[provider]
@@ -259,6 +360,9 @@ class QuotaTray:
             pystray.MenuItem(lambda _: self.menu_reset(provider), None, enabled=False),
             pystray.MenuItem(lambda _: self.menu_countdown(provider), None, enabled=False),
             pystray.MenuItem(lambda _: self.menu_updated(provider), None, enabled=False),
+            *((pystray.MenuItem("登录小米 MiMo…", self.mimo_login),
+               pystray.MenuItem("退出 MiMo 登录", self.mimo_logout, visible=lambda _: mimo_usage.COOKIE_PATH.exists()))
+              if provider == "mimo" else ()),
             pystray.MenuItem(lambda _: "打开诊断信息", self.open_diagnostics),
             pystray.MenuItem(
                 lambda _: "开机自启",
@@ -433,6 +537,8 @@ class QuotaTray:
                 self.performance = self.tps_monitor.poll(now)
                 self.save_performance_if_changed(self.performance, now)
                 self.feed_scheduler(self.performance, now)
+                if "mimo" in PROVIDERS:
+                    self.update_mimo_locally(now)
                 for provider, letter in PROVIDERS.items():
                     if self.icons[provider].visible:
                         self.update_icon(provider, letter)
@@ -451,6 +557,9 @@ class QuotaTray:
         label = provider_registry.get(provider).label
         try:
             target = resolve()
+            if kind == "url":
+                os.startfile(str(target))  # type: ignore[attr-defined]
+                return
             if kind == "aumid":
                 launched = ctypes.windll.shell32.ShellExecuteW(None, "open", f"shell:AppsFolder\\{target}", None, None, 1)
                 if launched <= 32:
@@ -467,6 +576,32 @@ class QuotaTray:
             subprocess.Popen(command, cwd=str(cwd), creationflags=flags, close_fds=True)
         except OSError as error:
             ctypes.windll.user32.MessageBoxW(None, str(error), f"{label} · 无法打开", 0x10)
+
+    def mimo_login(self, _icon=None, _item=None) -> None:
+        def run():
+            try:
+                mimo_usage.login(interactive=True)
+                self.scheduler.request(["mimo"], time.time(), "登录后刷新")
+                self.wake.set()
+            except Exception as error:
+                ctypes.windll.user32.MessageBoxW(None, str(error), "Xiaomi MiMo · 登录未完成", 0x30)
+        threading.Thread(target=run, name="mimo-login", daemon=True).start()
+
+    def mimo_logout(self, _icon=None, _item=None) -> None:
+        mimo_usage.logout()
+        self.scheduler.request(["mimo"], time.time(), "退出登录")
+        self.wake.set()
+
+    def update_mimo_locally(self, now: float) -> None:
+        """Fold new local MiMo token records into the Credits view (no network)."""
+        tracker = mimo_tracker()
+        added = tracker.ledger.ingest(self.tps_monitor.events)
+        tracker.ledger.save()
+        if added or now - self.mimo_view_at >= 60:
+            self.mimo_view_at = now
+            fresh = mimo_snapshot(tracker.view(now))
+            if fresh.remaining_percent is not None or self.snapshots["mimo"].remaining_percent is None:
+                self.snapshots["mimo"] = fresh
 
     def diagnostic_text(self) -> str:
         sections = [dump_snapshot(self.snapshots), "", "数据源边界："]
@@ -570,6 +705,26 @@ def setup_logging() -> None:
         pass
 
 
+def check_mimo(destination: Path, raw: bool = False) -> int:
+    """Read the MiMo console once. `--raw` also saves both responses with
+    identities redacted, to check the parser against the real format."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    responses: dict = {}
+    result: dict = {}
+    try:
+        plan = mimo_usage.fetch_plan(raw=responses)
+        result = {"total": plan.total, "used": plan.used, "plan": plan.plan_name, "period_start": plan.period_start,
+                  "period_end": plan.period_end, "settlement": plan.settlement, "expired": plan.expired, "items": plan.items}
+        code = 0
+    except Exception as error:
+        result, code = {"error": f"{type(error).__name__}: {error}"}, 1
+    destination.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if raw:
+        destination.with_suffix(".raw.json").write_text(
+            json.dumps(mimo_usage.redact(responses), ensure_ascii=False, indent=2), encoding="utf-8")
+    return code
+
+
 def check_claude(destination: Path, raw: bool = False) -> int:
     """Read Claude Code /usage once; `--raw` also saves the cleaned screen
     (emails redacted) so the parser can be checked against a new CLI version."""
@@ -613,6 +768,16 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(dump_snapshot({"grok": snapshot}), encoding="utf-8")
         return 1 if snapshot.error else 0
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-mimo":
+        return check_mimo(Path(sys.argv[2]).resolve(), raw=len(sys.argv) == 4 and sys.argv[3] == "--raw")
+    if len(sys.argv) == 2 and sys.argv[1] == "--mimo-login":
+        try:
+            mimo_usage.login(interactive=True)
+            print("MiMo 登录成功")
+            return 0
+        except Exception as error:
+            print(f"MiMo 登录失败：{error}")
+            return 1
     if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-claude":
         return check_claude(Path(sys.argv[2]).resolve(), raw=len(sys.argv) == 4 and sys.argv[3] == "--raw")
     handle = acquire_single_instance()

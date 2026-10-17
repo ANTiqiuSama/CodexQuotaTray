@@ -186,12 +186,26 @@ def _ring(draw: ImageDraw.ImageDraw, value: float | None, color, track) -> None:
         draw.ellipse((x - width / 2, y - width / 2, x + width / 2, y + width / 2), fill=color)
 
 
-def quota_icon(remaining: float | None, letter: str, stale: bool = False) -> Image.Image:
+def _pace_tick(draw: ImageDraw.ImageDraw, marker: float) -> None:
+    """A short ivory notch across the ring: where the arc 'should' end now.
+    An arc that stops before the notch means spending faster than planned."""
+    angle = math.radians(-90.0 + 360.0 * max(0.0, min(100.0, marker)) / 100.0)
+    radius = (RING_BOX[2] - RING_BOX[0]) / 2
+    centre = (RING_BOX[0] + RING_BOX[2]) / 2
+    inner, outer = radius - RING_W * 0.5, radius + RING_W * 0.62
+    points = [(centre + r * math.cos(angle), centre + r * math.sin(angle)) for r in (inner, outer)]
+    draw.line(points, fill=INK, width=30)
+    draw.line(points, fill=IVORY, width=13)
+
+
+def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker: float | None = None) -> Image.Image:
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
     value = None if remaining is None else max(0.0, min(100.0, remaining))
     _ring(draw, value, ring_color(value, letter), TRACK)
+    if marker is not None and value is not None:
+        _pace_tick(draw, marker)
 
     label, fill = (letter, IVORY) if remaining is not None else ("?", MUTED)
     face = _fit(label, letter_font, 176, 168, 212, draw)
