@@ -326,34 +326,38 @@ class TrayOrderTests(unittest.TestCase):
         }
         self.assertEqual(tray_app.tray_order(snapshots, list(snapshots)), ["gemini", "codex", "mimo", "claude", "grok"])
 
-    def test_reorder_readds_icons_reversed_and_waits_between_moves(self):
-        import tray_app
+    def test_reorder_assigns_providers_to_icons_by_screen_position(self):
         tray = QuotaTray.__new__(QuotaTray)
-        events = []
 
         class FakeIcon:
             details_visible = hover_open = False
-            def __init__(self, name):
-                self.name, self._visible = name, True
-            @property
-            def visible(self):
-                return self._visible
-            @visible.setter
-            def visible(self, value):
-                events.append((self.name, value))
-                self._visible = value
-        keys = ["codex", "grok"]
-        tray.icons = {key: FakeIcon(key) for key in keys}
+            def __init__(self, name, left):
+                self.name, self.left, self.menu = name, left, None
+        # Explorer shows the second-created icon on the left.
+        slots = [FakeIcon("slot0", 200), FakeIcon("slot1", 100), FakeIcon("slot2", None)]
+        tray.slots = slots
+        tray.icons = {"codex": slots[0], "grok": slots[1], "gemini": slots[2]}
         tray.shown_order, tray.reordered_at = [], 0.0
-        tray.snapshots = {"codex": self.snap("codex", 50, 900), "grok": self.snap("grok", 50, 100)}
-        with patch.object(tray_app, "PROVIDERS", {"codex": "C", "grok": "G"}), patch.object(tray_app, "TRAY_ORDER_MODE", "auto"):
+        tray.build_menu = lambda provider: f"menu-{provider}"
+        tray.update_icon = Mock()
+        tray.snapshots = {"codex": self.snap("codex", 50, 900), "grok": self.snap("grok", 0, 100),
+                          "gemini": self.snap("gemini", 50, 300)}
+        rect = lambda icon: None if icon.left is None else (icon.left, 0, icon.left + 24, 24)
+        with patch.object(tray_app, "PROVIDERS", {"codex": "C", "grok": "G", "gemini": "M"}), \
+                patch.object(tray_app, "TRAY_ORDER_MODE", "auto"), patch.object(tray_app.hover_details, "icon_rect", rect):
             self.assertTrue(tray.maybe_reorder(1000.0))
-            self.assertEqual(events, [("grok", False), ("codex", False), ("codex", True), ("grok", True)])
-            self.assertEqual(tray.shown_order, ["grok", "codex"])
+            # Left to right on screen: slot1, slot0, then the unplaced slot2.
+            self.assertEqual({p: i.name for p, i in tray.icons.items()}, {"gemini": "slot1", "codex": "slot0", "grok": "slot2"})
+            self.assertEqual(slots[1].menu, "menu-gemini")
+            self.assertEqual(tray.shown_order, ["gemini", "codex", "grok"])
+            self.assertFalse(tray.maybe_reorder(2000.0))          # already right: nothing changes
             tray.snapshots["codex"] = self.snap("codex", 50, 50)
-            self.assertFalse(tray.maybe_reorder(1010.0))          # too soon after the last move
-            tray.icons["codex"].hover_open = True
-            self.assertFalse(tray.maybe_reorder(2000.0))          # pointer is on an icon
-            tray.icons["codex"].hover_open = False
-            self.assertTrue(tray.maybe_reorder(2000.0))
-            self.assertEqual(tray.shown_order, ["codex", "grok"])
+            self.assertFalse(tray.maybe_reorder(1010.0))          # too soon after the last change
+            slots[0].hover_open = True
+            self.assertFalse(tray.maybe_reorder(3000.0))          # pointer is on an icon
+            slots[0].hover_open = False
+            self.assertTrue(tray.maybe_reorder(3000.0))
+            self.assertEqual(tray.icons["codex"].name, "slot1")
+            slots[0].left, slots[1].left = 100, 200               # user dragged the icons
+            self.assertTrue(tray.maybe_reorder(4000.0))
+            self.assertEqual(tray.icons["codex"].name, "slot0")

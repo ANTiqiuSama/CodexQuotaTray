@@ -31,6 +31,7 @@ from quota_sources import (
     placeholder,
     save_cached_snapshots,
 )
+import hover_details
 import mimo_usage
 import providers as provider_registry
 from refresh_scheduler import RefreshScheduler
@@ -119,17 +120,16 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
     else:
         status = f"剩余 {snapshot.remaining_percent:.0f}% · 已用 {snapshot.used_percent:.0f}%"
         if snapshot.secondary_remaining_percent is not None:
-            second = "今日预算" if snapshot.provider == "mimo" else (window_label(snapshot.secondary_window_minutes) or "第二窗口")
+            second = window_label(snapshot.secondary_window_minutes) or "第二窗口"
             status += f" · {second}剩余 {snapshot.secondary_remaining_percent:.0f}%"
     stale = " · 旧数据" if snapshot.stale else ""
     return f"{snapshot.label}: {status}{stale}"
 
 
 # Tray order: soonest quota refresh first, exhausted quotas last.
-# CODEX_QUOTA_TRAY_ORDER: "auto" (default), "auto-reverse" (if this Windows
-# inserts re-added icons on the right instead of the left), "fixed" (registry order).
+# CODEX_QUOTA_TRAY_ORDER: "auto" (default) or "fixed" (registry order).
 TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
-REORDER_MIN_SECONDS = 120
+REORDER_MIN_SECONDS = 60
 
 
 def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
@@ -194,6 +194,7 @@ class QuotaTray:
             )
             for provider, letter in PROVIDERS.items()
         }
+        self.slots = list(self.icons.values())   # fixed tray icons; providers move between them
 
     # ----- text and card content -------------------------------------------------
 
@@ -230,7 +231,7 @@ class QuotaTray:
         lines = [data["label"], quota_line(snapshot)]
         if provider == "mimo":
             view = mimo_tracker().view()
-            lines.append(f"今日已用 {mimo_usage.credits_text(view.today_used)} / 预算 {mimo_usage.credits_text(view.today_budget)}"
+            lines.append(f"已用 {mimo_usage.credits_text(view.used)} / 共 {mimo_usage.credits_text(view.total)}"
                          f" · 剩余 {mimo_usage.credits_text(view.remaining)} Credits")
             if view.error:
                 lines.append(view.error)
@@ -271,21 +272,18 @@ class QuotaTray:
             status, tone = ("未登录" if view.error and "未登录" in view.error else "读取失败"), "error"
         else:
             status, tone = "空闲", "idle"
-        period = window_label(snapshot.window_minutes) or "本期"
+        period = window_label(snapshot.window_minutes) or "年度"
         bars = []
-        if view.today_budget_left_percent is not None:
-            bars.append(("今日预算", view.today_budget_left_percent))
         if snapshot.remaining_percent is not None:
             elapsed = f"（时间已过 {view.time_percent:.0f}%）" if view.time_percent is not None else ""
             bars.append((f"{period}额度{elapsed}", snapshot.remaining_percent))
-        binding = "今日预算" if snapshot.secondary_remaining_percent is not None and (
-            snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent) else f"{period}额度"
-        used = (100.0 - snapshot.display_remaining) if snapshot.display_remaining is not None else None
+        binding = f"{period}额度"
+        used = snapshot.used_percent
         forecast_text, forecast_tone = self.mimo_forecast()
         metrics = (
-            ("今日已用", mimo_usage.credits_text(view.today_used)),
-            ("今日预算", mimo_usage.credits_text(view.today_budget)),
             ("剩余 Credits", mimo_usage.credits_text(view.remaining)),
+            ("已用 Credits", mimo_usage.credits_text(view.used)),
+            ("今日已用", mimo_usage.credits_text(view.today_used)),
             ("日均消耗", mimo_usage.credits_text(view.pace_daily)),
         )
         footer = []
@@ -469,26 +467,49 @@ class QuotaTray:
         keys = list(PROVIDERS)
         return keys if TRAY_ORDER_MODE == "fixed" else tray_order(self.snapshots, keys)
 
+    def slots_by_position(self) -> list:
+        """The tray icons ("slots") as Windows currently shows them, left to
+        right (top to bottom on a vertical taskbar); icons without a position
+        (overflow flyout, not yet shown) keep their creation order at the end."""
+        slots = getattr(self, "slots", None) or list(self.icons.values())
+        placed, unplaced = [], []
+        for index, slot in enumerate(slots):
+            try:
+                rect = hover_details.icon_rect(slot)
+            except Exception:
+                rect = None
+            (placed if rect else unplaced).append((rect, index, slot))
+        if placed:
+            xs = [rect[0] for rect, _, _ in placed]
+            ys = [rect[1] for rect, _, _ in placed]
+            axis = 0 if max(xs) - min(xs) >= max(ys) - min(ys) else 1
+            placed.sort(key=lambda item: (item[0][axis], item[1]))
+        return [slot for _, _, slot in placed] + [slot for _, _, slot in unplaced]
+
     def maybe_reorder(self, now: float, force: bool = False) -> bool:
-        """Re-add the tray icons so Windows shows them in wanted_order().
-        Windows has no API to move an icon; deleting and adding it again puts
-        it at the insertion end (left on Windows 10/11), keeping its pinning."""
+        """Show providers in wanted_order() by assigning them to the existing
+        tray icons by on-screen position.  Icons are never deleted or re-added:
+        Explorer restores its own remembered layout for re-added icons, so
+        moving them does not stick; swapping what each icon shows does."""
         icons = getattr(self, "icons", None)
         if not icons or (TRAY_ORDER_MODE == "fixed" and not force):
-            return False
-        wanted = self.wanted_order()
-        if wanted == self.shown_order and not force:
             return False
         if not force and now - self.reordered_at < REORDER_MIN_SECONDS:
             return False
         if any(getattr(icon, "details_visible", False) or getattr(icon, "hover_open", False) for icon in icons.values()):
-            return False   # never pull an icon away from under the pointer
-        add_order = wanted if TRAY_ORDER_MODE == "auto-reverse" else list(reversed(wanted))
+            return False   # never change an icon under the pointer
+        wanted = self.wanted_order()
+        mapping = dict(zip(wanted, self.slots_by_position()))
+        if len(mapping) != len(icons) or all(icons[p] is mapping[p] for p in mapping):
+            self.shown_order = wanted
+            return False
         with self.ui_lock:
+            icons.update(mapping)          # same keys: safe for the hover thread
             for provider in wanted:
-                icons[provider].visible = False
-            for provider in add_order:
-                icons[provider].visible = True
+                icon = icons[provider]
+                icon.details_visible = False
+                icon.menu = self.build_menu(provider)
+                self.update_icon(provider, PROVIDERS[provider])
         self.shown_order, self.reordered_at = wanted, now
         log.info("tray order: %s", ", ".join(wanted))
         return True
@@ -739,18 +760,22 @@ class QuotaTray:
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
         hover = HoverDetails(self.icons, self.hover_card, self.stop_event)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
-        ready = {provider: threading.Event() for provider in self.icons}
+        ready = [threading.Event() for _ in self.slots]
+
+        def show(icon, done):
+            icon.visible = True
+            done.set()
         threads = [
-            threading.Thread(target=icon.run, kwargs={"setup": lambda _icon, done=ready[provider]: done.set()},
-                             name=f"tray-{provider}", daemon=True)
-            for provider, icon in self.icons.items()
+            threading.Thread(target=icon.run, kwargs={"setup": lambda icon, done=done: show(icon, done)},
+                             name=f"tray-{index}", daemon=True)
+            for index, (icon, done) in enumerate(zip(self.slots, ready))
         ]
         for thread in threads:
             thread.start()
         deadline = time.monotonic() + 15
-        for event in ready.values():
+        for event in ready:
             event.wait(max(0.0, deadline - time.monotonic()))
-        # Show every icon once, already in the wanted order.
+        time.sleep(1.0)   # let Explorer lay the icons out before reading positions
         self.maybe_reorder(time.time(), force=True)
         for thread in threads:
             thread.join()

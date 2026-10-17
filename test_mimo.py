@@ -229,7 +229,7 @@ class TrackerTests(unittest.TestCase):
         snapshot = quota_sources.mimo_snapshot(view)
         self.assertTrue(snapshot.stale)
         self.assertIsNone(snapshot.error)
-        self.assertEqual(snapshot.secondary_window_minutes, 1440)
+        self.assertIsNone(snapshot.secondary_window_minutes)   # no daily-budget window
         self.assertAlmostEqual(snapshot.remaining_percent, 60, delta=0.1)
 
     def test_nothing_known_is_an_error_snapshot(self):
