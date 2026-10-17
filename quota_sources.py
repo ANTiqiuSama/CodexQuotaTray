@@ -247,14 +247,11 @@ def mimo_tracker():
 
 
 def mimo_snapshot(view, label: str = "Xiaomi MiMo") -> QuotaSnapshot:
-    """Primary = the plan's Credits pool for its period; secondary = today's
-    budget (remaining Credits spread evenly over the remaining days)."""
+    """One window: the plan's yearly Credits pool, ending at the plan expiry."""
     window = None
     if view.period_start and view.period_end and view.period_end > view.period_start:
         window = int(round((view.period_end - view.period_start) / 60))
     remaining = None if view.used_percent is None else 100.0 - view.used_percent
-    today_left = view.today_budget_left_percent
-    midnight = datetime.fromtimestamp(time.time()).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() + 86400
     has_numbers = remaining is not None
     return QuotaSnapshot(
         "mimo", label, window, view.used_percent, remaining,
@@ -264,10 +261,6 @@ def mimo_snapshot(view, label: str = "Xiaomi MiMo") -> QuotaSnapshot:
         # instead of being replaced by "unknown" while logged out.
         bool(view.error) and has_numbers,
         None if has_numbers else (view.error or "暂无 MiMo 套餐数据"),
-        1440 if today_left is not None else None,
-        None if today_left is None else 100.0 - today_left,
-        today_left,
-        int(midnight) if today_left is not None else None,
     )
 
 
