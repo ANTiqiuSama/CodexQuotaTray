@@ -124,6 +124,24 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(mimo_usage.load_cookies(path), {"a": "b"})
         self.assertEqual(mimo_usage.load_cookies(self.dir / "missing"), {})
 
+    def test_session_format_and_first_format_compatibility(self):
+        path = self.dir / "s.bin"
+        mimo_usage.save_session({"cookies": {"sid": "1"}, "headers": {"Authorization": "Bearer t"}, "api_base": "https://x"}, path)
+        self.assertEqual(mimo_usage.load_session(path)["headers"], {"Authorization": "Bearer t"})
+        mimo_usage.save_cookies({"sid": "2"}, path)   # keeps the captured header
+        self.assertEqual(mimo_usage.load_session(path), {"cookies": {"sid": "2"}, "headers": {"Authorization": "Bearer t"}, "api_base": "https://x"})
+        path.write_bytes(mimo_usage._protect(json.dumps({"old": "jar"}).encode()))
+        self.assertEqual(mimo_usage.load_session(path)["cookies"], {"old": "jar"})
+
+    def test_captured_api_keeps_only_console_token_headers(self):
+        events = [
+            {"method": "Network.requestWillBeSent", "params": {"request": {"url": "https://cdn.example.com/api/x", "headers": {"Authorization": "no"}}}},
+            {"method": "Network.requestWillBeSent", "params": {"request": {"url": "https://api.xiaomimimo.com/api/v1/tokenPlan/usage",
+             "headers": {"Authorization": "Bearer t", "Accept": "application/json", "sec-ch-ua": "x", "x-timeZone": "Asia/Shanghai", "x-csrf": "c"}}}},
+            {"method": "Page.loadEventFired", "params": {}},
+        ]
+        self.assertEqual(mimo_usage.captured_api(events), ("https://api.xiaomimimo.com", {"Authorization": "Bearer t", "x-csrf": "c"}))
+
     def test_manual_config(self):
         path = self.dir / "mimo.json"
         self.assertIsNone(manual_plan(path))

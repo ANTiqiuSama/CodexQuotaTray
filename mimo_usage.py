@@ -128,22 +128,41 @@ def _protect(data: bytes, decrypt: bool = False) -> bytes:
         kernel32.LocalFree(target.pbData)
 
 
-def save_cookies(cookies: dict[str, str], path: Path | None = None) -> None:
+def save_session(session: dict[str, Any], path: Path | None = None) -> None:
+    """{"cookies": {...}, "headers": {...}, "api_base": "..."} encrypted with DPAPI."""
     path = path or COOKIE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_protect(json.dumps(cookies).encode("utf-8")))
+    path.write_bytes(_protect(json.dumps(session).encode("utf-8")))
 
 
-def load_cookies(path: Path | None = None) -> dict[str, str]:
+def load_session(path: Path | None = None) -> dict[str, Any]:
     path = path or COOKIE_PATH
     try:
         value = json.loads(_protect(path.read_bytes(), decrypt=True).decode("utf-8"))
-        return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return {"cookies": {}, "headers": {}, "api_base": ""}
+    if not isinstance(value, dict):
+        value = {}
+    if "cookies" not in value and "headers" not in value:   # first format: the cookie jar itself
+        value = {"cookies": value}
+    clean = lambda d: {str(k): str(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    return {"cookies": clean(value.get("cookies")), "headers": clean(value.get("headers")),
+            "api_base": str(value.get("api_base") or "")}
+
+
+def save_cookies(cookies: dict[str, str], path: Path | None = None) -> None:
+    session = load_session(path)
+    session["cookies"] = cookies
+    save_session(session, path)
+
+
+def load_cookies(path: Path | None = None) -> dict[str, str]:
+    return load_session(path)["cookies"]
 
 
 def logout() -> None:
+    import shutil
+    shutil.rmtree(PROFILE_DIR, ignore_errors=True)   # the Xiaomi account session lives there
     for path in (COOKIE_PATH,):
         try:
             path.unlink()
@@ -269,15 +288,19 @@ def parse_plan(usage_payload: Any, detail_payload: Any, now: float | None = None
     )
 
 
-def _request(path: str, cookies: dict[str, str], timeout: float = 15.0) -> Any:
-    request = urllib.request.Request(PLATFORM + path, headers={
+def _request(path: str, session: dict[str, Any], timeout: float = 15.0) -> Any:
+    headers = {
         "Accept": "application/json",
         "Accept-Language": "zh-CN",
         "x-timeZone": "Asia/Shanghai",
-        "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
         "Referer": CONSOLE_URL,
-        "User-Agent": "CodexQuotaTray (+read-only plan usage)",
-    })
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodexQuotaTray/read-only",
+    }
+    headers.update(session.get("headers") or {})
+    cookies = session.get("cookies") or {}
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    request = urllib.request.Request((session.get("api_base") or PLATFORM) + path, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
@@ -292,13 +315,13 @@ def _request(path: str, cookies: dict[str, str], timeout: float = 15.0) -> Any:
 
 
 def fetch_plan(cookies: dict[str, str] | None = None, raw: dict | None = None) -> PlanStatus:
-    cookies = load_cookies() if cookies is None else cookies
-    if not cookies:
+    session = load_session() if cookies is None else {"cookies": cookies}
+    if not session.get("cookies") and not session.get("headers"):
         raise LoginRequired("尚未登录")
-    usage = _request(USAGE_PATH, cookies)
-    detail = _request(DETAIL_PATH, cookies)
+    usage = _request(USAGE_PATH, session)
+    detail = _request(DETAIL_PATH, session)
     if raw is not None:
-        raw.update({"usage": usage, "detail": detail})
+        raw.update({"via": "direct", "usage": usage, "detail": detail})
     return parse_plan(usage, detail)
 
 
@@ -599,16 +622,25 @@ class WebSocket:
                 if first & 0x80:
                     return message.decode("utf-8", "replace")
 
-    def call(self, method: str, params: dict | None = None) -> dict:
+    def call(self, method: str, params: dict | None = None, session: str | None = None) -> dict:
         self.next_id += 1
         ident = self.next_id
-        self.sock.sendall(self.frame(json.dumps({"id": ident, "method": method, "params": params or {}}).encode()))
+        message = {"id": ident, "method": method, "params": params or {}}
+        if session:
+            message["sessionId"] = session
+        self.sock.sendall(self.frame(json.dumps(message).encode()))
         while True:
-            message = json.loads(self.receive())
-            if message.get("id") == ident:
-                if "error" in message:
-                    raise RuntimeError(str(message["error"]))
-                return message.get("result") or {}
+            reply = json.loads(self.receive())
+            if reply.get("id") == ident:
+                if "error" in reply:
+                    raise RuntimeError(str(reply["error"]))
+                return reply.get("result") or {}
+            if "method" in reply:
+                events = getattr(self, "events", None)
+                if events is None:
+                    events = self.events = []
+                events.append(reply)
+                del events[:-500]
 
     def close(self) -> None:
         try:
@@ -619,7 +651,7 @@ class WebSocket:
 
 def platform_cookies(cookies: list[dict]) -> dict[str, str]:
     """Only cookies the platform itself would receive; never account.xiaomi.com."""
-    host = PLATFORM.split("://", 1)[-1].split("/", 1)[0]
+    host = _host(PLATFORM)
     result = {}
     for cookie in cookies:
         domain = str(cookie.get("domain") or "").lstrip(".")
@@ -628,14 +660,122 @@ def platform_cookies(cookies: list[dict]) -> dict[str, str]:
     return result
 
 
-def login(interactive: bool = True, timeout: float = 300.0, verify=None) -> dict[str, str]:
-    """Open the console in an app-owned Edge profile; return platform cookies
-    once the plan endpoints answer.  Non-interactive mode reuses the profile
-    headlessly (the Xiaomi account session there renews platform cookies)."""
+LOGIN_LOG = DATA_DIR / "mimo-login.log"
+_STANDARD_HEADERS = {"accept", "accept-language", "accept-encoding", "user-agent", "referer", "origin", "cookie",
+                     "content-type", "content-length", "connection", "host", "pragma", "cache-control", "priority",
+                     "x-timezone", "dnt", "upgrade-insecure-requests"}
+
+# Runs inside the console page: the browser adds its own cookies, so this works
+# whatever the console uses for its session.  Returns JSON text.
+PAGE_FETCH = r"""(async (paths, extra) => {
+  const out = {href: location.origin + location.pathname};
+  for (const [name, url] of paths) {
+    try {
+      const response = await fetch(url, {credentials: "include", headers: Object.assign(
+        {"Accept": "application/json", "x-timeZone": Intl.DateTimeFormat().resolvedOptions().timeZone}, extra)});
+      out[name + "Status"] = response.status;
+      const text = await response.text();
+      try { out[name] = JSON.parse(text); } catch (e) { out[name] = null; out[name + "Text"] = text.slice(0, 120); }
+    } catch (e) { out[name + "Error"] = String(e); }
+  }
+  try { out.storageKeys = Object.keys(localStorage).slice(0, 40); } catch (e) {}
+  return JSON.stringify(out);
+})"""
+
+
+def _log(message: str) -> None:
+    """Login diagnostics: steps, status codes, cookie/header NAMES — never values."""
+    try:
+        LOGIN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if LOGIN_LOG.exists() and LOGIN_LOG.stat().st_size > 200_000:
+            LOGIN_LOG.unlink()
+        with LOGIN_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n")
+    except OSError:
+        pass
+
+
+def _host(url: str) -> str:
+    return url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+
+
+def captured_api(events: list[dict]) -> tuple[str, dict[str, str]]:
+    """From the console's own requests: the API origin and the non-standard
+    request headers it sends (e.g. an Authorization token from localStorage)."""
+    base, headers = "", {}
+    for event in events:
+        if event.get("method") != "Network.requestWillBeSent":
+            continue
+        request = (event.get("params") or {}).get("request") or {}
+        url = str(request.get("url") or "")
+        if "/api/" not in url or ("xiaomimimo" not in _host(url) and _host(url) != _host(PLATFORM)):
+            continue
+        origin = url.split("/api/", 1)[0]
+        if "tokenPlan" in url or not base:
+            base = origin
+        for name, value in (request.get("headers") or {}).items():
+            lower = name.lower()
+            if lower in _STANDARD_HEADERS or lower.startswith("sec-") or lower.startswith(":"):
+                continue
+            headers[name] = str(value)
+    return base, headers
+
+
+def _page_session(socket_: "WebSocket", attached: dict) -> str | None:
+    """Attach to the console tab (once per target)."""
+    host = _host(PLATFORM)
+    pages = [t for t in socket_.call("Target.getTargets").get("targetInfos", []) if t.get("type") == "page"]
+    page = next((t for t in pages if _host(str(t.get("url"))) == host), pages[0] if pages else None)
+    if not page:
+        return None
+    target = page["targetId"]
+    if target not in attached:
+        session = socket_.call("Target.attachToTarget", {"targetId": target, "flatten": True}).get("sessionId")
+        socket_.call("Network.enable", {}, session)
+        attached[target] = session
+        if _host(str(page.get("url"))) == host:
+            # The console may have loaded before we listened: reload once so its
+            # own API requests (and any token header they carry) are observed.
+            try:
+                socket_.call("Page.reload", {"ignoreCache": False}, session)
+                time.sleep(1.5)
+            except RuntimeError:
+                pass
+        _log(f"attached to page {_host(str(page.get('url')))}")
+    attached["_url"] = str(page.get("url") or "")
+    return attached[target]
+
+
+def page_fetch(socket_: "WebSocket", session: str, base: str, headers: dict[str, str]) -> dict:
+    paths = [["usage", base + USAGE_PATH], ["detail", base + DETAIL_PATH]]
+    expression = f"{PAGE_FETCH}({json.dumps(paths)}, {json.dumps(headers)})"
+    result = socket_.call("Runtime.evaluate", {"expression": expression, "awaitPromise": True,
+                                               "returnByValue": True, "timeout": 15000}, session)
+    value = (result.get("result") or {}).get("value")
+    return json.loads(value) if isinstance(value, str) else {}
+
+
+def _summary(data: dict) -> str:
+    keys = ("href", "usageStatus", "detailStatus", "usageError", "detailError", "usageText", "detailText")
+    parts = [f"{k}={data[k]}" for k in keys if k in data]
+    for name in ("usage", "detail"):
+        payload = data.get(name)
+        if isinstance(payload, dict):
+            parts.append(f"{name}.code={payload.get('code')} {name}.keys={sorted((payload.get('data') or payload) if isinstance(payload.get('data') or payload, dict) else [])[:12]}")
+    if data.get("storageKeys"):
+        parts.append(f"storageKeys={data['storageKeys']}")
+    return " ".join(parts)
+
+
+def login(interactive: bool = True, timeout: float = 600.0, raw: dict | None = None) -> PlanStatus:
+    """Open the console in an app-owned Edge profile and read the plan from
+    inside the page once logged in.  Saves what a direct read needs (platform
+    cookies plus any token header the console sends).  Non-interactive mode
+    runs the same profile headless: this is also the fallback reader when a
+    direct read is rejected."""
     browser = edge_path()
     if not browser:
         raise RuntimeError("未找到 Microsoft Edge / Chrome，无法打开登录窗口")
-    verify = verify or (lambda jar: fetch_plan(jar))
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     port_file = PROFILE_DIR / "DevToolsActivePort"
     try:
@@ -645,33 +785,68 @@ def login(interactive: bool = True, timeout: float = 300.0, verify=None) -> dict
     args = [browser, f"--user-data-dir={PROFILE_DIR}", "--remote-debugging-port=0", "--remote-allow-origins=*",
             "--no-first-run", "--no-default-browser-check", "--disable-sync"]
     args += [f"--app={CONSOLE_URL}", "--window-size=1100,820"] if interactive else ["--headless=new", CONSOLE_URL]
+    _log(f"start {'interactive' if interactive else 'headless'} {os.path.basename(browser)}")
     process = subprocess.Popen(args, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if not interactive else 0)
     socket_ = None
-    deadline = time.monotonic() + (timeout if interactive else 40.0)
+    deadline = time.monotonic() + (timeout if interactive else 45.0)
+    last = ""
     try:
         while time.monotonic() < deadline and not port_file.exists():
             if process.poll() is not None and not port_file.exists():
-                raise RuntimeError("浏览器已退出（可能已有同一配置的窗口在运行）")
+                raise RuntimeError("浏览器已退出（可能已有同一配置的 MiMo 登录窗口在运行，请先关闭它）")
             time.sleep(0.2)
+        if not port_file.exists():
+            raise RuntimeError("浏览器未开启调试端口")
         lines = port_file.read_text().split("\n")
         socket_ = WebSocket(f"ws://127.0.0.1:{int(lines[0])}{lines[1].strip()}")
-        last_error: Exception | None = None
+        socket_.events = []
+        attached: dict = {}
         while time.monotonic() < deadline:
-            jar = platform_cookies(socket_.call("Storage.getCookies").get("cookies", []))
-            if jar:
+            try:
+                session = _page_session(socket_, attached)
+            except (RuntimeError, KeyError) as exc:
+                session = None
+                _log(f"attach failed: {exc}")
+            on_console = session and _host(attached.get("_url", "")) == _host(PLATFORM)
+            if on_console:
+                base, headers = captured_api(socket_.events)
                 try:
-                    verify(jar)
-                    save_cookies(jar)
-                    return jar
-                except LoginRequired as exc:
-                    last_error = exc
-                except Exception as exc:  # logged in, but e.g. no plan: still keep the session
-                    save_cookies(jar)
-                    raise RuntimeError(f"已登录，但读取套餐失败：{exc}") from None
+                    data = page_fetch(socket_, session, base, headers)
+                except (RuntimeError, ValueError) as exc:
+                    data = {"usageError": f"evaluate: {exc}"}
+                summary = _summary(data)
+                if summary != last:
+                    _log(f"page read: {summary}; captured base={base or '-'} headers={sorted(headers)}")
+                    last = summary
+                try:
+                    plan = parse_plan(data.get("usage"), data.get("detail"))
+                except LoginRequired:
+                    plan = None
+                except (ValueError, RuntimeError, AttributeError) as exc:
+                    if data.get("usageStatus") == 200 and isinstance(data.get("usage"), dict):
+                        raise RuntimeError(f"已登录，但读取套餐失败：{exc}（详情见 mimo-login.log）") from None
+                    plan = None
+                if plan is not None:
+                    jar = platform_cookies(socket_.call("Storage.getCookies").get("cookies", []))
+                    api_host = _host(base) if base else ""
+                    if api_host and api_host != _host(PLATFORM):
+                        jar.update({str(c.get("name")): str(c.get("value")) for c in
+                                    socket_.call("Storage.getCookies").get("cookies", [])
+                                    if api_host == str(c.get("domain") or "").lstrip(".") or
+                                    api_host.endswith("." + str(c.get("domain") or "").lstrip("."))})
+                    save_session({"cookies": jar, "headers": headers, "api_base": base})
+                    _log(f"success: cookies={sorted(jar)} headers={sorted(headers)} base={base or PLATFORM}")
+                    if raw is not None:
+                        raw.update({"via": "browser", "usage": data.get("usage"), "detail": data.get("detail"),
+                                    "status": {k: data.get(k) for k in ("usageStatus", "detailStatus")}})
+                    plan.fetched_at = time.time()
+                    globals()["_headless_failed_at"] = 0.0
+                    return plan
             if process.poll() is not None:
                 raise LoginRequired("登录窗口已关闭")
-            time.sleep(1.5)
-        raise LoginRequired(f"登录超时{f'（{last_error}）' if last_error else ''}")
+            time.sleep(2.0)
+        raise LoginRequired("登录超时（详情见 %LOCALAPPDATA%\\CodexQuotaTray\\mimo-login.log）" if interactive else
+                            "MiMo 控制台会话已过期")
     finally:
         if socket_:
             try:
@@ -685,15 +860,30 @@ def login(interactive: bool = True, timeout: float = 300.0, verify=None) -> dict
             process.kill()
 
 
-def fetch_with_renewal() -> PlanStatus:
-    """Cookie read; on expiry try one silent renewal through the Edge profile."""
+_browser_lock = threading.Lock()
+_headless_failed_at = 0.0
+HEADLESS_RETRY = 6 * 3600   # a logged-out profile is not retried on every refresh
+
+
+def fetch_with_renewal(raw: dict | None = None) -> PlanStatus:
+    """Direct read with the saved session; when rejected (expired, or the
+    console needs more than cookies) read once through the headless profile."""
     try:
-        return fetch_plan()
-    except LoginRequired:
+        return fetch_plan(raw=raw)
+    except LoginRequired as exc:
         if not PROFILE_DIR.is_dir() or not edge_path():
             raise
-        jar = login(interactive=False)
-        return fetch_plan(jar)
+        _log(f"direct read rejected ({exc}); trying headless profile")
+        global _headless_failed_at
+        if time.time() - _headless_failed_at < HEADLESS_RETRY or not _browser_lock.acquire(blocking=False):
+            raise
+        try:
+            return login(interactive=False, raw=raw)
+        except LoginRequired:
+            _headless_failed_at = time.time()
+            raise
+        finally:
+            _browser_lock.release()
 
 
 def redact(value: Any) -> Any:

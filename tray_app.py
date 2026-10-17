@@ -580,8 +580,11 @@ class QuotaTray:
     def mimo_login(self, _icon=None, _item=None) -> None:
         def run():
             try:
-                mimo_usage.login(interactive=True)
-                self.scheduler.request(["mimo"], time.time(), "登录后刷新")
+                plan = mimo_usage.login(interactive=True)
+                tracker = mimo_tracker()
+                tracker.refresh(lambda: plan)
+                with self.ui_lock:
+                    self.snapshots["mimo"] = mimo_snapshot(tracker.view())
                 self.wake.set()
             except Exception as error:
                 ctypes.windll.user32.MessageBoxW(None, str(error), "Xiaomi MiMo · 登录未完成", 0x30)
@@ -712,8 +715,8 @@ def check_mimo(destination: Path, raw: bool = False) -> int:
     responses: dict = {}
     result: dict = {}
     try:
-        plan = mimo_usage.fetch_plan(raw=responses)
-        result = {"total": plan.total, "used": plan.used, "plan": plan.plan_name, "period_start": plan.period_start,
+        plan = mimo_usage.fetch_with_renewal(raw=responses)
+        result = {"via": responses.get("via"), "total": plan.total, "used": plan.used, "plan": plan.plan_name, "period_start": plan.period_start,
                   "period_end": plan.period_end, "settlement": plan.settlement, "expired": plan.expired, "items": plan.items}
         code = 0
     except Exception as error:
@@ -771,13 +774,17 @@ def main() -> int:
     if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-mimo":
         return check_mimo(Path(sys.argv[2]).resolve(), raw=len(sys.argv) == 4 and sys.argv[3] == "--raw")
     if len(sys.argv) == 2 and sys.argv[1] == "--mimo-login":
+        # The EXE has no console: report with a message box as well.
         try:
-            mimo_usage.login(interactive=True)
-            print("MiMo 登录成功")
-            return 0
+            plan = mimo_usage.login(interactive=True)
+            text, code, flags = (f"MiMo 登录成功：{plan.plan_name or '套餐'}，剩余 "
+                                 f"{mimo_usage.credits_text((plan.total or 0) - (plan.used or 0))} Credits"), 0, 0x40
         except Exception as error:
-            print(f"MiMo 登录失败：{error}")
-            return 1
+            text, code, flags = f"MiMo 登录失败：{error}", 1, 0x30
+        print(text)
+        if os.name == "nt":
+            ctypes.windll.user32.MessageBoxW(None, text, "Xiaomi MiMo", flags)
+        return code
     if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-claude":
         return check_claude(Path(sys.argv[2]).resolve(), raw=len(sys.argv) == 4 and sys.argv[3] == "--raw")
     handle = acquire_single_instance()

@@ -50,7 +50,7 @@ Token Plan 按 Credits 计费（月付或年付，整期一个额度池），没
 
 数据来源（按优先级）：
 
-1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。右键 X 图标选“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口，登录后自动关闭。程序只保留 `platform.xiaomimimo.com` 的 cookie，用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；过期时先用同一配置无窗口静默续期，失败才提示重新登录。“退出 MiMo 登录”删除保存的会话。
+1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。右键 X 图标选“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口；登录后程序在控制台页面内读取套餐（与网页本身的登录方式无关），成功后窗口自动关闭并弹出结果。程序只保留 `platform.xiaomimimo.com` 的 cookie 和控制台接口请求自带的令牌请求头（如有），用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；之后直接读取接口；被拒绝（过期或需要更多凭据）时用同一配置无窗口地在页面内读取一次并更新会话，仍失败才提示重新登录（6 小时内不重复尝试）。“退出 MiMo 登录”删除保存的会话。
 2. **本机记录（实时，仅本机）**：把 Codex、Claude Code、MiMo Code（`mimocode.db`）中 `mimo-*` 请求的缓存命中 / 未命中输入和输出 token 按官方价格表换算为 Credits（v2.6-pro / v2.5-pro：2.5 / 300 / 600；v2.6-flash / v2.5：2 / 100 / 200；北京时间 0:00–8:00 ×0.8；未收录型号按 pro 估算并注明），记入 `mimo-ledger.json`。两次控制台读取之间，显示值 = 最近一次控制台“已用” + 本机此后增量，下次读取时校准。
 3. **手动配置（不登录）**：`%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`、`settlement`（`YEARLY` / `MONTHLY`）；用量只来自本机记录。
 
@@ -221,6 +221,7 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `mimo-edge-profile/` | MiMo 登录用的应用自有浏览器配置 |
 | `mimo-ledger.json`、`mimo-days.json` | 本机 MiMo Credits 账本（40 天）与每日首次控制台读数 |
 | `mimo.json` | 可选的 MiMo 手动套餐配置 |
+| `mimo-login.log` | MiMo 登录/续期诊断：步骤、HTTP 状态码、cookie 与请求头的**名称**（不含值） |
 
 TPS 读取器会在内存解析本地会话记录。`performance.json` 保存数值投影、模型名等统计字段，不包含已解析的消息正文。程序不直接打开客户端的 `auth.json` 或提取 token、cookie；登录由已有客户端处理。唯一例外是 MiMo：控制台会话 cookie 由程序自己的登录窗口取得，并加密保存在上表位置。
 
@@ -280,7 +281,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
 | Claude 没有显示 | 检查是否被显式来源列表排除，以及 CLI 路径或项目记录目录是否被检测到 |
 | Claude 有图标却没有额度 | 检查 Claude Code 的登录与订阅窗口；免费桌面端不通过该读取器接入 |
-| X 显示“未登录” | 右键 X 选“登录小米 MiMo…”，或运行 `--mimo-login`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
+| X 显示“未登录”或登录窗口不关闭 | 右键 X 选“登录小米 MiMo…”，或运行 `--mimo-login`，登录后停留在控制台页面；仍不成功时查看 `mimo-login.log`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
 | 卡片在全屏应用中没有出现 | 先让任务栏图标可见；独占全屏和安全桌面尚不保证覆盖 |
 | 中文出现方框或显示模糊 | 检查系统中文字体，必要时用 legacy DPI 选项排错 |
 | 构建提示 EXE 被占用 | 退出正在运行的目标程序，或构建到另一输出目录 |
