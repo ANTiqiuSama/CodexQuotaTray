@@ -26,7 +26,9 @@ from quota_sources import (
     collect,
     dump_snapshot,
     get_claude_quota,
+    get_codex_quota,
     get_grok_quota,
+    parse_codex_session_limits,
     load_cached_snapshots,
     placeholder,
     save_cached_snapshots,
@@ -550,6 +552,10 @@ class QuotaTray:
             if self.scheduler is not None:
                 for provider, snapshot in results.items():
                     self.scheduler.completed(provider, snapshot, now)
+            for provider, snapshot in results.items():
+                log.info("quota %s: left=%s second=%s reset=%s/%s stale=%s error=%s", provider,
+                         snapshot.remaining_percent, snapshot.secondary_remaining_percent, snapshot.resets_at,
+                         snapshot.secondary_resets_at, snapshot.stale, snapshot.error)
         self.update_ui()
 
     def refresh(self) -> None:
@@ -617,6 +623,8 @@ class QuotaTray:
                 self.feed_scheduler(self.performance, now)
                 if "mimo" in PROVIDERS:
                     self.update_mimo_locally(now)
+                if "codex" in PROVIDERS:
+                    self.update_codex_locally(now)
                 if now - getattr(self, "order_checked_at", 0.0) >= 30:
                     self.order_checked_at = now
                     self.maybe_reorder(now)   # resets pass between refreshes
@@ -675,6 +683,29 @@ class QuotaTray:
         mimo_usage.logout()
         self.scheduler.request(["mimo"], time.time(), "退出登录")
         self.wake.set()
+
+    def update_codex_locally(self, now: float) -> None:
+        """Codex writes fresh rate limits into its session record after every
+        response; use them at once instead of waiting for the next App Server
+        read.  A recorded "usage limit" error triggers an immediate read."""
+        monitor = self.tps_monitor
+        record = getattr(monitor, "codex_rate_limits", None)
+        current = self.snapshots.get("codex")
+        if record and current is not None and record[0] > (current.updated_at or 0) and record[0] > now - 6 * 3600:
+            fresh = parse_codex_session_limits(record[1], record[0])
+            if fresh is not None:
+                self.snapshots["codex"] = fresh
+                if self.history is not None and self.history.record(fresh):
+                    self.history.save()
+                log.info("codex quota from session record: %.0f%% left, reset %s", fresh.remaining_percent, fresh.resets_at)
+                self.update_ui()
+        hit = getattr(monitor, "codex_limit_hit_at", 0.0)
+        if hit and hit > getattr(self, "codex_limit_seen", 0.0):
+            self.codex_limit_seen = hit
+            if self.scheduler is not None:
+                self.scheduler.request(["codex"], now + 3, "额度用尽")
+                self.wake.set()
+            log.info("codex usage-limit error recorded at %s; refreshing", hit)
 
     def update_mimo_locally(self, now: float) -> None:
         """Fold new local MiMo token records into the Credits view (no network)."""
@@ -862,6 +893,20 @@ def main() -> int:
         destination = Path(sys.argv[2]).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(dump_snapshot({"grok": snapshot}), encoding="utf-8")
+        return 1 if snapshot.error else 0
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-codex":
+        destination = Path(sys.argv[2]).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        raw: dict = {}
+        snapshot = get_codex_quota(raw)
+        destination.write_text(dump_snapshot({"codex": snapshot}), encoding="utf-8")
+        if len(sys.argv) == 4 and sys.argv[3] == "--raw":
+            monitor = TpsMonitor()
+            monitor.poll()
+            record = monitor.codex_rate_limits
+            raw["session_record"] = {"at": record[0], "rate_limits": record[1]} if record else None
+            raw["limit_error_at"] = monitor.codex_limit_hit_at or None
+            destination.with_suffix(".raw.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         return 1 if snapshot.error else 0
     if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-mimo":
         return check_mimo(Path(sys.argv[2]).resolve(), raw=len(sys.argv) == 4 and sys.argv[3] == "--raw")

@@ -234,6 +234,10 @@ class TpsMonitor:
         self.database_versions: dict[Path, tuple[int, int]] = {}
         self.health: dict[str, dict[str, Any]] = {}
         self.legacy_totals: dict[str, int] = {}
+        # Latest Codex rate-limit figures written into session records after
+        # each response (from the server's response headers): (moment, dict).
+        self.codex_rate_limits: tuple[float, dict] | None = None
+        self.codex_limit_hit_at = 0.0       # a "usage limit reached" error was recorded
         self.software: list[dict[str, Any]] = []
         self.last_slow_discovery = 0.0
         self.usage_versions: dict[Path, tuple[int, int]] = {}
@@ -590,6 +594,15 @@ class TpsMonitor:
             self.activity[session] = (provider_for(context.get("model", "")), moment, "客户端工作中")
         if event in ("task_complete", "turn_aborted", "error") and self.activity.get(session, (None, 0, None))[1] <= moment:
             self.activity.pop(session, None)
+        if kind == "event_msg" and provider_for(context.get("model", "")) in ("codex", "other"):
+            limits = payload.get("rate_limits") if event == "token_count" else None
+            if isinstance(limits, dict) and limits.get("limit_id") in (None, "codex") and \
+                    (self.codex_rate_limits is None or moment >= self.codex_rate_limits[0]):
+                self.codex_rate_limits = (moment, limits)
+            if event == "error" and moment > now - 600:
+                text = str(payload.get("message") or "").lower()
+                if "usage limit" in text or "rate limit" in text or "usage_limit" in text:
+                    self.codex_limit_hit_at = max(self.codex_limit_hit_at, moment)
         if kind == "token_usage_record":
             if payload.get("thread_id") and payload["thread_id"] != session:
                 return  # A fork's replay belongs to the original thread.

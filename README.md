@@ -148,6 +148,8 @@ TPS 观察器每秒读取已有本地信号，本身不发送模型生成请求�
 | 读取失败 | 30 秒、1 分钟、2 分钟、5 分钟退避 | 同左 |
 | 已知额度重置时间 | 重置后约 5 秒安排刷新 | 同左 |
 
+Codex 每次响应后会把服务端返回的额度写入本地会话记录（`token_count` 事件中的 `rate_limits`）。托盘每秒读取这些记录，比上次 App Server 读取更新时立即更新 C 图标，无需等到下一次定时刷新；会话记录出现“usage limit / rate limit”错误时，约 3 秒后立即重新读取 App Server。
+
 调度按来源管理，同一轮到期的读取并行执行。CLI 启动、网络和已有读取任务会影响实际完成时间。卡片底部显示下一次计划刷新。
 
 查询失败时继续显示最后有效数值，同时保留原更新时间并标记“旧数据”。`performance.json` 只在内容变化或距上次保存达到 60 秒时写入；文件时间没有逐秒变化，并不直接意味着观察器停止。
@@ -229,7 +231,7 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `state.json` | 最后一次额度读数、时间、旧数据标记和错误状态 |
 | `performance.json` | 数值化输出计数、速率、来源及可观测状态 |
 | `history.json` | 预测用的时间、已用百分比、重置时间 |
-| `app.log` | 运行错误日志，达到约 1 MB 后轮转，保留两份备份 |
+| `app.log` | 运行日志（错误与每次额度刷新结果），达到约 1 MB 后轮转，保留两份备份 |
 | `diagnostics.txt` | 从菜单生成的诊断信息 |
 | `claude-probe/` | Claude Code 临时额度探测的工作目录 |
 | `mimo-session.bin` | MiMo 控制台 cookie（仅 platform 域，DPAPI 加密） |
@@ -272,13 +274,14 @@ python -m PyInstaller --noconfirm --onefile --windowed `
 ```powershell
 New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 .\outputs\CodexQuotaTray.exe --check-tps work/checks/tps.json
+.\outputs\CodexQuotaTray.exe --check-codex work/checks/codex.json
 .\outputs\CodexQuotaTray.exe --check-grok work/checks/grok.json
 .\outputs\CodexQuotaTray.exe --check-claude work/checks/claude.json
 .\outputs\CodexQuotaTray.exe --check-mimo work/checks/mimo.json
 .\outputs\CodexQuotaTray.exe --check-hover work/checks/hover.json
 ```
 
-`--check-tps` 读取两次本地统计；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。额度读取失败时返回非零退出码，并保留结果中的错误说明。
+`--check-tps` 读取两次本地统计；`--check-codex` 读取 App Server 额度，加 `--raw` 时另存 `codex.raw.json`，包含 App Server 原始响应、最近一条会话记录中的 `rate_limits` 和额度用尽错误时间；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。每次定时刷新的结果（剩余、重置时间、是否旧数据、错误）都会写入 `app.log`，便于排查图标未更新。额度读取失败时返回非零退出码，并保留结果中的错误说明。
 
 `--check-hover` 会短暂显示约 4 秒的置顶全屏测试窗口，验证卡片覆盖、连续更新与焦点保持，随后自动关闭。它不移动真实鼠标。
 
@@ -292,6 +295,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | --- | --- |
 | 没看到图标 | 检查 Windows 隐藏图标区域、来源选择和 `app.log` |
 | 只显示字母或 `?` | 查看详情中的额度状态；确认客户端入口和登录已准备好 |
+| Codex 额度用完但图标没变 | 查看 `app.log` 中的 `quota codex` 与 `codex quota from session record` 行；用 `--check-codex <文件> --raw` 核对 App Server 各额度桶与会话记录 |
 | 生成时没有 TPS | 查看是否取得完整样本，以及该来源是否提供生成 TPS |
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
 | Claude 没有显示 | 检查是否被显式来源列表排除，以及 CLI 路径或项目记录目录是否被检测到 |
