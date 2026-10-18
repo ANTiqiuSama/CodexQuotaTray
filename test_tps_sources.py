@@ -146,21 +146,66 @@ class TpsTests(unittest.TestCase):
         self.assertEqual(data["output_tokens_60"], 200)
         self.assertIsNone(data["generation_tps"])
 
-    def make_agy_db(self, corrupt_total=False):
+    def make_agy_db(self, corrupt_total=False, step_type=None, total=True):
         folder = self.home / ".gemini/antigravity-cli/conversations"
         folder.mkdir(parents=True)
         path = folder / "a.db"
         db = sqlite3.connect(path)
         db.execute("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB)")
-        db.execute("CREATE TABLE steps(idx INTEGER,status INTEGER,metadata BLOB)")
-        usage = pv(3, 51 if corrupt_total else 50) + pv(9, 40) + pv(10, 10) + pb(11, b"response-a")
+        if step_type is None:
+            db.execute("CREATE TABLE steps(idx INTEGER,status INTEGER,metadata BLOB)")
+        else:
+            db.execute("CREATE TABLE steps(idx INTEGER,step_type INTEGER,status INTEGER,metadata BLOB)")
+        usage = (pv(3, 51 if corrupt_total else 50) if total else b"") + pv(9, 40) + pv(10, 10) + pb(11, b"response-a")
         model = pb(4, usage) + pb(11, stamp(20)) + pb(12, stamp(2)) + pb(19, b"gemini-3.8-flash")
         db.execute("INSERT INTO gen_metadata VALUES(0,?)", (pb(1, model),))
         metadata = pb(1, stamp(self.now - 3)) + pb(7, stamp(self.now - 1)) + pb(9, pb(11, b"response-a"))
-        db.execute("INSERT INTO steps VALUES(0,3,?)", (metadata,))
+        if step_type is None:
+            db.execute("INSERT INTO steps VALUES(0,3,?)", (metadata,))
+        else:
+            db.execute("INSERT INTO steps VALUES(0,?,3,?)", (step_type, metadata))
         db.commit()
         db.close()
         return path
+
+    def test_antigravity_reply_step_time_gives_tps(self):
+        self.make_agy_db(step_type=15)
+        self.monitor._antigravity(self.now)
+        data = self.monitor.snapshot(self.now)["providers"]["gemini"]
+        self.assertEqual(data["generation_tps"], 25.0)          # 50 tokens / 2 s
+        self.assertIn("含首字延迟", data["display_basis"])
+
+    def test_antigravity_other_step_types_do_not_give_tps(self):
+        self.make_agy_db(step_type=7)
+        self.monitor._antigravity(self.now)
+        self.assertIsNone(self.monitor.snapshot(self.now)["providers"]["gemini"]["generation_tps"])
+
+    def test_antigravity_without_total_field_still_counts(self):
+        self.make_agy_db(total=False)
+        self.monitor._antigravity(self.now)
+        self.assertEqual(self.monitor.snapshot(self.now)["providers"]["gemini"]["output_tokens_60"], 50)
+
+    def test_antigravity_locked_database_is_read_from_a_copy(self):
+        path = self.make_agy_db(step_type=15)
+        holder = sqlite3.connect(path)
+        holder.execute("PRAGMA locking_mode=EXCLUSIVE")
+        holder.execute("BEGIN EXCLUSIVE")
+        try:
+            self.monitor._antigravity(self.now)
+        finally:
+            holder.rollback()
+            holder.close()
+        self.assertEqual(self.monitor.snapshot(self.now)["providers"]["gemini"]["generation_tps"], 25.0)
+
+    def test_antigravity_diagnostics_hide_text(self):
+        from tps_sources import antigravity_diagnostics
+        self.make_agy_db(step_type=15)
+        report = antigravity_diagnostics(home=self.home)
+        text = json.dumps(report)
+        self.assertNotIn("response-a", text)
+        newest = next(root for root in report["roots"] if root["databases"])["newest"][0]
+        self.assertEqual(newest["steps"][0]["step_type"], 15)
+        self.assertEqual(newest["gen_metadata"][0]["chat_model"]["19"], "gemini-3.8-flash")
 
     def test_antigravity_preserves_counts_without_estimating_tps(self):
         self.make_agy_db()
