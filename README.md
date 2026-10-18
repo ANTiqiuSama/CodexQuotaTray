@@ -30,7 +30,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 | --- | --- | --- | --- | --- |
 | C | GPT / Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
 | G | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
-| M | Gemini / Antigravity | `agy --print /usage --output-format json`，读取 `gemini-5h` 桶 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数 | 当前读取器没有取得可核验的原生生成 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
+| M | Gemini / Antigravity | `agy --print /usage --output-format json`，读取 `gemini-5h` 桶 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
 | A | Claude Code，可选 | 临时 Claude Code 会话执行 `/usage`，解析当前会话与每周订阅窗口 | 读取本地会话的 `message.usage.output_tokens` | 解析、去重与错误路径已有测试；真实订阅账号额度尚缺端到端验收；免费桌面端额度未接入 |
 | X | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
 
@@ -121,7 +121,15 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 | Codex（模型提供方指向 MiMo） | 与 Codex 相同：真实输出 token 数 ÷ 首个输出项至计数完成的流式时间 | 客户端直连 MiMo 接口，流式时间可用 |
 | Claude Code（`ANTHROPIC_BASE_URL` 指向 MiMo） | 真实输出 token 数 ÷ 请求发出（上一条用户/工具结果记录）至回复结束 | 记录中没有流式时间，只能算**端到端速率**，包含首字延迟，数值偏低；标注“含首字延迟” |
 
-**Gemini / Antigravity 和 Claude 模型的 Claude Code** 当前没有可核验的原生生成 TPS，界面保留未知值，只展示可读到的输出计数和活动状态。
+**Gemini / Antigravity** 从本地会话数据库（`~/.gemini/antigravity*/conversations/*.db`）读取每次生成的输出 token（正文 + 思考），用对应模型回复步骤（step_type 15）从创建到完成的时间计算：
+
+```text
+Gemini TPS = 输出 token 数 / 回复步骤创建至完成的时间（含首字延迟）
+```
+
+数据库被 Antigravity 锁定时读取其临时副本。经 Codex 桥接使用 Gemini 时，同样采用 Codex 客户端的流式统计。
+
+**Claude 模型的 Claude Code** 当前没有可核验的原生生成 TPS，界面保留未知值，只展示可读到的输出计数和活动状态。
 
 ### 最近 60 秒输出速率
 
@@ -275,13 +283,14 @@ python -m PyInstaller --noconfirm --onefile --windowed `
 New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 .\outputs\CodexQuotaTray.exe --check-tps work/checks/tps.json
 .\outputs\CodexQuotaTray.exe --check-codex work/checks/codex.json
+.\outputs\CodexQuotaTray.exe --check-gemini-tps work/checks/gemini-tps.json
 .\outputs\CodexQuotaTray.exe --check-grok work/checks/grok.json
 .\outputs\CodexQuotaTray.exe --check-claude work/checks/claude.json
 .\outputs\CodexQuotaTray.exe --check-mimo work/checks/mimo.json
 .\outputs\CodexQuotaTray.exe --check-hover work/checks/hover.json
 ```
 
-`--check-tps` 读取两次本地统计；`--check-codex` 读取 App Server 额度，加 `--raw` 时另存 `codex.raw.json`，包含 App Server 原始响应、最近一条会话记录中的 `rate_limits` 和额度用尽错误时间；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。每次定时刷新的结果（剩余、重置时间、是否旧数据、错误）都会写入 `app.log`，便于排查图标未更新。额度读取失败时返回非零退出码，并保留结果中的错误说明。
+`--check-tps` 读取两次本地统计；`--check-gemini-tps` 输出最新几个 Antigravity 数据库的结构（字段编号、数值、时间，不含提示词和回复文本）以及当前 Gemini TPS；`--check-codex` 读取 App Server 额度，加 `--raw` 时另存 `codex.raw.json`，包含 App Server 原始响应、最近一条会话记录中的 `rate_limits` 和额度用尽错误时间；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。每次定时刷新的结果（剩余、重置时间、是否旧数据、错误）都会写入 `app.log`，便于排查图标未更新。额度读取失败时返回非零退出码，并保留结果中的错误说明。
 
 `--check-hover` 会短暂显示约 4 秒的置顶全屏测试窗口，验证卡片覆盖、连续更新与焦点保持，随后自动关闭。它不移动真实鼠标。
 
@@ -296,6 +305,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | 没看到图标 | 检查 Windows 隐藏图标区域、来源选择和 `app.log` |
 | 只显示字母或 `?` | 查看详情中的额度状态；确认客户端入口和登录已准备好 |
 | Codex 额度用完但图标没变 | 查看 `app.log` 中的 `quota codex` 与 `codex quota from session record` 行；用 `--check-codex <文件> --raw` 核对 App Server 各额度桶与会话记录 |
+| Gemini 没有 TPS | 运行 `--check-gemini-tps <文件>`，查看数据库是否被找到、是否读取出错、回复步骤是否有创建/完成时间 |
 | 生成时没有 TPS | 查看是否取得完整样本，以及该来源是否提供生成 TPS |
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
 | Claude 没有显示 | 检查是否被显式来源列表排除，以及 CLI 路径或项目记录目录是否被检测到 |

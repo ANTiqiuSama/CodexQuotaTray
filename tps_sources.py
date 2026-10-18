@@ -10,7 +10,9 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -618,7 +620,7 @@ class TpsMonitor:
             source = "Codex · Gemini桥接回传" if bridge_copy else "Codex"
             client_tps = None
             basis = "客户端暂未取得完整流式计数"
-            if provider_for(model) in ("codex", "mimo"):
+            if provider_for(model) in ("codex", "mimo", "gemini"):
                 points = [point for point in self.client_stream_starts.get(session, []) if previous < point <= moment]
                 if points and moment > points[0]:
                     client_tps = round(output / (moment - points[0]), 1)
@@ -735,73 +737,102 @@ class TpsMonitor:
             session = str(record.get("sid") or "grok-client")
             self.add(Observation(key("grok-native", session, data.get("loop_index"), ended), "Grok CLI 原生统计", session, "grok", "grok", ended, int(output), None, "CLI原生 tokens_per_sec", False, tps), now)
 
-    def _antigravity(self, now: float):
+    def _antigravity_roots(self) -> list[tuple[Path, str]]:
         roots = [(self.home / ".gemini/antigravity/conversations", "Antigravity 桌面"), (self.home / ".gemini/antigravity-cli/conversations", "Antigravity CLI")]
         temporary = Path(os.environ.get("TEMP", self.home / "AppData/Local/Temp"))
         for profile in temporary.glob("codex-agy-model-*"):
             roots.append((profile / "profile/antigravity-cli/conversations", "Antigravity CLI · Codex隔离配置"))
-        for root, source in roots:
+        return roots
+
+    def _antigravity(self, now: float):
+        for root, source in self._antigravity_roots():
             paths = list(root.glob("*.db"))
             good = 0
             skipped = 0
             for path in paths:
-                version = (path.stat().st_mtime_ns, path.with_name(path.name + "-wal").stat().st_mtime_ns if path.with_name(path.name + "-wal").exists() else 0)
+                wal = path.with_name(path.name + "-wal")
+                version = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns if wal.exists() else 0)
                 if self.database_versions.get(path) == version:
                     good += 1
                     continue
+                if path.stat().st_mtime < now - 86400 and version[1] / 1e9 < now - 86400:
+                    self.database_versions[path] = version   # nothing from the last day
+                    good += 1
+                    continue
                 try:
-                    with readonly_db(path) as db:
-                        rows = db.execute("SELECT idx,data FROM gen_metadata ORDER BY idx DESC LIMIT 300").fetchall()
-                        steps = db.execute("SELECT idx,status,metadata FROM steps ORDER BY idx DESC LIMIT 3000").fetchall()
+                    rows, steps = read_antigravity_db(path)
                 except sqlite3.Error:
                     skipped += 1
                     continue
-                by_response: dict[bytes, float] = {}
-                by_index: dict[int, float] = {}
-                for _, status, metadata in steps:
-                    try:
-                        completed = proto_seconds(proto_message(metadata, 7), epoch=True)
-                        created = proto_seconds(proto_message(metadata, 1), epoch=True)
-                        moment = completed or created
-                        association = proto_message(metadata, 20)
-                        generation_index = proto_int(association, 3, -1) if association else -1
-                        response = proto_message(proto_message(metadata, 9), 11)
-                        if moment:
-                            if response:
-                                by_response[response] = max(moment, by_response.get(response, 0))
-                            if generation_index >= 0:
-                                by_index[generation_index] = max(moment, by_index.get(generation_index, 0))
-                        if status not in (3, 4, 5) and not completed and generation_index >= 0 and created and created > now - 600:
-                            self.activity[path.stem] = ("gemini", created, "请求中")
-                    except (ValueError, TypeError):
-                        skipped += 1
-                for index, blob in reversed(rows):
-                    try:
-                        chat_model = proto_message(blob, 1)
-                        usage = proto_message(chat_model, 4)
-                        total = proto_int(usage, 3, -1)
-                        text = proto_int(usage, 9)
-                        thoughts = proto_int(usage, 10)
-                        if total < 0 or total != text + thoughts:
-                            skipped += 1
-                            continue
-                        response = proto_message(usage, 11)
-                        ended = by_response.get(response) or by_index.get(index)
-                        if ended is None:
-                            skipped += 1
-                            continue
-                        model = proto_message(chat_model, 19).decode("utf-8", errors="replace") or proto_message(chat_model, 21).decode("utf-8", errors="replace") or "unknown"
-                        if len(model) > 100:
-                            model = "unknown"
-                        identity = key("response", response.decode("utf-8", errors="replace")) if response else key("antigravity", path.stem, index)
-                        self.add(Observation(identity, source, path.stem, provider_for(model), model, ended, total, None, "客户端未提供原生TPS；保留输出计数"), now)
-                        if ended > now - 3:
-                            self.activity[path.stem] = (provider_for(model), ended, "刚完成生成")
-                    except (ValueError, TypeError):
-                        skipped += 1
+                skipped += self._antigravity_rows(path, source, rows, steps, now)
                 self.database_versions[path] = version
                 good += 1
             self.health[source] = {"status": "已接入" if good else "未发现记录", "sessions": good, "skipped": skipped}
+
+    def _antigravity_rows(self, path: Path, source: str, rows: list, steps: list, now: float) -> int:
+        skipped = 0
+        by_response: dict[bytes, float] = {}
+        by_index: dict[int, float] = {}
+        # Model reply steps (step_type 15) per generation: (first created, last completed).
+        spans: dict[Any, tuple[float, float]] = {}
+        for _, status, metadata, step_type in steps:
+            try:
+                completed = proto_seconds(proto_message(metadata, 7), epoch=True)
+                created = proto_seconds(proto_message(metadata, 1), epoch=True)
+                moment = completed or created
+                association = proto_message(metadata, 20)
+                generation_index = proto_int(association, 3, -1) if association else -1
+                response = proto_message(proto_message(metadata, 9), 11)
+                if moment:
+                    if response:
+                        by_response[response] = max(moment, by_response.get(response, 0))
+                    if generation_index >= 0:
+                        by_index[generation_index] = max(moment, by_index.get(generation_index, 0))
+                if step_type == 15 and created and completed and completed > created:
+                    for span_key in ((response,) if response else ()) + ((generation_index,) if generation_index >= 0 else ()):
+                        first, last = spans.get(span_key, (created, completed))
+                        spans[span_key] = (min(first, created), max(last, completed))
+                if status not in (3, 4, 5) and not completed and generation_index >= 0 and created and created > now - 600:
+                    self.activity[path.stem] = ("gemini", created, "请求中")
+            except (ValueError, TypeError):
+                skipped += 1
+        for index, blob in reversed(rows):
+            try:
+                chat_model = proto_message(blob, 1)
+                usage = proto_message(chat_model, 4)
+                text = proto_int(usage, 9)
+                thoughts = proto_int(usage, 10)
+                total = proto_int(usage, 3, -1)
+                # #3 (total output) is absent in some agy versions; when it is
+                # present it must agree with text + thinking.
+                if total >= 0 and total != text + thoughts or text + thoughts <= 0:
+                    skipped += 1
+                    continue
+                output = text + thoughts
+                response = proto_message(usage, 11)
+                ended = by_response.get(response) or by_index.get(index)
+                if ended is None:
+                    skipped += 1
+                    continue
+                model = proto_message(chat_model, 19).decode("utf-8", errors="replace") or proto_message(chat_model, 21).decode("utf-8", errors="replace") or "unknown"
+                if len(model) > 100:
+                    model = "unknown"
+                span = spans.get(response) if response else None
+                span = span or spans.get(index)
+                tps, basis = None, "客户端未提供原生TPS；保留输出计数"
+                if span and output >= MIN_TPS_TOKENS and span[1] - span[0] >= MIN_TPS_SECONDS:
+                    tps = round(output / (span[1] - span[0]), 1)
+                    basis = "本地步骤时间（输出token数÷回复步骤创建至完成的时间，含首字延迟）"
+                identity = key("response", response.decode("utf-8", errors="replace")) if response else key("antigravity", path.stem, index)
+                provider = provider_for(model)
+                provider = "gemini" if provider == "other" else provider   # unlabelled Antigravity replies
+                self.add(Observation(identity, source, path.stem, provider, model, ended, output,
+                                     span[1] - span[0] if tps else None, basis, True, tps), now)
+                if ended > now - 3:
+                    self.activity[path.stem] = (provider, ended, "刚完成生成")
+            except (ValueError, TypeError):
+                skipped += 1
+        return skipped
 
     def poll(self, now: float | None = None) -> dict[str, Any]:
         now = now or time.time()
@@ -871,13 +902,112 @@ class TpsMonitor:
         for provider, label in PROVIDER_NAMES.items():
             events = [e for e in self.events if e.provider == provider and e.identity not in duplicate_ids]
             recent = [e for e in events if e.count_in_rate and now - 60 <= e.ended_at <= now]
-            samples = [e for e in events if now - 300 <= e.ended_at <= now and e.native_tps is not None]
+            # A deduplicated bridge copy still carries the client's stream timing.
+            samples = [e for e in self.events if e.provider == provider and now - 300 <= e.ended_at <= now and e.native_tps is not None]
             latest = max(samples, key=lambda e:e.ended_at) if samples else None
             active = sum(1 for value in self.activity.values() if value[0] == provider)
             output = sum(e.output_tokens for e in recent)
             generation = latest.native_tps if latest else None
             providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [latest.basis] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": latest.basis if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
+
+
+def _antigravity_query(db) -> tuple[list, list]:
+    rows = db.execute("SELECT idx,data FROM gen_metadata ORDER BY idx DESC LIMIT 300").fetchall()
+    columns = {row[1] for row in db.execute("PRAGMA table_info(steps)")}
+    kind = "step_type" if "step_type" in columns else "NULL"
+    steps = db.execute(f"SELECT idx,status,metadata,{kind} FROM steps WHERE metadata IS NOT NULL ORDER BY idx DESC LIMIT 3000").fetchall()
+    return rows, steps
+
+
+def read_antigravity_db(path: Path) -> tuple[list, list]:
+    """Antigravity may hold its conversation database locked while it
+    streams; read a private copy (with its WAL) when a direct read fails."""
+    try:
+        db = readonly_db(path)
+        try:
+            return _antigravity_query(db)
+        finally:
+            db.close()
+    except sqlite3.OperationalError:
+        pass
+    with tempfile.TemporaryDirectory(prefix="cqt-agy-") as folder:
+        copy = Path(folder) / path.name
+        shutil.copyfile(path, copy)
+        for suffix in ("-wal", "-shm"):
+            extra = path.with_name(path.name + suffix)
+            if extra.exists():
+                shutil.copyfile(extra, copy.with_name(copy.name + suffix))
+        db = sqlite3.connect(copy)
+        try:
+            return _antigravity_query(db)
+        finally:
+            db.close()
+
+
+def _proto_summary(data: bytes, depth: int = 0) -> dict[str, Any]:
+    """Field numbers and numeric values only; strings become their length."""
+    summary: dict[str, Any] = {}
+    try:
+        fields = proto_fields(data)
+    except ValueError:
+        return {"undecodable_bytes": len(data)}
+    for number_, values in fields.items():
+        out = []
+        for value in values[:3]:
+            if isinstance(value, int):
+                out.append(value)
+                continue
+            stamp_ = None
+            try:
+                stamp_ = proto_seconds(value, epoch=True) or proto_seconds(value)
+            except ValueError:
+                pass
+            if stamp_ is not None and set(proto_fields(value)) <= {1, 2}:
+                out.append({"time": round(stamp_, 3)})
+            elif depth < 2 and len(value) < 4000:
+                nested = _proto_summary(value, depth + 1)
+                out.append(nested if "undecodable_bytes" not in nested else {"bytes": len(value)})
+            else:
+                out.append({"bytes": len(value)})
+        summary[str(number_)] = out if len(out) > 1 else out[0]
+    return summary
+
+
+def antigravity_diagnostics(home: Path | None = None, databases: int = 3, generations: int = 5, steps: int = 20) -> dict[str, Any]:
+    """Structure of the newest Antigravity databases (no prompt or reply text)."""
+    monitor = TpsMonitor(home=home)
+    result: dict[str, Any] = {"roots": []}
+    for root, source in monitor._antigravity_roots():
+        paths = sorted(root.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+        entry: dict[str, Any] = {"source": source, "exists": root.is_dir(), "databases": len(paths), "newest": []}
+        for path in paths[:databases]:
+            item: dict[str, Any] = {"modified": path.stat().st_mtime}
+            try:
+                rows, step_rows = read_antigravity_db(path)
+            except sqlite3.Error as error:
+                item["error"] = f"{type(error).__name__}: {error}"
+                entry["newest"].append(item)
+                continue
+            item["gen_metadata"] = []
+            for index, blob in rows[:generations]:
+                chat_model = proto_message(blob, 1)
+                described = _proto_summary(chat_model)
+                for text_field in ("19", "21"):
+                    if text_field in described:
+                        described[text_field] = proto_message(chat_model, int(text_field)).decode("utf-8", errors="replace")[:80]
+                item["gen_metadata"].append({"idx": index, "chat_model": described})
+            item["steps"] = [{"idx": idx, "status": status, "step_type": kind, "created": proto_seconds(proto_message(meta, 1), epoch=True),
+                              "completed": proto_seconds(proto_message(meta, 7), epoch=True),
+                              "generation_index": proto_int(proto_message(meta, 20), 3, -1) if proto_message(meta, 20) else None,
+                              "has_response_id": bool(proto_message(proto_message(meta, 9), 11))}
+                             for idx, status, meta, kind in step_rows[:steps]]
+            entry["newest"].append(item)
+        result["roots"].append(entry)
+    performance = monitor.poll()
+    result["gemini"] = performance["providers"]["gemini"]
+    result["health"] = {k: v for k, v in performance["source_health"].items() if "Antigravity" in k}
+    return result
 
 
 def running_software() -> list[dict[str, Any]]:

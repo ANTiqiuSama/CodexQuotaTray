@@ -888,6 +888,12 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
         return 0
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-gemini-tps":
+        from tps_sources import antigravity_diagnostics
+        destination = Path(sys.argv[2]).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(antigravity_diagnostics(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0
     if len(sys.argv) == 3 and sys.argv[1] == "--check-grok":
         snapshot = get_grok_quota()
         destination = Path(sys.argv[2]).resolve()
