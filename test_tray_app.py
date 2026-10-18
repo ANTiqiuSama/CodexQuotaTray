@@ -361,3 +361,30 @@ class TrayOrderTests(unittest.TestCase):
             slots[0].left, slots[1].left = 100, 200               # user dragged the icons
             self.assertTrue(tray.maybe_reorder(4000.0))
             self.assertEqual(tray.icons["codex"].name, "slot0")
+
+
+class CodexLocalLimitTests(unittest.TestCase):
+    def test_session_record_replaces_older_snapshot_and_limit_error_requests_refresh(self):
+        tray = QuotaTray.__new__(QuotaTray)
+        old = QuotaSnapshot("codex", "Codex", 300, 20.0, 80.0, 5000, 100.0, False, None)
+        tray.snapshots = {"codex": old}
+        tray.history = None
+        tray.update_ui = Mock()
+        tray.scheduler = Mock()
+        tray.wake = threading.Event()
+        limits = {"primary": {"used_percent": 100.0, "window_minutes": 300, "resets_at": 9000}}
+        tray.tps_monitor = SimpleNamespace(codex_rate_limits=(200.0, limits), codex_limit_hit_at=0.0)
+        tray.update_codex_locally(200.0 + 6 * 3600 + 1)
+        self.assertIs(tray.snapshots["codex"], old)   # records older than 6 hours are ignored
+        tray.update_codex_locally(201.0)
+        self.assertEqual(tray.snapshots["codex"].remaining_percent, 0.0)
+        tray.update_ui.assert_called_once()
+        tray.update_codex_locally(202.0)              # same record: no second update
+        tray.update_ui.assert_called_once()
+        tray.scheduler.request.assert_not_called()
+        tray.tps_monitor.codex_limit_hit_at = 205.0
+        tray.update_codex_locally(206.0)
+        tray.scheduler.request.assert_called_once_with(["codex"], 209.0, "额度用尽")
+        self.assertTrue(tray.wake.is_set())
+        tray.update_codex_locally(207.0)
+        tray.scheduler.request.assert_called_once()

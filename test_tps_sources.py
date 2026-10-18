@@ -51,6 +51,30 @@ class TpsTests(unittest.TestCase):
         self.assertEqual(data["output_tokens_60"], 120)
         self.assertEqual(data["output_tps_60"], 2)
 
+    def test_codex_rate_limits_from_token_count_are_kept_newest_first(self):
+        limits = {"limit_id": "codex", "primary": {"used_percent": 100.0, "window_minutes": 300, "resets_in_seconds": 600},
+                  "secondary": {"used_percent": 40.0, "window_minutes": 10080, "resets_at": int(self.now) + 9000}}
+        self.monitor._codex_record({"timestamp": self.now - 2, "type": "event_msg", "payload": {"type": "token_count", "rate_limits": limits}}, "s", self.now)
+        older = dict(limits, primary={"used_percent": 10.0, "window_minutes": 300})
+        self.monitor._codex_record({"timestamp": self.now - 50, "type": "event_msg", "payload": {"type": "token_count", "rate_limits": older}}, "s", self.now)
+        other = dict(limits, limit_id="codex_other")
+        self.monitor._codex_record({"timestamp": self.now, "type": "event_msg", "payload": {"type": "token_count", "rate_limits": other}}, "s", self.now)
+        moment, kept = self.monitor.codex_rate_limits
+        self.assertAlmostEqual(moment, self.now - 2, places=3)
+        self.assertEqual(kept["primary"]["used_percent"], 100.0)
+        from quota_sources import parse_codex_session_limits
+        snapshot = parse_codex_session_limits(kept, moment)
+        self.assertEqual(snapshot.remaining_percent, 0.0)
+        self.assertEqual(snapshot.resets_at, int(moment + 600))
+        self.assertEqual(snapshot.secondary_remaining_percent, 60.0)
+
+    def test_codex_usage_limit_error_is_noticed(self):
+        self.monitor._codex_record({"timestamp": self.now - 1, "type": "event_msg", "payload": {"type": "error", "message": "You've hit your usage limit. Try again later."}}, "s", self.now)
+        self.assertAlmostEqual(self.monitor.codex_limit_hit_at, self.now - 1, places=3)
+        self.monitor.context["m"] = {"model": "mimo-v2.5-pro"}
+        self.monitor._codex_record({"timestamp": self.now, "type": "event_msg", "payload": {"type": "error", "message": "rate limit"}}, "m", self.now)
+        self.assertAlmostEqual(self.monitor.codex_limit_hit_at, self.now - 1, places=3)
+
     def test_fork_replay_is_not_new_generation(self):
         self.monitor.context["fork"] = {"model": "grok-4.7", "source": "Codex"}
         self.monitor._codex_record(self.event(thread="s"), "fork", self.now)

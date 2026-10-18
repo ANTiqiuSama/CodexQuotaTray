@@ -173,7 +173,28 @@ def parse_codex_rate_limits(bucket: dict[str, Any]) -> QuotaSnapshot:
     )
 
 
-def get_codex_quota() -> QuotaSnapshot:
+def parse_codex_session_limits(limits: dict[str, Any], moment: float) -> QuotaSnapshot | None:
+    """Rate limits Codex writes into its session records (token_count events,
+    from the response headers of the request that just finished)."""
+    def window(data):
+        if not isinstance(data, dict):
+            return None
+        used = _percent(data.get("used_percent"))
+        if used is None:
+            return None
+        reset = data.get("resets_at")
+        if reset is None and data.get("resets_in_seconds") is not None:
+            reset = moment + float(data["resets_in_seconds"])
+        return used, data.get("window_minutes"), int(reset) if reset else None
+    primary, secondary = window(limits.get("primary")), window(limits.get("secondary"))
+    if primary is None:
+        return None
+    return QuotaSnapshot("codex", "Codex", primary[1], primary[0], 100.0 - primary[0], primary[2], moment, False, None,
+                         secondary[1] if secondary else None, secondary[0] if secondary else None,
+                         None if secondary is None else 100.0 - secondary[0], secondary[2] if secondary else None)
+
+
+def get_codex_quota(raw: dict | None = None) -> QuotaSnapshot:
     executable = _codex_executable()
     if not executable:
         return _unknown("codex", "Codex", None, "未找到 codex.exe")
@@ -188,6 +209,8 @@ def get_codex_quota() -> QuotaSnapshot:
             },
         )
         result = rpc.request("account/rateLimits/read", None)
+        if raw is not None:
+            raw["response"] = result
         buckets = result.get("rateLimitsByLimitId") or {"codex": result.get("rateLimits", {})}
         bucket = buckets.get("codex") or result.get("rateLimits") or {}
         return parse_codex_rate_limits(bucket)
