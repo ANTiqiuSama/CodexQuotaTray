@@ -40,9 +40,9 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 
 A 来源面向 **Claude Code 的 CLI 和本地会话记录**。Claude 桌面应用的安装状态、免费版聊天额度和桌面端对话记录不通过这条接口读取。
 
-若你使用 Claude 免费桌面端，可先配置 `codex,grok,gemini`。启用 A 时，应准备能正常执行 `/usage` 的 Claude Code 登录环境。API Key 计费环境没有这类订阅额度窗口，程序会报告未知或读取失败。
+Claude 默认关闭，不会因安装客户端而开始读取。开通订阅并登录 Claude Code 后，右键任意托盘图标，勾选 **Claude 额度检测（订阅开通后启用）**；托盘自动重启、执行首次读取，随后定期刷新。取消勾选会停止读取并隐藏 A，选择会保存。免费桌面端和 API Key 计费环境没有这类订阅额度窗口。
 
-未显式指定来源时，Claude 会在检测到 CLI 或 Claude Code 项目记录目录后自动加入，否则保持关闭。只存在记录目录而缺少可执行文件时，额度仍可能显示未知。显式设置 `CODEX_QUOTA_PROVIDERS` 可以固定显示范围。
+显式设置 `CODEX_QUOTA_PROVIDERS` 含 `claude` 也可首次启用；托盘菜单保存的启停选择优先。读取前先检查非交互登录状态，无登录或无订阅时暂停 12 小时；订阅读取在独立进程中执行，含终端初始化的总超时为 45 秒，避免卡住其他来源。
 
 ### Xiaomi MiMo Token Plan
 
@@ -219,7 +219,7 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 [Environment]::SetEnvironmentVariable('CODEX_QUOTA_PROVIDERS', 'codex,grok,gemini', 'User')
 ```
 
-环境变量在程序启动时读取。退出旧托盘后，从包含新变量的终端或登录环境重新启动。恢复自动检测时，清除 `CODEX_QUOTA_PROVIDERS`；未设置该变量时，默认 C/G/M，并按检测结果加入 Claude Code。
+环境变量在程序启动时读取。退出旧托盘后，从包含新变量的终端或登录环境重新启动。恢复自动检测时，清除 `CODEX_QUOTA_PROVIDERS`；未设置该变量时，默认 C/G/M，并按检测结果加入 MiMo。Claude 等待手动启用。
 
 ### 图标自动排序
 
@@ -338,7 +338,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | Gemini 没有 TPS | 运行 `--check-gemini-tps <文件>`，查看数据库是否被找到、是否读取出错、回复步骤是否有创建/完成时间 |
 | 生成时没有 TPS | 查看是否取得完整样本，以及该来源是否提供生成 TPS |
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
-| Claude 没有显示 | 检查是否被显式来源列表排除，以及 CLI 路径或项目记录目录是否被检测到 |
+| Claude 没有显示 | 开通订阅并登录 Claude Code 后，在托盘菜单勾选“Claude 额度检测（订阅开通后启用）” |
 | Claude 有图标却没有额度 | 检查 Claude Code 的登录与订阅窗口；免费桌面端不通过该读取器接入 |
 | X 显示“未登录”或登录窗口不关闭 | 右键 X 选“登录小米 MiMo…”，或运行 `--mimo-login`，登录后停留在控制台页面；仍不成功时查看 `mimo-login.log`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
 | 卡片在全屏应用中没有出现 | 先让任务栏图标可见；独占全屏和安全桌面尚不保证覆盖 |

@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import cli_usage
+import claude_quota
+import subprocess
 import providers
 import quota_sources
 from cli_usage import CLAUDE_PROBE, claude_usage_complete, parse_claude_reset, parse_claude_usage, run_temporary_usage
@@ -25,19 +27,27 @@ NOW = datetime(2026, 10, 16, 6, 0, tzinfo=timezone.utc)  # 14:00 in Shanghai
 
 
 class RegistryTests(unittest.TestCase):
+    def setUp(self):
+        self.data = tempfile.TemporaryDirectory()
+        self.addCleanup(self.data.cleanup)
+        environment = patch.dict("os.environ", {"LOCALAPPDATA": self.data.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_explicit_list_keeps_registry_order(self):
         self.assertEqual(providers.enabled_keys("claude, codex"), ["codex", "claude"])
         self.assertEqual(providers.enabled_keys("grok;nope"), ["grok"])
 
-    def test_claude_is_shown_only_when_installed(self):
-        with patch.object(providers, "_claude_installed", return_value=False):
-            spec = providers.ProviderSpec(**{**providers.get("claude").__dict__, "detect": providers._claude_installed})
-            self.assertFalse(spec.available())
+    def test_installed_claude_waits_for_manual_enable(self):
         with tempfile.TemporaryDirectory() as home, patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": home, "CODEX_QUOTA_CLAUDE_EXE": ""}):
             with patch.object(providers.shutil, "which", return_value=None), patch.object(providers.Path, "home", return_value=Path(home)):
                 self.assertNotIn("claude", providers.enabled_keys(""))
                 (Path(home) / "projects").mkdir()
-                self.assertIn("claude", providers.enabled_keys(""))
+                self.assertNotIn("claude", providers.enabled_keys(""))
+                providers.set_claude_enabled(True)
+                self.assertIn("claude", providers.enabled_keys("codex,grok,gemini,mimo"))
+                providers.set_claude_enabled(False)
+                self.assertNotIn("claude", providers.enabled_keys("claude,codex"))
 
     def test_everything_derives_from_registry(self):
         self.assertEqual(quota_sources.LABELS["claude"], ("Claude", 300))
@@ -85,7 +95,7 @@ class UsageParsingTests(unittest.TestCase):
 
     def test_snapshot_carries_both_windows(self):
         with patch.object(providers, "find_claude", return_value=Path("claude.exe")), \
-                patch.object(quota_sources, "run_temporary_usage", return_value=USAGE):
+                patch.object(claude_quota, "read_usage", return_value=parse_claude_usage(USAGE)):
             snapshot = quota_sources.get_claude_quota()
         self.assertIsNone(snapshot.error)
         self.assertEqual((snapshot.remaining_percent, snapshot.secondary_remaining_percent, snapshot.display_remaining), (81, 93, 81))
@@ -94,6 +104,68 @@ class UsageParsingTests(unittest.TestCase):
         with patch.object(providers, "find_claude", return_value=None):
             snapshot = quota_sources.get_claude_quota()
         self.assertIn("CODEX_QUOTA_CLAUDE_EXE", snapshot.error)
+
+
+class ReaderIsolationTests(unittest.TestCase):
+    def test_logged_out_account_skips_native_terminal_and_sleeps_twelve_hours(self):
+        status = Mock(stdout=json.dumps({"loggedIn": False, "email": "private@example.test"}))
+        with patch.object(providers, "find_claude", return_value=Path("claude.exe")), \
+                patch.object(claude_quota.subprocess, "run", return_value=status), \
+                patch.object(claude_quota.subprocess, "Popen") as spawn:
+            snapshot = quota_sources.get_claude_quota()
+        spawn.assert_not_called()
+        self.assertIn("未登录", snapshot.error)
+        self.assertNotIn("private@", snapshot.error)
+        scheduler = RefreshScheduler(["claude"], 100)
+        scheduler.completed("claude", snapshot, 100)
+        self.assertEqual(scheduler.due["claude"], 100 + 12 * 3600)
+        self.assertEqual(scheduler.reason["claude"], "无可用额度")
+
+    def test_free_and_api_accounts_have_no_subscription_quota(self):
+        for fields in ({"loggedIn": True, "subscriptionType": "free"},
+                       {"loggedIn": True, "authMethod": "api_key"}):
+            with self.subTest(fields=fields), patch.object(claude_quota.subprocess, "run",
+                    return_value=Mock(stdout=json.dumps(fields))):
+                self.assertIn("订阅额度", claude_quota.no_quota_reason("claude.exe"))
+
+    def test_old_status_command_still_uses_bounded_worker(self):
+        with patch.object(claude_quota.subprocess, "run", return_value=Mock(stdout="unknown command")):
+            self.assertIsNone(claude_quota.no_quota_reason("claude.exe"))
+        with patch.object(claude_quota.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 10)):
+            self.assertIsNone(claude_quota.no_quota_reason("claude.exe"))
+
+    def test_native_terminal_hang_cannot_hold_refresh_thread_forever(self):
+        process = Mock()
+        process.wait.side_effect = subprocess.TimeoutExpired("worker", 45)
+        with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
+                patch.object(claude_quota, "no_quota_reason", return_value=None), \
+                patch.object(claude_quota.subprocess, "Popen", return_value=process), \
+                patch.object(claude_quota, "stop_worker") as stop:
+            with self.assertRaisesRegex(TimeoutError, "隐藏终端初始化"):
+                claude_quota.read_usage("claude.exe")
+            process.wait.assert_called_once_with(timeout=45)
+            stop.assert_called_once_with(process)
+            self.assertEqual(list((Path(folder) / "CodexQuotaTray/work").iterdir()), [])
+
+    def test_worker_transfers_only_parsed_quota_numbers(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(claude_quota, "run_temporary_usage", return_value=USAGE + "\nprivate@example.test"):
+            destination = Path(folder) / "result.json"
+            self.assertEqual(claude_quota.worker("claude.exe", str(destination)), 0)
+            raw = destination.read_text(encoding="utf-8")
+            self.assertNotIn("private@", raw)
+            self.assertEqual(json.loads(raw)["quota"]["remaining_percent"], 81)
+
+    def test_frozen_parent_reads_worker_result_without_recursing(self):
+        def start(command, **kwargs):
+            self.assertEqual(command[1], "--claude-quota-worker")
+            Path(command[-1]).write_text(json.dumps({"quota": {"remaining_percent": 81}}), encoding="utf-8")
+            return Mock()
+        with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
+                patch.object(claude_quota, "no_quota_reason", return_value=None), \
+                patch.object(claude_quota.sys, "frozen", True, create=True), \
+                patch.object(claude_quota.subprocess, "Popen", side_effect=start):
+            self.assertEqual(claude_quota.read_usage("claude.exe"), {"remaining_percent": 81})
 
 
 class ProbeTests(unittest.TestCase):

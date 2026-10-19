@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import providers
+import claude_quota
 from cli_usage import CLAUDE_ARGS, CLAUDE_PROBE, parse_claude_usage, parse_grok_usage, run_agy_usage, run_temporary_usage
 
 
@@ -245,8 +246,7 @@ def get_claude_quota() -> QuotaSnapshot:
     if executable is None:
         return _unknown("claude", "Claude", 300, "未找到 Claude Code（claude.exe / claude.cmd），可设置 CODEX_QUOTA_CLAUDE_EXE")
     try:
-        text = run_temporary_usage(str(executable), CLAUDE_ARGS, timeout=30.0, probe=CLAUDE_PROBE)
-        parsed = parse_claude_usage(text)
+        parsed = claude_quota.read_usage(str(executable))
         return QuotaSnapshot("claude", "Claude", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
                              parsed["resets_at"], time.time(), False, None,
                              parsed.get("secondary_window_minutes"), parsed.get("secondary_used_percent"),

@@ -7,8 +7,8 @@ launchers and accent colours - is derived from this table.
 
 Which providers are shown:
 * `CODEX_QUOTA_PROVIDERS=codex,grok,gemini,claude` picks an explicit list;
-* otherwise every provider with `default=True` is shown, plus those whose
-  `detect()` finds the client installed on this machine (Claude Code).
+* Claude is opt-in through the tray menu or an explicit environment list;
+* otherwise every provider with `default=True` is shown, plus detected MiMo.
 """
 from __future__ import annotations
 
@@ -21,6 +21,18 @@ from typing import Callable
 
 def _local_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
+
+
+def claude_choice() -> bool | None:
+    """A saved menu choice overrides auto-detection and the environment list."""
+    value = _read(_local_appdata() / "CodexQuotaTray/claude-enabled.txt").strip()
+    return {"enabled": True, "disabled": False}.get(value)
+
+
+def set_claude_enabled(enabled: bool) -> None:
+    path = _local_appdata() / "CodexQuotaTray/claude-enabled.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("enabled" if enabled else "disabled", encoding="utf-8")
 
 
 def claude_home() -> Path:
@@ -121,7 +133,7 @@ SPECS: tuple[ProviderSpec, ...] = (
         # Its reader opens a whole CLI session, so it refreshes like Grok.
         "claude", "A", "Claude", 300, (217, 119, 87, 255), 30 * 60, 10 * 60, 20,
         ("cli", find_claude),
-        default=False, detect=_claude_installed,
+        default=False, detect=lambda: claude_choice() is True,
         source_note="临时 Claude Code 会话 /usage（当前会话 5 小时 + 每周）",
         give_up_seconds=12 * 3600,
     ),
@@ -146,7 +158,11 @@ def get(key: str) -> ProviderSpec:
 def enabled_keys(env: str | None = None) -> list[str]:
     """Ordered provider keys to show in the tray."""
     raw = os.environ.get("CODEX_QUOTA_PROVIDERS") if env is None else env
-    if raw:
-        wanted = [part.strip().lower() for part in raw.replace(";", ",").split(",") if part.strip()]
-        return [spec.key for spec in SPECS if spec.key in wanted]
-    return [spec.key for spec in SPECS if spec.available()]
+    wanted = ({part.strip().lower() for part in raw.replace(";", ",").split(",") if part.strip()}
+              if raw else {spec.key for spec in SPECS if spec.available()})
+    choice = claude_choice()
+    if choice is True:
+        wanted.add("claude")
+    elif choice is False:
+        wanted.discard("claude")
+    return [spec.key for spec in SPECS if spec.key in wanted]

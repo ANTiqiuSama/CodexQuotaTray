@@ -429,6 +429,8 @@ class QuotaTray:
             *((pystray.MenuItem(lambda _: self.menu_reset_outlook(), self.open_reset_page, visible=lambda _: reset_watch.ENABLED),)
               if provider == "codex" else ()),
             pystray.MenuItem(lambda _: "打开诊断信息", self.open_diagnostics),
+            pystray.MenuItem("Claude 额度检测（订阅开通后启用）", self.toggle_claude,
+                             checked=lambda _: "claude" in PROVIDERS),
             pystray.MenuItem(
                 lambda _: "开机自启",
                 self.toggle_startup,
@@ -896,6 +898,13 @@ class QuotaTray:
         self._set_run_value(None if enabled else startup_command())
         self.startup_path().unlink(missing_ok=True)
 
+    def toggle_claude(self, _icon=None, _item=None) -> None:
+        enabled = "claude" not in PROVIDERS
+        provider_registry.set_claude_enabled(enabled)
+        log.info("Claude quota polling manually %s", "enabled" if enabled else "disabled")
+        self.restart_requested = True
+        self.exit_app()
+
     def exit_app(self, _icon=None, _item=None) -> None:
         self.stop_event.set()
         self.wake.set()
@@ -988,6 +997,9 @@ def check_claude(destination: Path, raw: bool = False) -> int:
 
 
 def main() -> int:
+    if len(sys.argv) == 4 and sys.argv[1] == "--claude-quota-worker":
+        import claude_quota
+        return claude_quota.worker(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 3 and sys.argv[1] == "--check-hover":
         from hover_check import check_hover_runtime
         tray = QuotaTray.__new__(QuotaTray)
@@ -1059,7 +1071,13 @@ def main() -> int:
     if handle is None:
         return 0
     setup_logging()
-    QuotaTray().run()
+    tray = QuotaTray()
+    tray.run()
+    if getattr(tray, "restart_requested", False):
+        ctypes.windll.kernel32.CloseHandle(handle)
+        command = ([sys.executable] if getattr(sys, "frozen", False)
+                   else [sys.executable, "-X", "utf8", str(Path(__file__).resolve())])
+        subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return 0
 
 

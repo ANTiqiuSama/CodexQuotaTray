@@ -47,6 +47,22 @@ class TrayMenuTests(unittest.TestCase):
                 refresh(None)
         self.assertEqual(self.tray.request_refresh.call_count, len(PROVIDERS))
 
+    def test_claude_menu_choice_persists_and_requests_clean_restart(self):
+        self.tray.exit_app = Mock()
+        for name in ("menu_quota", "forecast_line", "menu_reset", "menu_countdown", "menu_updated", "menu_reset_outlook"):
+            setattr(self.tray, name, Mock(return_value=""))
+        for enabled in (False, True):
+            active = {"codex": "C", **({"claude": "A"} if enabled else {})}
+            with self.subTest(enabled=enabled), patch.object(tray_app, "PROVIDERS", active), \
+                    patch.object(tray_app.provider_registry, "set_claude_enabled") as save:
+                item = next(item for item in self.tray.build_menu("codex").items
+                            if item.text == "Claude 额度检测（订阅开通后启用）")
+                self.assertEqual(item.checked, enabled)
+                item(None)
+                save.assert_called_once_with(not enabled)
+                self.assertTrue(self.tray.restart_requested)
+        self.assertEqual(self.tray.exit_app.call_count, 2)
+
 
 class HoverTests(unittest.TestCase):
     def test_dwell_live_updates_switch_and_leave(self):
