@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py test_claude.py test_mimo.py
+python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py test_tray_app.py test_features.py test_claude.py test_mimo.py test_reset_watch.py
 if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
 python -m PyInstaller --noconfirm --onefile --windowed `
   --collect-binaries winpty --collect-data winpty --collect-data tzdata `

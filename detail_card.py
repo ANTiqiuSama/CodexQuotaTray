@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from icon_art import AMBER, CLAY, IVORY, accent, ring_color
+from icon_art import AMBER, CLAY, IVORY, RESET_BLUE, accent, ring_color
 
 WIDTH = 340                      # Logical pixels; multiplied by DPI scale.
 PAD = 18
@@ -52,6 +52,7 @@ class CardModel:
     footer: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     error: str | None = None
+    banner: str = ""                       # prominent one-off hint (e.g. a likely global reset)
     text: str = field(default="", compare=False)
 
     def as_text(self) -> str:
@@ -197,6 +198,19 @@ def render_card(model: CardModel, scale: float = 1.0) -> Image.Image:
             c.text((PAD + 14, y + lh / 2), line, face, tone if model.forecast_tone in ("warn", "danger") else TEXT, "lm")
             y += lh
         y += 6
+
+    # Banner: tinted box, shown only for noteworthy events.
+    if model.banner:
+        y += 4
+        face = c.font(12, "bold")
+        lines = _wrap(c.draw, model.banner, face, c.px(inner - 20))
+        lh = c.line_height(face)
+        box_h = lh * len(lines) + 14
+        c.draw.rounded_rectangle((c.px(PAD), c.px(y), c.px(right), c.px(y + box_h)), radius=c.px(8),
+                                 fill=_with_alpha(RESET_BLUE, 38), outline=_with_alpha(RESET_BLUE, 110), width=max(1, c.px(1)))
+        for index, line in enumerate(lines):
+            c.text((PAD + 10, y + 7 + lh * index + lh / 2), line, face, RESET_BLUE, "lm")
+        y += box_h + 8
 
     def divider():
         nonlocal y
