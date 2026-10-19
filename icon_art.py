@@ -198,7 +198,22 @@ def _pace_tick(draw: ImageDraw.ImageDraw, marker: float) -> None:
     draw.line(points, fill=IVORY, width=13)
 
 
-def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker: float | None = None) -> Image.Image:
+RESET_BLUE = (112, 182, 255, 255)   # "a global reset looks likely" badge
+
+
+def _reset_badge(canvas: Image.Image) -> None:
+    """Sky-blue dot at the top-left (opposite the stale dot), knocked out."""
+    cx, cy, r, gap = 42, 42, 38, 14
+    knock = Image.new("L", canvas.size, 0)
+    ImageDraw.Draw(knock).ellipse((cx - r - gap, cy - r - gap, cx + r + gap, cy + r + gap), fill=255)
+    alpha = canvas.getchannel("A")
+    alpha.paste(0, (0, 0), knock)
+    canvas.putalpha(alpha)
+    ImageDraw.Draw(canvas).ellipse((cx - r, cy - r, cx + r, cy + r), fill=RESET_BLUE)
+
+
+def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker: float | None = None,
+               reset_hint: bool = False) -> Image.Image:
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
@@ -212,6 +227,8 @@ def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker
     _centered_text(draw, label, face, (0, 0, CANVAS, CANVAS), fill)
     if stale:
         _stale_badge(canvas)
+    if reset_hint:
+        _reset_badge(canvas)
     return _finish(canvas)
 
 

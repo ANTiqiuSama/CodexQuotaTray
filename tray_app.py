@@ -36,6 +36,7 @@ from quota_sources import (
 import hover_details
 import mimo_usage
 import providers as provider_registry
+import reset_watch
 from refresh_scheduler import RefreshScheduler
 from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
 
@@ -66,17 +67,19 @@ def pace_marker(snapshot: QuotaSnapshot, now: float | None = None) -> float | No
     return max(0.0, min(100.0, 100.0 * (ends - now) / (minutes * 60)))
 
 
-def make_provider_icon(snapshot: QuotaSnapshot, letter: str) -> Image.Image:
+def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = False) -> Image.Image:
     # The ring follows the binding window (e.g. Codex weekly when it is lower).
-    return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale, marker=pace_marker(snapshot))
+    return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale, marker=pace_marker(snapshot), reset_hint=reset_hint)
 
 
 def make_tps_icon(performance: dict, letter: str) -> Image.Image:
     return live_icon(performance.get("display_tps", 0) or 0, letter)
 
 
-def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict) -> Image.Image:
-    return make_tps_icon(performance, letter) if performance.get("active_sessions", 0) and performance.get("display_tps") is not None else make_provider_icon(snapshot, letter)
+def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, reset_hint: bool = False) -> Image.Image:
+    if performance.get("active_sessions", 0) and performance.get("display_tps") is not None:
+        return make_tps_icon(performance, letter)
+    return make_provider_icon(snapshot, letter, reset_hint)
 
 
 def window_label(minutes: int | None) -> str:
@@ -132,6 +135,7 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
 # CODEX_QUOTA_TRAY_ORDER: "auto" (default) or "fixed" (registry order).
 TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
 REORDER_MIN_SECONDS = 60
+RESET_PATH = DATA_DIR / "codex_reset.json"
 
 
 def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
@@ -186,6 +190,10 @@ class QuotaTray:
         self.mimo_view_at = 0.0
         self.shown_order: list[str] = []
         self.reordered_at = 0.0
+        self.reset_outlook = reset_watch.load(RESET_PATH) if reset_watch.ENABLED else None
+        # Cached figures may use a different alert threshold.  Notify once
+        # after a fresh high forecast arrives, then suppress repeats this run.
+        self.reset_alerted = "unknown"
         self.migrate_startup()
         self.icons = {
             provider: HoverIcon(
@@ -355,9 +363,13 @@ class QuotaTray:
             basis = "、".join(data.get("basis") or [])
             sample = datetime.fromtimestamp(data["last_sample_at"]).strftime("%H:%M:%S") if data.get("last_sample_at") else ""
             notes.append(f"来源：{basis}" + (f"（样本 {sample}）" if sample else ""))
+        banner = ""
+        if provider == "codex" and reset_watch.ENABLED:
+            banner, reset_notes = reset_watch.card_lines(getattr(self, "reset_outlook", None), snapshot.display_remaining, now)
+            notes += reset_notes
         return CardModel(letter, data["label"], status, tone, snapshot.display_remaining, used, binding,
             tuple(bars), forecast_text, forecast_tone, metrics, tuple(footer), tuple(notes),
-            snapshot.error, text=self.hover_text(provider))
+            snapshot.error, banner, text=self.hover_text(provider))
 
     @staticmethod
     def reset_summary(label: str, timestamp: int | None, now: float) -> str:
@@ -373,7 +385,8 @@ class QuotaTray:
         performance = self.performance["providers"][provider]
         value = performance.get("generation_tps")
         generation = "暂无完整计数" if value is None else f"{value:.1f}"
-        return f"{quota_line(snapshot)}\n最近TPS {generation} · 60秒 {performance['output_tps_60']:.1f} tok/s\n{self.menu_reset(provider)}"[:127]
+        hint = f"可能即将全局重置（24h {self.reset_outlook.prob_24}%）\n" if provider == "codex" and self.reset_level() == "high" else ""
+        return f"{hint}{quota_line(snapshot)}\n最近TPS {generation} · 60秒 {performance['output_tps_60']:.1f} tok/s\n{self.menu_reset(provider)}"[:127]
 
     def build_menu(self, provider: str) -> pystray.Menu:
         return pystray.Menu(
@@ -391,6 +404,8 @@ class QuotaTray:
             *((pystray.MenuItem("登录小米 MiMo…", self.mimo_login),
                pystray.MenuItem("退出 MiMo 登录", self.mimo_logout, visible=lambda _: mimo_usage.COOKIE_PATH.exists()))
               if provider == "mimo" else ()),
+            *((pystray.MenuItem(lambda _: self.menu_reset_outlook(), self.open_reset_page, visible=lambda _: reset_watch.ENABLED),)
+              if provider == "codex" else ()),
             pystray.MenuItem(lambda _: "打开诊断信息", self.open_diagnostics),
             pystray.MenuItem(
                 lambda _: "开机自启",
@@ -527,7 +542,8 @@ class QuotaTray:
                 # Keep the Shell's hover target stable. The independent detail
                 # window still reads live values from self.performance.
                 return
-            image = make_display_icon(self.snapshots[provider], letter, self.performance["providers"][provider])
+            image = make_display_icon(self.snapshots[provider], letter, self.performance["providers"][provider],
+                                      reset_hint=provider == "codex" and self.reset_level() == "high")
             # Icon assignment always sends NIM_MODIFY, even for identical pixels.
             # Avoid needless Shell redraws; hover detail updates use a separate HWND.
             if icon.icon != image:
@@ -684,6 +700,66 @@ class QuotaTray:
         self.scheduler.request(["mimo"], time.time(), "退出登录")
         self.wake.set()
 
+    # ----- community forecast of global Codex resets ---------------------------
+
+    def reset_level(self, now: float | None = None) -> str:
+        outlook = getattr(self, "reset_outlook", None)
+        return outlook.level(now) if outlook and reset_watch.ENABLED else "unknown"
+
+    def menu_reset_outlook(self) -> str:
+        outlook = getattr(self, "reset_outlook", None)
+        if outlook is None or outlook.level() == "unknown":
+            return "全局重置预测：暂无（点击打开网站）"
+        mark = "可能即将重置 · " if outlook.level() == "high" else ""
+        return f"全局重置预测：{mark}24h {outlook.prob_24}% · 48h {outlook.prob_48}%（{outlook.source}）"
+
+    def open_reset_page(self, _icon=None, _item=None) -> None:
+        outlook = getattr(self, "reset_outlook", None)
+        os.startfile(outlook.page if outlook else "https://willreset.com/")  # type: ignore[attr-defined]
+
+    def notify(self, provider: str, title: str, message: str) -> None:
+        try:
+            self.icons[provider].notify(message[:250], title[:60])
+        except Exception:
+            log.exception("notification failed")
+
+    def apply_reset_outlook(self, outlook: "reset_watch.ResetOutlook", now: float) -> None:
+        previous = getattr(self, "reset_outlook", None)
+        self.reset_outlook = outlook
+        reset_watch.save(RESET_PATH, outlook)
+        level = outlook.level(now)
+        log.info("codex reset outlook %s: 24h %s%% 48h %s%% level %s last reset %s", outlook.source, outlook.prob_24,
+                 outlook.prob_48, level, outlook.last_reset_at)
+        remaining = self.snapshots["codex"].display_remaining if "codex" in self.snapshots else None
+        if previous and previous.last_reset_at and outlook.last_reset_at and \
+                outlook.last_reset_at > previous.last_reset_at + 600 and outlook.last_reset_at > now - 6 * 3600:
+            # A new global reset was confirmed: re-read our own figures now.
+            self.notify("codex", "Codex 已全局重置", f"社区追踪到新的全局重置（{outlook.last_reset_text or outlook.source}），正在刷新额度。")
+            if self.scheduler is not None:
+                self.scheduler.request(["codex"], now, "全局重置")
+                self.wake.set()
+        elif level == "high" and getattr(self, "reset_alerted", "unknown") != "high":
+            message = f"社区预测 24 小时内全局重置概率 {outlook.prob_24}%（{outlook.source}）。"
+            if remaining is not None and remaining < 30:
+                message += f"当前仅剩 {remaining:.0f}%，可考虑等重置后再大量使用。"
+            self.notify("codex", "Codex 可能即将全局重置", message + "社区估计，非官方时间表。")
+        self.reset_alerted = level
+        self.update_ui()
+
+    def reset_loop(self) -> None:
+        while not self.stop_event.is_set():
+            now = time.time()
+            outlook, errors = reset_watch.fetch_outlook()
+            if errors:
+                log.info("codex reset outlook source errors: %s", " | ".join(errors)[:600])
+            if outlook is not None:
+                try:
+                    self.apply_reset_outlook(outlook, now)
+                except Exception:
+                    log.exception("codex reset outlook update failed")
+            level = outlook.level(now) if outlook else "unknown"
+            self.stop_event.wait(reset_watch.POLL_SECONDS_HIGH if level in ("high", "watch") or outlook is None else reset_watch.POLL_SECONDS)
+
     def update_codex_locally(self, now: float) -> None:
         """Codex writes fresh rate limits into its session record after every
         response; use them at once instead of waiting for the next App Server
@@ -790,6 +866,8 @@ class QuotaTray:
     def run(self) -> None:
         threading.Thread(target=self.refresh_loop, name="quota-refresh", daemon=True).start()
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
+        if reset_watch.ENABLED and "codex" in PROVIDERS:
+            threading.Thread(target=self.reset_loop, name="codex-reset-watch", daemon=True).start()
         hover = HoverDetails(self.icons, self.hover_card, self.stop_event)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
         ready = [threading.Event() for _ in self.slots]
@@ -888,6 +966,14 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
         return 0
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-reset":
+        outlook, errors = reset_watch.fetch_outlook()
+        destination = Path(sys.argv[2]).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        report = {"outlook": None if outlook is None else {**outlook.__dict__, "level": outlook.level()},
+                  "alert_percent": reset_watch.ALERT_PERCENT, "errors": errors}
+        destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if outlook else 1
     if len(sys.argv) == 3 and sys.argv[1] == "--check-gemini-tps":
         from tps_sources import antigravity_diagnostics
         destination = Path(sys.argv[2]).resolve()

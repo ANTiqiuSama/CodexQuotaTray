@@ -178,6 +178,23 @@ Codex 每次响应后会把服务端返回的额度写入本地会话记录（`t
 
 预测依赖近期使用节奏、离散的百分比读数和客户端提供的窗口信息。样本不足时不生成耗尽估计；它不能预见后续使用强度或服务端规则变化。
 
+## Codex 全局重置预测
+
+OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通常由 @thsottiaux 在 X 上宣布）。社区追踪站点会据此给出未来 24 / 48 小时内发生全局重置的概率。托盘按顺序读取以下公开、无需密钥的接口，取第一个可用的结果：
+
+| 顺序 | 来源 | 接口 |
+| --- | --- | --- |
+| 1 | willreset.com | `GET /api/notify`（约 0.3 KB，官方文档列出的提醒用接口） |
+| 2 | codex-reset.com | `GET /api/forecast` |
+| 3 | willcodexreset.com | `GET /api/reset-radar`（约 1 MB，仅作后备） |
+
+- 每 30 分钟读取一次；概率较高时改为每 10 分钟。结果缓存在 `codex_reset.json`。
+- 24 小时概率达到阈值（默认 60%）时：C 图标左上角出现天蓝色圆点，悬停提示首行与卡片中显示醒目提示，并弹出一次系统通知；Codex 剩余不足 30% 时，提示中会建议等重置后再大量使用。
+- 社区确认新的全局重置后，弹出通知并立即重新读取 Codex 额度。
+- 卡片底部显示来源、24 / 48 小时概率、上次全局重置时间和 @thsottiaux 最新信号；右键 C 图标的“全局重置预测”可打开来源网站。
+
+这些是社区估计，不是 OpenAI 的官方时间表。请求只发送普通 HTTP GET，不包含任何账户信息。
+
 ## 配置
 
 ### 选择来源
@@ -208,6 +225,8 @@ Windows 没有移动通知区域图标的接口，而且删除后重新添加的
 | --- | --- |
 | `CODEX_QUOTA_PROVIDERS` | 显示的来源键，支持 `codex,grok,gemini,claude,mimo`；按注册表顺序显示 |
 | `CODEX_QUOTA_CODEX_EXE` | 用于额度查询的 `codex` App Server 可执行文件路径 |
+| `CODEX_QUOTA_RESET_WATCH` | 设为 `0` 关闭 Codex 全局重置预测（不再访问社区站点） |
+| `CODEX_QUOTA_RESET_ALERT` | 醒目提示的 24 小时概率阈值，默认 `60`（百分比） |
 | `CODEX_QUOTA_GROK_EXE` | 用于额度查询的 Grok CLI 路径 |
 | `CODEX_QUOTA_GEMINI_EXE` | 提供对应 `/usage` JSON 的 `agy` 可执行文件路径 |
 | `CODEX_QUOTA_CLAUDE_EXE` | Claude Code 的 `.exe` 或 npm `.cmd` 入口路径 |
@@ -239,6 +258,7 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `state.json` | 最后一次额度读数、时间、旧数据标记和错误状态 |
 | `performance.json` | 数值化输出计数、速率、来源及可观测状态 |
 | `history.json` | 预测用的时间、已用百分比、重置时间 |
+| `codex_reset.json` | 最近一次 Codex 全局重置预测 |
 | `app.log` | 运行日志（错误与每次额度刷新结果），达到约 1 MB 后轮转，保留两份备份 |
 | `diagnostics.txt` | 从菜单生成的诊断信息 |
 | `claude-probe/` | Claude Code 临时额度探测的工作目录 |
@@ -284,13 +304,14 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 .\outputs\CodexQuotaTray.exe --check-tps work/checks/tps.json
 .\outputs\CodexQuotaTray.exe --check-codex work/checks/codex.json
 .\outputs\CodexQuotaTray.exe --check-gemini-tps work/checks/gemini-tps.json
+.\outputs\CodexQuotaTray.exe --check-reset work/checks/reset.json
 .\outputs\CodexQuotaTray.exe --check-grok work/checks/grok.json
 .\outputs\CodexQuotaTray.exe --check-claude work/checks/claude.json
 .\outputs\CodexQuotaTray.exe --check-mimo work/checks/mimo.json
 .\outputs\CodexQuotaTray.exe --check-hover work/checks/hover.json
 ```
 
-`--check-tps` 读取两次本地统计；`--check-gemini-tps` 输出最新几个 Antigravity 数据库的结构（字段编号、数值、时间，不含提示词和回复文本）以及当前 Gemini TPS；`--check-codex` 读取 App Server 额度，加 `--raw` 时另存 `codex.raw.json`，包含 App Server 原始响应、最近一条会话记录中的 `rate_limits` 和额度用尽错误时间；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。每次定时刷新的结果（剩余、重置时间、是否旧数据、错误）都会写入 `app.log`，便于排查图标未更新。额度读取失败时返回非零退出码，并保留结果中的错误说明。
+`--check-tps` 读取两次本地统计；`--check-reset` 读取全局重置预测，并列出各来源的错误；`--check-gemini-tps` 输出最新几个 Antigravity 数据库的结构（字段编号、数值、时间，不含提示词和回复文本）以及当前 Gemini TPS；`--check-codex` 读取 App Server 额度，加 `--raw` 时另存 `codex.raw.json`，包含 App Server 原始响应、最近一条会话记录中的 `rate_limits` 和额度用尽错误时间；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。每次定时刷新的结果（剩余、重置时间、是否旧数据、错误）都会写入 `app.log`，便于排查图标未更新。额度读取失败时返回非零退出码，并保留结果中的错误说明。
 
 `--check-hover` 会短暂显示约 4 秒的置顶全屏测试窗口，验证卡片覆盖、连续更新与焦点保持，随后自动关闭。它不移动真实鼠标。
 
@@ -324,6 +345,7 @@ cli_usage.py          CLI 临时会话、输出解析与时间处理
 tps_sources.py        本地记录发现、输出计数、去重与速率汇总
 refresh_scheduler.py  按需刷新、失败退避和重置调度
 forecast.py           数值历史与额度耗尽估计
+reset_watch.py        Codex 全局重置的社区预测读取与提示文案
 icon_art.py           额度与 TPS 圆盘绘制、字体缓存
 detail_card.py        卡片数据模型与 Pillow 渲染
 hover_details.py      Win32 分层窗口、DPI、悬停及文字提示回退
@@ -342,7 +364,7 @@ build.ps1             测试与 PyInstaller 构建入口
 
 ```powershell
 python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py `
-  test_tray_app.py test_features.py test_claude.py test_mimo.py
+  test_tray_app.py test_features.py test_claude.py test_mimo.py test_reset_watch.py
 ```
 
 2026-10-16，本机 Windows 11 / Python 3.12.10 对代码版本 `d5a553a`（合入提交 `ea19ed0`）运行 **97 项测试，全部通过**。测试覆盖解析、计数去重、来源注册表、图标、卡片、刷新调度和预测计算；这是一份本机验证记录。
