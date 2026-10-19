@@ -252,7 +252,7 @@ class FeatureIntegrationTests(unittest.TestCase):
         tray = self.tray()
         tray.scheduler = RefreshScheduler(["codex"], 0)
         tray.scheduler.take_due(0)
-        tray.scheduler.completed("codex", tray.snapshots["codex"], 0)
+        tray.scheduler.completed("codex", tray.snapshots["codex"], 400)
         tray.wake = threading.Event()
         tray.last_samples = {"codex": 100.0}
         data = tray.performance["providers"]["codex"]

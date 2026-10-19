@@ -88,6 +88,12 @@ class ProviderSpec:
     default: bool = True
     detect: Callable[[], bool] | None = None
     source_note: str = ""
+    # Used up: check rarely, then often shortly before the reset.
+    exhausted_seconds: int | None = None
+    near_reset_seconds: int = 15 * 60
+    near_reset_poll: int = 2 * 60
+    # Repeated failures, or an account without this quota: check rarely.
+    give_up_seconds: int | None = None
 
     def available(self) -> bool:
         return self.default or bool(self.detect and self.detect())
@@ -95,7 +101,7 @@ class ProviderSpec:
 
 SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
-        "codex", "C", "Codex", None, (126, 201, 166, 255), 15 * 60, 3 * 60, 8,
+        "codex", "C", "Codex", None, (126, 201, 166, 255), 5 * 60, 60, 5,
         ("aumid", lambda: "OpenAI.Codex_2p2nqsd0c76g0!App"),
         source_note="Codex App Server account/rateLimits/read（5 小时 + 每周）",
     ),
@@ -103,9 +109,10 @@ SPECS: tuple[ProviderSpec, ...] = (
         "grok", "G", "Grok", 10080, (203, 208, 216, 255), 30 * 60, 10 * 60, 20,
         ("cli", lambda: Path.home() / ".grok/bin/grok.exe"),
         source_note="临时 Grok CLI 会话 /usage（每周）",
+        exhausted_seconds=3 * 3600,
     ),
     ProviderSpec(
-        "gemini", "M", "Gemini（5 小时）", 300, (164, 176, 245, 255), 15 * 60, 3 * 60, 8,
+        "gemini", "M", "Gemini（5 小时）", 300, (164, 176, 245, 255), 5 * 60, 2 * 60, 8,
         ("gui", lambda: _local_appdata() / "Programs/antigravity/Antigravity.exe"),
         source_note="agy --print /usage（gemini-5h 桶）",
     ),
@@ -116,6 +123,7 @@ SPECS: tuple[ProviderSpec, ...] = (
         ("cli", find_claude),
         default=False, detect=_claude_installed,
         source_note="临时 Claude Code 会话 /usage（当前会话 5 小时 + 每周）",
+        give_up_seconds=12 * 3600,
     ),
     ProviderSpec(
         # Token Plan: one Credits pool per billing period (a whole year for

@@ -228,6 +228,28 @@ class TpsTests(unittest.TestCase):
         self.assertEqual(data["generation_tps"], 40)
         self.assertIn("真实输出token", data["basis"][0])
 
+    def test_codex_stream_ends_at_last_finished_output_item(self):
+        self.monitor.client_stream_starts["s"] = [self.now - 4]
+        self.monitor.client_stream_ends["s"] = [self.now - 3, self.now - 2]   # record written 2 s later
+        self.monitor._codex_record(self.event(output=120, when=self.now), "s", self.now)
+        data = self.monitor.snapshot(self.now)["providers"]["codex"]
+        self.assertEqual(data["generation_tps"], 60)
+        self.assertIn("最后输出项完成", data["basis"][0])
+
+    def test_codex_tiny_reply_gives_no_tps(self):
+        self.monitor.client_stream_starts["s"] = [self.now - 2]
+        self.monitor._codex_record(self.event(output=5, when=self.now), "s", self.now)
+        self.assertIsNone(self.monitor.snapshot(self.now)["providers"]["codex"]["generation_tps"])
+
+    def test_recent_replies_are_token_weighted(self):
+        self.monitor.add(Observation("a", "Codex", "s", "codex", "gpt", self.now - 30, 1000, 10.0, "流式", True, 100.0), self.now)
+        self.monitor.add(Observation("b", "Codex", "s", "codex", "gpt", self.now - 1, 20, 1.0, "流式", True, 20.0), self.now)
+        data = self.monitor.snapshot(self.now)["providers"]["codex"]
+        self.assertEqual(data["generation_tps"], round(1020 / 11, 1))
+        self.assertIn("加权", data["display_basis"])
+        self.monitor.add(Observation("c", "Codex", "s", "codex", "gpt", self.now - 200, 1000, 1.0, "流式", True, 1000.0), self.now)
+        self.assertEqual(self.monitor.snapshot(self.now)["providers"]["codex"]["generation_tps"], round(1020 / 11, 1))
+
     def test_codex_total_output_includes_tool_arguments_and_is_labelled(self):
         self.monitor.client_stream_starts["s"] = [self.now - 3, self.now - 1]
         self.monitor._codex_record({"timestamp":self.now-1,"type":"response_item","payload":{"type":"custom_tool_call","input":"PRIVATE_CANARY"}}, "s", self.now)

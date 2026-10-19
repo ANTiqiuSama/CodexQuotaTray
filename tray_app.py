@@ -136,6 +136,9 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
 TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
 REORDER_MIN_SECONDS = 60
 RESET_PATH = DATA_DIR / "codex_reset.json"
+# Providers whose quota resets raise a Windows notification.
+RESET_NOTIFY = {part.strip().lower() for part in (os.environ.get("CODEX_QUOTA_RESET_NOTIFY") or "codex,grok,claude").split(",") if part.strip()}
+RESET_NOTIFY_MIN_GAIN = 10.0     # percentage points regained before it counts as a reset
 
 
 def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
@@ -146,6 +149,25 @@ def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
     if snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent:
         return snapshot.secondary_remaining_percent, snapshot.secondary_resets_at
     return snapshot.remaining_percent, snapshot.resets_at
+
+
+def reset_changes(old: QuotaSnapshot | None, new: QuotaSnapshot | None, now: float) -> list[str]:
+    """Windows whose quota came back between two reads, as short lines."""
+    if old is None or new is None or new.error or new.stale:
+        return []
+    lines = []
+    for minutes, before, after, old_reset, new_reset in (
+            (new.window_minutes, old.remaining_percent, new.remaining_percent, old.resets_at, new.resets_at),
+            (new.secondary_window_minutes, old.secondary_remaining_percent, new.secondary_remaining_percent,
+             old.secondary_resets_at, new.secondary_resets_at)):
+        if before is None or after is None or after - before < RESET_NOTIFY_MIN_GAIN:
+            continue
+        moved = old_reset is None or new_reset is None or abs(new_reset - old_reset) > 60
+        if not moved and after < 95:
+            continue
+        early = bool(old_reset) and now < old_reset - 300
+        lines.append(f"{window_label(minutes) or '额度'}窗口：{before:.0f}% → {after:.0f}%" + ("（提前重置）" if early else ""))
+    return lines
 
 
 def tray_order(snapshots: dict[str, QuotaSnapshot], keys: list[str]) -> list[str]:
@@ -559,6 +581,8 @@ class QuotaTray:
         with self.refresh_lock:
             results = collect(providers, self.snapshots)
             now = time.time()
+            for provider, snapshot in results.items():
+                self.announce_resets(provider, self.snapshots.get(provider), snapshot, now)
             snapshots = dict(self.snapshots)
             snapshots.update(results)
             self.snapshots = snapshots
@@ -702,6 +726,19 @@ class QuotaTray:
 
     # ----- community forecast of global Codex resets ---------------------------
 
+    def announce_resets(self, provider: str, old: QuotaSnapshot | None, new: QuotaSnapshot | None, now: float) -> None:
+        if provider not in RESET_NOTIFY:
+            return
+        lines = reset_changes(old, new, now)
+        if not lines:
+            return
+        outlook = getattr(self, "reset_outlook", None)
+        if provider == "codex" and outlook and outlook.last_reset_at and outlook.last_reset_at > now - 6 * 3600:
+            lines.append(f"社区已确认全局重置（{outlook.source}）")
+        label = provider_registry.get(provider).label.split("（")[0]
+        log.info("quota reset noticed for %s: %s", provider, "; ".join(lines))
+        self.notify(provider, f"{label} 额度已重置", "\n".join(lines))
+
     def reset_level(self, now: float | None = None) -> str:
         outlook = getattr(self, "reset_outlook", None)
         return outlook.level(now) if outlook and reset_watch.ENABLED else "unknown"
@@ -733,8 +770,9 @@ class QuotaTray:
         remaining = self.snapshots["codex"].display_remaining if "codex" in self.snapshots else None
         if previous and previous.last_reset_at and outlook.last_reset_at and \
                 outlook.last_reset_at > previous.last_reset_at + 600 and outlook.last_reset_at > now - 6 * 3600:
-            # A new global reset was confirmed: re-read our own figures now.
-            self.notify("codex", "Codex 已全局重置", f"社区追踪到新的全局重置（{outlook.last_reset_text or outlook.source}），正在刷新额度。")
+            # A new global reset was confirmed: re-read our own figures now;
+            # the read itself announces the reset when the numbers came back.
+            log.info("community confirmed a global Codex reset; refreshing")
             if self.scheduler is not None:
                 self.scheduler.request(["codex"], now, "全局重置")
                 self.wake.set()
@@ -770,6 +808,7 @@ class QuotaTray:
         if record and current is not None and record[0] > (current.updated_at or 0) and record[0] > now - 6 * 3600:
             fresh = parse_codex_session_limits(record[1], record[0])
             if fresh is not None:
+                self.announce_resets("codex", current, fresh, now)
                 self.snapshots["codex"] = fresh
                 if self.history is not None and self.history.record(fresh):
                     self.history.save()

@@ -7,6 +7,11 @@ Triggers, per provider:
 * the reset time of any window passes          -> a few seconds after it
 * read failed                                  -> 30 s, 1, 2, 5 min backoff
 * otherwise idle                               -> IDLE seconds (long)
+* quota used up (Grok)                         -> rarely, then every couple of
+                                                  minutes shortly before the reset
+* no such quota on this account (Claude without a subscription), or repeated
+  failures                                     -> every GIVE_UP seconds; manual
+                                                  refresh still reads at once
 Grok's and Claude's readers launch a whole CLI session, so their intervals are wider.
 """
 from __future__ import annotations
@@ -21,7 +26,30 @@ from providers import SPECS
 IDLE = {spec.key: spec.idle_seconds for spec in SPECS}
 ACTIVE = {spec.key: spec.active_seconds for spec in SPECS}
 SETTLE = {spec.key: spec.settle_seconds for spec in SPECS}
+EXHAUSTED = {spec.key: spec.exhausted_seconds for spec in SPECS}
+NEAR_RESET = {spec.key: (spec.near_reset_seconds, spec.near_reset_poll) for spec in SPECS}
+GIVE_UP = {spec.key: spec.give_up_seconds for spec in SPECS}
 RETRY = (30, 60, 120, 300)
+GIVE_UP_AFTER = 3            # consecutive failures before GIVE_UP applies
+# Errors meaning "this account has no such quota": retrying cannot help.
+NO_PLAN_MARKERS = ("未找到订阅额度", "API Key 计费", "未找到 Claude Code", "未登录", "not logged in", "no subscription")
+
+
+def no_plan(error: str | None) -> bool:
+    text = (error or "").lower()
+    return any(marker.lower() in text for marker in NO_PLAN_MARKERS)
+
+
+def exhausted_reset(snapshot: Any) -> tuple[bool, float | None]:
+    """(used up?, when the used-up window(s) reset).  Every exhausted window
+    must reset before the quota is usable again, hence the latest reset."""
+    windows = ((getattr(snapshot, "remaining_percent", None), getattr(snapshot, "resets_at", None)),
+               (getattr(snapshot, "secondary_remaining_percent", None), getattr(snapshot, "secondary_resets_at", None)))
+    empty = [reset for remaining, reset in windows if remaining is not None and remaining <= 0.5]
+    if not empty:
+        return False, None
+    known = [reset for reset in empty if reset]
+    return True, (max(known) if len(known) == len(empty) else None)
 RESET_DELAY = 5
 MAX_SLEEP = 30.0
 
@@ -35,6 +63,7 @@ class RefreshScheduler:
         self.last_done = {p: 0.0 for p in self.providers}
         self.failures = {p: 0 for p in self.providers}
         self.active = {p: False for p in self.providers}
+        self.dormant = {p: False for p in self.providers}     # no quota on this account
         self.running: set[str] = set()
 
     def _forward(self, provider: str, when: float, reason: str) -> bool:
@@ -64,16 +93,31 @@ class RefreshScheduler:
         with self.lock:
             self.running.discard(provider)
             self.last_done[provider] = now
-            if getattr(snapshot, "error", None):
+            error = getattr(snapshot, "error", None)
+            self.dormant[provider] = False
+            if error:
                 self.failures[provider] += 1
-                delay = RETRY[min(self.failures[provider], len(RETRY)) - 1]
-                self.due[provider] = now + min(delay, IDLE[provider])
-                self.reason[provider] = "重试"
+                delay = min(RETRY[min(self.failures[provider], len(RETRY)) - 1], IDLE[provider])
+                reason = "重试"
+                if GIVE_UP[provider] and (no_plan(error) or self.failures[provider] > GIVE_UP_AFTER):
+                    delay, reason = GIVE_UP[provider], ("无可用额度" if no_plan(error) else "多次失败")
+                    self.dormant[provider] = True
+                self.due[provider] = now + delay
+                self.reason[provider] = reason
             else:
                 self.failures[provider] = 0
                 interval = ACTIVE[provider] if self.active[provider] else IDLE[provider]
                 self.due[provider] = now + interval
                 self.reason[provider] = "使用中" if self.active[provider] else "空闲"
+                used_up, reset = exhausted_reset(snapshot)
+                if used_up and EXHAUSTED[provider]:
+                    lead, poll = NEAR_RESET[provider]
+                    if reset and reset - lead <= now:
+                        self.due[provider], self.reason[provider] = now + poll, "临近重置"
+                    elif reset:
+                        self.due[provider], self.reason[provider] = min(now + EXHAUSTED[provider], reset - lead), "额度用尽"
+                    else:
+                        self.due[provider], self.reason[provider] = now + EXHAUSTED[provider], "额度用尽"
             for reset in (getattr(snapshot, "resets_at", None), getattr(snapshot, "secondary_resets_at", None)):
                 if reset and reset > now:
                     self._forward(provider, reset + RESET_DELAY, "额度重置")
@@ -84,6 +128,8 @@ class RefreshScheduler:
             was = self.active[provider]
             self.active[provider] = active
             moved = False
+            if self.dormant[provider]:
+                return False   # e.g. Claude Code used without a subscription quota
             if active and not was:
                 moved |= self._forward(provider, max(now + 60, self.last_done[provider] + ACTIVE[provider]), "使用中")
             if finished or (was and not active):
