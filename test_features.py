@@ -5,6 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import quota_sources
 from detail_card import CardModel, render_card, text_card
@@ -175,7 +176,8 @@ class QuotaParsingTests(unittest.TestCase):
         quota_sources.get_gemini_quota = slow("gemini")
         try:
             started = time.monotonic()
-            result = quota_sources.collect_all({"grok": old})
+            with patch.object(quota_sources.providers, "enabled_keys", return_value=["codex", "grok", "gemini"]):
+                result = quota_sources.collect_all({"grok": old})
             elapsed = time.monotonic() - started
         finally:
             quota_sources.get_codex_quota, quota_sources.get_grok_quota, quota_sources.get_gemini_quota = originals

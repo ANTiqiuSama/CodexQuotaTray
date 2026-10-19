@@ -1,7 +1,7 @@
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import reset_watch
 from reset_watch import ResetOutlook, card_lines, fetch_outlook, parse_codex_reset, parse_willcodexreset, parse_willreset
@@ -61,6 +61,28 @@ class ResetWatchTests(unittest.TestCase):
 
 
 class TrayResetTests(unittest.TestCase):
+    def test_cached_high_forecast_notifies_after_fresh_startup_read_once(self):
+        import tray_app
+        now = time.time()
+        high = ResetOutlook("s", "p", 71, 81, now - 86400, "r1", fetched_at=now)
+        performance = {"providers": {key: {} for key in tray_app.PROVIDERS}}
+        with patch.object(reset_watch, "load", return_value=high), \
+                patch.object(reset_watch, "save"), patch.object(reset_watch, "ALERT_PERCENT", 1), \
+                patch.object(reset_watch, "ENABLED", True), \
+                patch.object(tray_app, "load_cached_snapshots", return_value={}), \
+                patch.object(tray_app, "QuotaHistory"), patch.object(tray_app, "TpsMonitor") as monitor, \
+                patch.object(tray_app, "HoverIcon"), patch.object(tray_app, "make_display_icon"), \
+                patch.object(tray_app.QuotaTray, "migrate_startup"), \
+                patch.object(tray_app.QuotaTray, "tooltip", return_value=""), \
+                patch.object(tray_app.QuotaTray, "build_menu", return_value=None):
+            monitor.return_value.snapshot.return_value = performance
+            tray = tray_app.QuotaTray()
+            tray.notify, tray.update_ui = Mock(), Mock()
+            tray.apply_reset_outlook(high, now)
+            tray.apply_reset_outlook(high, now + 1)
+            self.assertEqual(tray.notify.call_count, 1)
+            self.assertEqual(tray.notify.call_args[0][1], "Codex 可能即将全局重置")
+
     def make_tray(self):
         import tray_app
         tray = tray_app.QuotaTray.__new__(tray_app.QuotaTray)

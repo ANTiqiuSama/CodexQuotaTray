@@ -191,7 +191,9 @@ class QuotaTray:
         self.shown_order: list[str] = []
         self.reordered_at = 0.0
         self.reset_outlook = reset_watch.load(RESET_PATH) if reset_watch.ENABLED else None
-        self.reset_alerted = self.reset_outlook.level() if self.reset_outlook else "unknown"
+        # Cached figures may use a different alert threshold.  Notify once
+        # after a fresh high forecast arrives, then suppress repeats this run.
+        self.reset_alerted = "unknown"
         self.migrate_startup()
         self.icons = {
             provider: HoverIcon(
