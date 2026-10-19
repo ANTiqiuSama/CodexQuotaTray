@@ -104,8 +104,8 @@ class SchedulerTests(unittest.TestCase):
         scheduler.completed("codex", self.snapshot(), 0)
         scheduler.activity("codex", True, False, 10)
         self.assertGreaterEqual(scheduler.due["codex"], ACTIVE["codex"])  # No refresh storm on start.
-        self.assertTrue(scheduler.activity("codex", False, False, 100))
-        self.assertEqual(scheduler.due["codex"], 100 + SETTLE["codex"])
+        self.assertTrue(scheduler.activity("codex", False, False, 30))
+        self.assertEqual(scheduler.due["codex"], 30 + SETTLE["codex"])
 
     def test_continuous_use_refreshes_at_active_interval(self):
         scheduler = RefreshScheduler(("codex",), 0)
@@ -135,6 +135,49 @@ class SchedulerTests(unittest.TestCase):
             now = scheduler.due["codex"]
         self.assertEqual(delays[:4], list(RETRY))
         self.assertEqual(delays[-1], RETRY[-1])
+
+    def test_exhausted_grok_waits_then_polls_near_reset(self):
+        from refresh_scheduler import EXHAUSTED, NEAR_RESET
+        scheduler = RefreshScheduler(("grok",), 0)
+        scheduler.take_due(0)
+        empty = self.snapshot(resets_at=100_000)
+        empty.remaining_percent = 0.0
+        scheduler.completed("grok", empty, 0)
+        self.assertEqual(scheduler.due["grok"], EXHAUSTED["grok"])
+        self.assertIn("额度用尽", scheduler.describe("grok", 0))
+        lead, poll = NEAR_RESET["grok"]
+        scheduler.take_due(100_000 - lead + 10)
+        scheduler.completed("grok", empty, 100_000 - lead + 10)
+        self.assertEqual(scheduler.due["grok"], 100_000 - lead + 10 + poll)
+        self.assertIn("临近重置", scheduler.describe("grok", 100_000 - lead + 10))
+        # Codex keeps its normal cadence when used up (early resets happen).
+        codex = RefreshScheduler(("codex",), 0)
+        codex.take_due(0)
+        codex.completed("codex", empty, 0)
+        self.assertEqual(codex.due["codex"], IDLE["codex"])
+
+    def test_claude_without_subscription_is_checked_rarely_and_ignores_activity(self):
+        from refresh_scheduler import GIVE_UP
+        scheduler = RefreshScheduler(("claude",), 0)
+        scheduler.take_due(0)
+        scheduler.completed("claude", self.snapshot(error="读取 /usage 失败：ValueError: Claude /usage 未找到订阅额度（API Key 计费账号没有 5 小时/每周额度）"), 0)
+        self.assertEqual(scheduler.due["claude"], GIVE_UP["claude"])
+        self.assertFalse(scheduler.activity("claude", True, False, 10))
+        self.assertFalse(scheduler.activity("claude", False, True, 20))
+        self.assertEqual(scheduler.due["claude"], GIVE_UP["claude"])
+        scheduler.request(["claude"], 30)
+        self.assertEqual(scheduler.due["claude"], 30)
+
+    def test_claude_repeated_failures_give_up(self):
+        from refresh_scheduler import GIVE_UP
+        scheduler = RefreshScheduler(("claude",), 0)
+        now = 0
+        for _ in range(4):
+            scheduler.take_due(now)
+            scheduler.completed("claude", self.snapshot(error="timeout"), now)
+            now = scheduler.due["claude"]
+        self.assertEqual(scheduler.reason["claude"], "多次失败")
+        self.assertGreaterEqual(scheduler.due["claude"] - now + (now - scheduler.last_done["claude"]), GIVE_UP["claude"])
 
     def test_manual_and_wake_requests_are_immediate_and_sleep_is_bounded(self):
         scheduler = RefreshScheduler(("codex",), 0)

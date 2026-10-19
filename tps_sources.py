@@ -146,6 +146,7 @@ def proto_seconds(data: bytes, *, epoch=False) -> float | None:
 
 MIN_TPS_TOKENS = 16      # shorter replies give meaningless rates
 MIN_TPS_SECONDS = 0.3
+TPS_GROUP_SECONDS = 90   # replies finished this close together are averaged
 
 
 @dataclass(frozen=True)
@@ -226,6 +227,7 @@ class TpsMonitor:
         self.seen: set[str] = set()
         self.completed_at: dict[str, float] = {}
         self.client_stream_starts: dict[str, list[float]] = {}
+        self.client_stream_ends: dict[str, list[float]] = {}   # output items finished streaming
         self.file_sessions: dict[Path, str] = {}
         self.started_at = time.time()
         self.grok_counters: dict[tuple[str, str], int] = {}
@@ -270,9 +272,10 @@ class TpsMonitor:
                 self.readers.pop(path, None)
                 self.file_sessions.pop(path, None)
                 self.usage_versions.pop(path, None)
-        for session, points in list(self.client_stream_starts.items()):
-            if not points or points[-1] < now - 600:
-                self.client_stream_starts.pop(session, None)
+        for streams in (self.client_stream_starts, self.client_stream_ends):
+            for session, points in list(streams.items()):
+                if not points or points[-1] < now - 600:
+                    streams.pop(session, None)
         for session, moment in list(self.completed_at.items()):
             if moment < now - FORGET_SECONDS:
                 self.completed_at.pop(session, None)
@@ -395,17 +398,17 @@ class TpsMonitor:
             return
         provider = provider_for(pending["model"])
         provider = provider if provider != "other" else "claude"   # Claude Code sessions default to Claude
-        tps, basis = None, "读取Claude Code真实输出计数；不推算TPS"
+        tps, basis, seconds = None, "读取Claude Code真实输出计数；不推算TPS", None
         requested = pending.get("requested")
         if provider == "mimo" and requested and pending["output"] >= MIN_TPS_TOKENS:
             # Claude Code routed to MiMo: the transcript has no streaming times,
             # only when the request input was written and when the reply ended.
-            seconds = pending["last"] - requested
-            if MIN_TPS_SECONDS <= seconds <= 600:
-                tps = round(pending["output"] / seconds, 1)
+            elapsed = pending["last"] - requested
+            if MIN_TPS_SECONDS <= elapsed <= 600:
+                tps, seconds = round(pending["output"] / elapsed, 1), elapsed
                 basis = "Claude Code 端到端速率（真实输出token数÷请求发出至回复结束，含首字延迟，偏低）"
         self.add(Observation(key("claude", mid), "Claude Code", pending["session"], provider, pending["model"],
-                             pending["last"], pending["output"], None, basis, True, tps,
+                             pending["last"], pending["output"], seconds, basis, True, tps,
                              pending.get("input", 0), pending.get("cached", 0)), now)
         if pending["stop"] == "end_turn" and pending["last"] > now - 3:
             self.activity[pending["session"]] = (provider, pending["last"], "刚完成生成")
@@ -521,10 +524,11 @@ class TpsMonitor:
                 output = (number(tokens.get("output"), 0) or 0) + (number(tokens.get("reasoning"), 0) or 0)
                 tps, basis = None, "读取MiMo Code真实计数；该消息缺少流式时间"
                 span = spans.get(ident)
+                seconds = None
                 if span and output >= MIN_TPS_TOKENS and span >= MIN_TPS_SECONDS:
-                    tps = round(output / span, 1)
+                    tps, seconds = round(output / span, 1), span
                     basis = "MiMo Code 流式时间（真实输出token数÷首个输出至最后输出，不含首字延迟和工具执行）"
-                self.add(Observation(key("mimocode", ident), "MiMo Code", str(session), provider, model, completed, int(output), None,
+                self.add(Observation(key("mimocode", ident), "MiMo Code", str(session), provider, model, completed, int(output), seconds,
                                      basis, True, tps,
                                      int((number(tokens.get("input"), 0) or 0) + (number(cache.get("write"), 0) or 0)),
                                      int(number(cache.get("read"), 0) or 0)), now)
@@ -566,6 +570,10 @@ class TpsMonitor:
             # These client stream events carry a thread ID. Outgoing UI delta
             # logs do not, so they cannot safely be matched across concurrent chats.
             match = re.search(r'Output item item_type="([^"]+)" item_id="([^"]+)"', body or "")
+            if match and "handle_output_item_done:" in body:
+                ends = self.client_stream_ends.setdefault(session, [])
+                ends.append(moment)
+                self.client_stream_ends[session] = [point for point in ends if point > now - 600]
             if match and "handle_output_item_done:" not in body:
                 points = self.client_stream_starts.setdefault(session, [])
                 points.append(moment)
@@ -618,16 +626,23 @@ class TpsMonitor:
             model = context.get("model") or "unknown"
             bridge_copy = provider_for(model) == "gemini" and context.get("provider") == "grok" and self.antigravity_bridge
             source = "Codex · Gemini桥接回传" if bridge_copy else "Codex"
-            client_tps = None
+            client_tps = seconds = None
             basis = "客户端暂未取得完整流式计数"
             if provider_for(model) in ("codex", "mimo", "gemini"):
                 points = [point for point in self.client_stream_starts.get(session, []) if previous < point <= moment]
-                if points and moment > points[0]:
-                    client_tps = round(output / (moment - points[0]), 1)
-                    basis = "客户端流式统计（真实输出token数÷首个输出项至计数完成的时间，含思考和工具调用输出）"
+                if points:
+                    # End at the last output item that finished streaming; the
+                    # usage record itself is written a little later.
+                    ends = [point for point in self.client_stream_ends.get(session, []) if points[0] < point <= moment + 2]
+                    end = max(ends) if ends else moment
+                    if output >= MIN_TPS_TOKENS and end - points[0] >= MIN_TPS_SECONDS:
+                        seconds = end - points[0]
+                        client_tps = round(output / seconds, 1)
+                        basis = ("客户端流式统计（真实输出token数÷首个输出项开始至最后输出项完成，含思考和工具调用输出）" if ends
+                                 else "客户端流式统计（真实输出token数÷首个输出项至计数完成的时间，含思考和工具调用输出）")
             cached = number(usage.get("cached_input_tokens"), 0) or 0
             uncached = max(0, (number(usage.get("input_tokens"), 0) or 0) - cached)  # OpenAI input includes cache hits
-            self.add(Observation(identity, source, session, provider_for(model), model, moment, int(output), None, basis, True, client_tps,
+            self.add(Observation(identity, source, session, provider_for(model), model, moment, int(output), seconds, basis, True, client_tps,
                                  int(uncached), int(cached)), now)
             context["response_has_tool_call"] = False
             context["response_has_reasoning"] = False
@@ -908,7 +923,16 @@ class TpsMonitor:
             active = sum(1 for value in self.activity.values() if value[0] == provider)
             output = sum(e.output_tokens for e in recent)
             generation = latest.native_tps if latest else None
-            providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [latest.basis] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": latest.basis if latest else "客户端暂未取得TPS"}
+            basis_text = latest.basis if latest else None
+            if latest is not None and latest.generation_seconds:
+                # Token-weighted over replies finished within TPS_GROUP_SECONDS of
+                # the latest: short tool-call replies no longer swing the figure.
+                group = [e for e in samples if e.generation_seconds and e.ended_at >= latest.ended_at - TPS_GROUP_SECONDS
+                         and e.source == latest.source]
+                if len(group) > 1:
+                    generation = round(sum(e.output_tokens for e in group) / sum(e.generation_seconds for e in group), 1)
+                    basis_text = f"{latest.basis}；最近 {len(group)} 次回复按 token 加权"
+            providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
 
 

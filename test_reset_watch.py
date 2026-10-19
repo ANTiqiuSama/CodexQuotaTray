@@ -109,7 +109,7 @@ class TrayResetTests(unittest.TestCase):
         done = ResetOutlook("s", "p", 5, 10, now - 60, "r2", "Direct usage reset", fetched_at=now)
         tray.apply_reset_outlook(done, now + 1200)
         tray.scheduler.request.assert_called_once_with(["codex"], now + 1200, "全局重置")
-        self.assertEqual(tray.notify.call_args[0][1], "Codex 已全局重置")
+        self.assertEqual(tray.notify.call_count, 1)   # the refresh itself announces the reset
 
     def test_icon_badge_changes_pixels(self):
         from icon_art import quota_icon
@@ -123,6 +123,36 @@ class TrayResetTests(unittest.TestCase):
         alert = make_display_icon(SimpleNamespace(), "C", performance, reset_hint=True)
         self.assertFalse(normal.tobytes() == alert.tobytes(), "TPS state lost the reset badge")
         self.assertEqual(alert.getpixel((10, 10))[:3], RESET_BLUE[:3])
+
+
+class QuotaResetNoticeTests(unittest.TestCase):
+    @staticmethod
+    def snap(remaining, reset, second=None, second_reset=None, error=None, provider="grok"):
+        from quota_sources import QuotaSnapshot
+        return QuotaSnapshot(provider, provider, 10080 if provider == "grok" else 300, None if remaining is None else 100 - remaining,
+                             remaining, reset, 1.0, False, error, 10080 if second is not None else None,
+                             None if second is None else 100 - second, second, second_reset)
+
+    def test_reset_lines(self):
+        from tray_app import reset_changes
+        self.assertEqual(reset_changes(self.snap(0, 1000), self.snap(100, 605800), 1010), ["每周窗口：0% → 100%"])
+        self.assertEqual(reset_changes(self.snap(3, 5000), self.snap(100, 23000), 1000), ["每周窗口：3% → 100%（提前重置）"])
+        self.assertEqual(reset_changes(self.snap(40, 1000), self.snap(45, 1000), 900), [])       # small gain
+        self.assertEqual(reset_changes(self.snap(0, 1000), self.snap(None, None, error="x"), 1010), [])
+        codex = reset_changes(self.snap(5, 1000, 60, 9000, provider="codex"), self.snap(100, 19000, 62, 9000, provider="codex"), 1010)
+        self.assertEqual(codex, ["5 小时窗口：5% → 100%"])
+
+    def test_announce_only_for_selected_providers(self):
+        import tray_app
+        tray = tray_app.QuotaTray.__new__(tray_app.QuotaTray)
+        tray.notify = Mock()
+        tray.reset_outlook = None
+        tray.announce_resets("grok", self.snap(0, 1000), self.snap(100, 605800), 1010)
+        tray.notify.assert_called_once()
+        self.assertEqual(tray.notify.call_args[0][1], "Grok 额度已重置")
+        tray.notify.reset_mock()
+        tray.announce_resets("gemini", self.snap(0, 1000), self.snap(100, 605800), 1010)
+        tray.notify.assert_not_called()
 
 
 if __name__ == "__main__":
