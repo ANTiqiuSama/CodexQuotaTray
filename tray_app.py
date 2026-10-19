@@ -72,13 +72,13 @@ def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = 
     return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale, marker=pace_marker(snapshot), reset_hint=reset_hint)
 
 
-def make_tps_icon(performance: dict, letter: str) -> Image.Image:
-    return live_icon(performance.get("display_tps", 0) or 0, letter)
+def make_tps_icon(performance: dict, letter: str, reset_hint: bool = False) -> Image.Image:
+    return live_icon(performance.get("display_tps", 0) or 0, letter, reset_hint=reset_hint)
 
 
 def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, reset_hint: bool = False) -> Image.Image:
     if performance.get("active_sessions", 0) and performance.get("display_tps") is not None:
-        return make_tps_icon(performance, letter)
+        return make_tps_icon(performance, letter, reset_hint)
     return make_provider_icon(snapshot, letter, reset_hint)
 
 

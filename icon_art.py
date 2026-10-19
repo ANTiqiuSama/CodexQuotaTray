@@ -238,7 +238,7 @@ def tps_text(value: float) -> str:
     return f"{value / 1000:.0f}k" if value < 10_000 else "9k+"
 
 
-def live_icon(tps: float, letter: str) -> Image.Image:
+def live_icon(tps: float, letter: str, reset_hint: bool = False) -> Image.Image:
     """Same disc, lit in the provider accent, carrying the TPS number."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
@@ -249,4 +249,6 @@ def live_icon(tps: float, letter: str) -> Image.Image:
     wide = len(text) >= 3
     face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
     _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), TILE_TEXT)
+    if reset_hint:
+        _reset_badge(canvas)
     return _finish(canvas)

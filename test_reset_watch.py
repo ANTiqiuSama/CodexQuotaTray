@@ -115,6 +115,15 @@ class TrayResetTests(unittest.TestCase):
         from icon_art import quota_icon
         self.assertNotEqual(quota_icon(40, "C").tobytes(), quota_icon(40, "C", reset_hint=True).tobytes())
 
+    def test_reset_badge_is_preserved_while_showing_tps(self):
+        from icon_art import RESET_BLUE
+        from tray_app import make_display_icon
+        performance = {"active_sessions": 1, "display_tps": 50.0}
+        normal = make_display_icon(SimpleNamespace(), "C", performance)
+        alert = make_display_icon(SimpleNamespace(), "C", performance, reset_hint=True)
+        self.assertFalse(normal.tobytes() == alert.tobytes(), "TPS state lost the reset badge")
+        self.assertEqual(alert.getpixel((10, 10))[:3], RESET_BLUE[:3])
+
 
 if __name__ == "__main__":
     unittest.main()
