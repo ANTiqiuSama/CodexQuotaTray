@@ -103,7 +103,7 @@ class PanelModel:
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-RESET_HEIGHT = 108          # Upcoming resets: three provider columns, fixed height.
+RESET_HEIGHT = 88           # Three compact provider columns, without a section heading.
 GEAR_RADIUS = 9.0
 GEAR_HIT = 17.0
 
@@ -915,13 +915,12 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     if empty:
         draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
-    reset_y = top + field_h + 12
-    draw.text((px(PAD), px(reset_y)), "最近重置", font=ui_font(px(10)), fill=MUTED_TEXT, anchor="lt")
+    reset_y = top + field_h + 10
     gap = 8
     column_w = (WIDTH - 2 * PAD - 2 * gap) / 3
     for index in range(3):
         x = PAD + index * (column_w + gap)
-        y = reset_y + 18
+        y = reset_y
         draw.rounded_rectangle((px(x), px(y), px(x + column_w), px(y + 70)), radius=px(8),
                                fill=(240, 238, 230, 8), outline=(240, 238, 230, 18), width=max(1, round(s)))
         if index >= len(resets):
@@ -929,7 +928,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
             continue
         item = resets[index]
         face = ui_font(px(11), "bold")
-        name = forecast_text(f"{item.letter}  {item.name}", px(column_w - 16), face, draw)
+        name = forecast_text(item.name, px(column_w - 16), face, draw)
         draw.text((px(x + 8), px(y + 6)), name, font=face, fill=accent(item.letter), anchor="lt")
         face = ui_font(px(9.5))
         window = forecast_text(item.window, px(column_w - 16), face, draw)
