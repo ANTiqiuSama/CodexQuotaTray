@@ -504,6 +504,12 @@ class HoverDetails:
 
     def drive_panel(self, panel, point, provider, anchor, left, right, now) -> None:
         """One frame of the open panel: hand input to the scene, act on drops."""
+        if provider:
+            # Remember the icon actually under the pointer. After switching icons
+            # the Shell sends POPUPCLOSE a few seconds later; with the old
+            # candidate the new icon stopped counting as hovered and the panel
+            # closed while the pointer was still on it.
+            self.candidate = provider
         if provider and provider != panel.provider and not panel.scene.dragging:
             model = self.agents.panel(provider)
             if model is None:           # e.g. Claude without a subscription: tooltip only

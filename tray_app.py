@@ -443,7 +443,8 @@ class QuotaTray:
             summary, busy = self.summarizer.lookup(cluster)
             title, doing, detail = agent_tasks.describe(cluster, summary)
             kinds = [m["provider"] for m in cluster.members]
-            lead = provider if provider in kinds else next((m["provider"] for m in cluster.members if m["live"]), kinds[0])
+            # Fixed colour per group: following whichever member is live made it flicker.
+            lead = provider if provider in kinds else kinds[0]
             members = tuple((provider_letter(m["provider"]), m["live"]) for m in cluster.members) if len(cluster.members) > 1 else ()
             bubbles.append(agent_panel.BubbleModel(cluster.key, agent_tasks.shorten(title, 16), doing, provider_letter(lead),
                                                    cluster.live, detail, members, busy, provider in kinds,

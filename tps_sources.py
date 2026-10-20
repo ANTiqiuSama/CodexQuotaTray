@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -25,6 +26,7 @@ from typing import Any
 import psutil
 
 import providers
+from herdr_source import Herdr
 from agent_tasks import AgentNotes, RECUR_SPREAD, clean as clean_request, read_schedules, tool_action
 
 
@@ -147,9 +149,12 @@ def proto_seconds(data: bytes, *, epoch=False) -> float | None:
     return value if epoch or value <= 86400 else None
 
 
+log = logging.getLogger(__name__)
+THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 MIN_TPS_TOKENS = 16      # shorter replies give meaningless rates
 MIN_TPS_SECONDS = 0.3
-TPS_GROUP_SECONDS = 90   # replies finished this close together are averaged
+TPS_GROUP_SECONDS = 90
+HOLD_TPS_SECONDS = 1800  # while still working, show the last rate measured this recently   # replies finished this close together are averaged
 
 
 @dataclass(frozen=True)
@@ -252,6 +257,8 @@ class TpsMonitor:
         self.thread_columns: set[str] | None = None
         self.schedules: list[dict[str, Any]] = []       # scheduled task definitions + recurring requests
         self.codex_recurring: dict[str, float] = {}
+        # herdr panes group one agent process's sessions; off for test homes.
+        self.herdr = Herdr(enabled=False if home is not None else None)
 
     def add(self, observation: Observation, now: float):
         if observation.identity in self.seen or not now - 86400 <= observation.ended_at <= now + 5:
@@ -317,7 +324,10 @@ class TpsMonitor:
         elif now - self.last_slow_discovery >= SLOW_DISCOVERY_SECONDS:
             for path in self.codex_root.glob("sessions/*/*/*/rollout-*.jsonl"):
                 if self._recent(path, now):
-                    self._register(path, path.stem.split("T", 1)[-1], "Codex")
+                    # Same thread id the stream logs use, not the "HH-MM-SS-<id>" tail of
+                    # the file name (which made one session show up as two bubbles).
+                    found = THREAD_ID.findall(path.stem)
+                    self._register(path, found[-1] if found else path.stem.split("T", 1)[-1], "Codex")
         grok_paths = [path for path in self.grok_root.glob("sessions/*/*/updates.jsonl")
                       if path in self.readers or self._recent(path, now)]
         for path in grok_paths:
@@ -1040,7 +1050,13 @@ class TpsMonitor:
                 break
             if event.native_tps is not None:
                 rates.setdefault(event.session, event.native_tps)
-        return self.notes.export(self.activity, self.context, rates, now, provider_for, self.schedules)
+        agents = self.notes.export(self.activity, self.context, rates, now, provider_for, self.schedules)
+        try:
+            agents = self.herdr.attach(agents, now)
+        except Exception:      # an optional extra must never hide the native agents
+            log.debug("herdr attach failed", exc_info=True)
+        self.health["herdr"] = {"status": self.herdr.status, "panes": len(self.herdr.rows)}
+        return agents
 
     def snapshot(self, now: float) -> dict[str, Any]:
         # The installed Codex bridge emits a second copy of agy's usage. Only
@@ -1063,6 +1079,8 @@ class TpsMonitor:
             samples = [e for e in self.events if e.provider == provider and now - 300 <= e.ended_at <= now and e.native_tps is not None]
             latest = max(samples, key=lambda e:e.ended_at) if samples else None
             active = sum(1 for value in self.activity.values() if value[0] == provider)
+            # herdr sees agents working before (and between) their local records.
+            active += self.herdr.working(provider, set(self.activity))
             output = sum(e.output_tokens for e in recent)
             generation = latest.native_tps if latest else None
             basis_text = latest.basis if latest else None
@@ -1074,6 +1092,13 @@ class TpsMonitor:
                 if len(group) > 1:
                     generation = round(sum(e.output_tokens for e in group) / sum(e.generation_seconds for e in group), 1)
                     basis_text = f"{latest.basis}；最近 {len(group)} 次回复按 token 加权"
+            if generation is None and active:
+                # A long reply or tool run has no finished sample for minutes; keep
+                # the last measured rate (up to HOLD_TPS_SECONDS) instead of 0.
+                held = [e for e in self.events if e.provider == provider and e.native_tps is not None and now - HOLD_TPS_SECONDS <= e.ended_at <= now]
+                if held:
+                    latest = max(held, key=lambda e: e.ended_at)
+                    generation, basis_text = latest.native_tps, f"{latest.basis}；仍在工作，保留上次测得的速率"
             providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
 

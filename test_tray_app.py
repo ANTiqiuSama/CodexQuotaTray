@@ -172,6 +172,21 @@ class HoverTests(unittest.TestCase):
             tray.update_icon("codex", "C")
         self.assertNotEqual(icon.icon, image)
 
+    def test_panel_stays_after_switching_to_another_icon(self):
+        icons = {"codex": SimpleNamespace(_version4=True, hover_open=False), "grok": SimpleNamespace(_version4=True, hover_open=True)}
+        agents = Mock()
+        hover = HoverDetails(icons, lambda _: "", threading.Event(), agents)
+        hover.candidate = "codex"
+        panel = Mock(provider="codex", closing_at=None)
+        panel.scene = SimpleNamespace(dragging=False, press=False)
+        panel.contains.return_value = False
+        panel.frame.return_value = []
+        rect = (10, 10, 34, 66)
+        hover.drive_panel(panel, wintypes.POINT(20, 30), "grok", rect, False, False, 1.0)
+        icons["grok"].hover_open = False      # Shell POPUPCLOSE a few seconds later
+        with patch("hover_details.icon_rect", side_effect=lambda icon: rect if icon is icons["grok"] else None):
+            self.assertEqual(("grok", rect), hover.target_at(wintypes.POINT(20, 30)))
+
     def test_shell_popup_close_during_refresh_does_not_close_our_hover(self):
         icon = SimpleNamespace(_version4=True, hover_open=False)
         hover = HoverDetails({"codex": icon}, lambda _: "live", threading.Event())

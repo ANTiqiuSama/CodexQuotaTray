@@ -224,18 +224,30 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 
 | 区域 | 内容 |
 | --- | --- |
-| 顶部 | 5 小时、每周剩余额度与最近 TPS，打开时数字与额度条从零滚动到当前值；右上角为状态（N 个在工作 / 空闲 / 旧数据 / 读取失败），工作时标题圆点有声呐波纹；MiMo 并列显示套餐剩余、今日 Credits 与 TPS；上方显示 GPT 社区重置概率 |
+| 顶部 | 5 小时、每周剩余额度与最近 TPS，打开时数字与额度条从零滚动到当前值；右上角为状态（N 个在工作 / 空闲 / 旧数据 / 读取失败），工作时标题圆点有声呐波纹；MiMo 并列显示套餐剩余、今日 Credits 与 TPS；agent 仍在工作但长回复或工具调用暂未产生新样本时，保留 30 分钟内最近一次测得的 TPS，不再跳成 0；上方显示 GPT 社区重置概率 |
 | 额度区下方的重置三栏 | 仅显示来源全名和倒计时，按时间由近到远排列。Codex 等来源选择当前限制可用额度的窗口；周额度耗尽时不展示无助于恢复使用的 5 小时重置，两个窗口均耗尽时等较晚的窗口恢复。Gemini 的 Argon 和 Opus 独立参与排序，可占两栏，并注明池名；Opus 对应控制台的 Claude/GPT 共享池时间。MiMo 套餐到期不算周期重置 |
 | 气泡内 | 任务名：最近一次实质请求（“继续”“好的”之类不覆盖任务），缺失时用客户端线程标题或项目文件夹 |
 | 气泡下 | 当前动作：运行测试、编辑某文件、检索代码、查资料、派发子任务、思考中等；悬停气泡时展开完整任务描述 |
-| 面板底部 | 按当前速度是否能用到重置／到期的预测，以及设置齿轮 |
+| 面板底部 | 按当前速度是否能用到重置／到期的预测，以及右侧的设置齿轮图标（无底板，悬停时变色并微转） |
 | 外圈 | 颜色对应模型来源；呼吸波纹表示正在生成，暗淡表示 3 分钟内刚完成；大气泡上的小圆点是各并行成员 |
 
 所有来源的 agent 都会出现在同一面板，被悬停来源的气泡高亮；各图标的面板大小与气泡排列一致，切换图标时不跳动（无 TPS 时显示 0 tok/s，Codex 全局重置提示条在所有面板显示）。气泡分组规则：
 
 - **自动**：客户端自己派生的子 agent 归入父任务——Codex `spawn_agent` 子线程（`parent_thread_id`）、Claude Code `subagents/`、MiMo Code 子会话（`parent_id`）。
+- **同一进程的附属线程**：客户端为自己开的旁路线程（只有流式日志、没有请求和文件夹的会话，如标题生成、审批复核、压缩；或标着 subagent 却缺少父线程的会话）并入同一客户端、同一文件夹最近活跃的主会话，不再单独冒出小气泡。
+- **herdr 窗格**：使用 [herdr](https://github.com/herdrdev/herdr) 管理 agent 时，同一窗格（pane）里的所有会话合并为一个气泡；herdr 报告的“等待确认”（blocked）显示为“等你确认”，没有本地日志的 agent（opencode、Cursor 等）也会按窗格显示。详见下方 [herdr 适配](#herdr-适配)。
 - **手动**：拖动气泡叠到另一个上，目标亮起光环、被拖的气泡被轻轻吸过去，松开即合并（面板上不再显示操作说明）；分组按会话 ID 保存，重启后仍生效。右键大气泡拆开，拆开后也不再自动归组。
 - **重新识别**：合并后先按本地规则命名（有父任务时用父任务的请求，否则选与其他成员最相近的请求），气泡下显示“N 路并行 · 各自分工”。
+
+### herdr 适配
+
+装好 herdr 并运行其服务后无需配置：程序每 2.5 秒执行一次 `herdr agent list`（无窗口子进程，找不到时每分钟重新查找一次 `PATH`）。
+
+- 每个 herdr 窗格对应一个 agent 进程。窗格报告的原生会话 ID（`agent_session`）与本地 Codex 线程、Claude 会话等对应，同窗格的会话归为一个气泡；未安装 herdr 集成插件时，同客户端、同文件夹且唯一的窗格也会对上。建议执行 `herdr integration install codex`、`herdr integration install claude` 等，让 herdr 报告会话 ID。
+- 没有会话 ID 时，agy（Antigravity CLI）等不记录文件夹的客户端：只有一个工作中窗格且只有一个进行中的对话时直接对上，气泡带回该对话的 TPS；herdr 显示工作中的窗格也计入该来源的“在工作”，图标切到 TPS。
+- 窗格状态：working → 工作中，blocked → 等你确认（气泡保持亮起），done → 刚完成；idle 且没有本地日志的窗格不显示。
+- 只调用 herdr 的只读接口，不读写其窗格内容。herdr 未安装或服务未运行时一切照旧，诊断中的 `herdr` 项会显示“未发现 / 服务未运行 / 已接入”。
+- 环境变量：`CODEX_QUOTA_HERDR=0` 关闭；`CODEX_QUOTA_HERDR_EXE` 指定 `herdr.exe` 路径；`CODEX_QUOTA_HERDR_SESSION` 读取指定名称的 herdr 会话。
 
 ### 定时任务
 
@@ -300,6 +312,7 @@ Windows 没有移动通知区域图标的接口，而且删除后重新添加的
 | `CODEX_QUOTA_MIMO_BROWSER` | MiMo 登录窗口使用的 Edge/Chrome 路径 |
 | `CODEX_QUOTA_MIMO_PLATFORM` | MiMo 控制台地址，默认 `https://platform.xiaomimimo.com`（测试用） |
 | `CODEX_QUOTA_SUMMARY_URL` / `_KEY` / `_MODEL` | 可选的 OpenAI 兼容接口，用于把 agent 请求归纳为气泡标题；未设置时只用本地规则 |
+| `CODEX_QUOTA_HERDR` / `_HERDR_EXE` / `_HERDR_SESSION` | herdr 适配：设 `0` 关闭、指定可执行文件、指定 herdr 会话名 |
 | `CODEX_QUOTA_LEGACY_DPI=1` | 关闭悬停线程的 Per-Monitor V2 模式，供旧显示环境排错 |
 
 路径应指向实际安装位置，例如：
@@ -417,6 +430,7 @@ icon_art.py           额度与 TPS 圆盘绘制、字体缓存
 detail_card.py        面板共用的字体、配色、阴影与合成
 hover_details.py      Win32 分层窗口、DPI、悬停、任务面板窗口及文字提示回退
 agent_tasks.py        各 agent 在做什么：请求/动作提取、自动与手动分组、可选模型命名
+herdr_source.py       可选 herdr 适配：按窗格归并会话、补充无本地日志的 agent
 agent_panel.py        任务气泡面板：布局、弹簧动画、拖动合并与拆分、Pillow 渲染
 hover_check.py        任务面板窗口显示自检
 mimo_usage.py         MiMo 控制台读取、登录、Credits 账本与年度节奏
