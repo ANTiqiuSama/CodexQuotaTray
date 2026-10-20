@@ -112,6 +112,50 @@ class NotesTests(unittest.TestCase):
                              [("t1", "整理发布说明", True, "codex", "proj")])
 
 
+class ScheduleTests(unittest.TestCase):
+    def test_definitions_from_claude_tasks_and_codex_automation_table(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            task = home / ".claude/scheduled-tasks/daily-digest/SKILL.md"
+            task.parent.mkdir(parents=True)
+            task.write_text("---\nname: daily-digest\ndescription: 汇总昨日提交\n---\n汇总昨天的提交并写日报", encoding="utf-8")
+            (home / ".codex").mkdir()
+            with sqlite3.connect(home / ".codex/state_5.sqlite") as db:
+                db.execute("CREATE TABLE automations (id TEXT, name TEXT, prompt TEXT, status TEXT, next_run_at INT)")
+                db.execute("INSERT INTO automations VALUES ('a1', '依赖巡检', '检查依赖是否有安全更新', 'ACTIVE', 1900000000)")
+                db.execute("INSERT INTO automations VALUES ('a2', '旧任务', '不再运行', 'PAUSED', 0)")
+                db.execute("CREATE TABLE automation_runs (id TEXT, prompt TEXT)")
+                db.execute("INSERT INTO automation_runs VALUES ('r1', '某次运行')")
+            found = agent_tasks.read_schedules(home / ".codex", home / ".claude")
+        self.assertEqual(sorted((item["title"], item["prompt"]) for item in found),
+                         [("daily-digest", "汇总昨天的提交并写日报"), ("依赖巡检", "检查依赖是否有安全更新")])
+        self.assertEqual(next(item for item in found if item["source"] == "Codex")["next_at"], 1900000000)
+
+    def test_scheduled_runs_are_flagged_and_dropped_once_finished(self):
+        notes = AgentNotes()
+        schedules = [{"key": "Codex:依赖巡检", "title": "依赖巡检", "prompt": "检查依赖是否有安全更新"}]
+        notes.codex("run", {"type": "event_msg", "timestamp": stamp(100), "payload": {"type": "user_message", "message": "检查依赖是否有安全更新"}})
+        notes.codex("cron", {"type": "session_meta", "payload": {"originator": "codex_exec", "source": "automation"}})
+        notes.codex("cron", {"type": "event_msg", "timestamp": stamp(100), "payload": {"type": "user_message", "message": "清理日志"}})
+        notes.codex("me", {"type": "event_msg", "timestamp": stamp(100), "payload": {"type": "user_message", "message": "实现气泡"}})
+        context = {key: {"source": "Codex", "model": "gpt-5"} for key in ("run", "cron", "me")}
+        live = {key: ("codex", 100, "生成中") for key in context}
+        flagged = {a["key"]: a["schedule"] for a in notes.export(live, context, {}, 101, schedules=schedules)}
+        self.assertEqual(flagged, {"run": "Codex:依赖巡检", "cron": "origin:清理日志", "me": ""})
+        finished = notes.export({}, context, {}, 130, schedules=schedules)
+        self.assertEqual([a["key"] for a in finished], ["me"])
+        chips = agent_tasks.schedule_chips(schedules, notes.export(live, context, {}, 101, schedules=schedules), 101)
+        self.assertEqual([(c["title"], c["running"]) for c in chips], [("依赖巡检", True), ("清理日志", True)][:2])
+
+    def test_same_request_in_sessions_far_apart_is_recurring(self):
+        notes = AgentNotes()
+        for key, moment in (("a", 1000), ("b", 1000 + agent_tasks.RECUR_SPREAD + 1), ("c", 1000)):
+            notes.ask(key, "汇总每日数据报表" if key != "c" else "别的事情", moment)
+        notes.ask("burst1", "同时派发的任务", 5000)
+        notes.ask("burst2", "同时派发的任务", 5010)
+        self.assertEqual(list(notes.recurring()), ["汇总每日数据报表"])
+
+
 class GroupTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -321,6 +365,25 @@ class SceneTests(unittest.TestCase):
         self.assertGreater(image.getbbox()[3], round(agent_panel.FIELD_TOP * 1.25))
         scene.set_model(panel(), moment)
         self.settle(scene, moment, 30)
+        self.assertIsNotNone(scene.render(1.0))
+
+    def test_header_figures_count_up_and_follow_new_readings(self):
+        scene = agent_panel.Scene()
+        model = agent_panel.PanelModel("codex", "C", "Codex", "空闲", (("5 小时", 80.0, "1 小时后重置"), ("每周", None, "")),
+                                       30.0, (), "idle")
+        scene.set_model(model, 0.0)
+        self.assertEqual(scene.meters[0].value, 0.0)
+        self.assertTrue(scene.animating)
+        moment = self.settle(scene, frames=120)
+        self.assertAlmostEqual(scene.meters[0].value, 80.0, delta=0.5)
+        self.assertAlmostEqual(scene.rate.value, 30.0, delta=0.5)
+        self.assertEqual(scene.meters[1].target, 0.0)
+        # Values are not part of the cached background; only labels and reset texts are.
+        self.assertNotIn("80.0", repr(model.header))
+        scene.set_model(agent_panel.PanelModel("codex", "C", "Codex", "空闲", (("5 小时", 60.0, ""), ("每周", None, "")),
+                                               30.0, (), "idle"), moment)
+        self.settle(scene, moment, 120)
+        self.assertAlmostEqual(scene.meters[0].value, 60.0, delta=0.5)
         self.assertIsNotNone(scene.render(1.0))
 
 

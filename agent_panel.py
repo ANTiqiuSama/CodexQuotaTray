@@ -3,7 +3,8 @@
 Each bubble is one task: a single agent, or several agents the user has
 dropped onto each other (or that the client itself spawned) shown as one
 larger bubble with orbiting member dots. Drag a bubble onto another to merge,
-right-click a merged bubble to split it again.
+right-click a merged bubble to split it again (no on-screen instructions: the
+halo and the gulp/burst motion explain themselves).
 
 Scene holds the animation state and is pure Python + PIL so it can be tested
 anywhere; hover_details feeds it the pointer and presents its frames.
@@ -19,12 +20,11 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
 from agent_tasks import width as text_units
-from icon_art import accent, ring_color
+from icon_art import RESET_BLUE, accent, ring_color
 
 WIDTH = 360
 PAD = 18
 FIELD_TOP = 118
-HINT = "拖到一起 = 同一任务　右键 = 拆开"
 BASE_RADIUS = 30.0
 GAP = 10.0                  # Clearance between neighbouring bubble boxes.
 LABEL = 20.0                # Caption height under a bubble.
@@ -58,17 +58,60 @@ class BubbleModel:
 
 
 @dataclass(frozen=True)
+class ScheduleChip:
+    key: str
+    title: str
+    running: bool
+    letter: str = ""
+    when: str = ""             # e.g. "上次 14:05" while idle
+
+
+@dataclass(frozen=True)
 class PanelModel:
     provider: str
     letter: str
     title: str
     status: str
-    quota: tuple[tuple[str, float | None], ...]
+    quota: tuple[tuple, ...]                    # (label, remaining %, reset text)
     tps: float | None
     bubbles: tuple[BubbleModel, ...]
+    status_tone: str = "live"                   # live | idle | stale | error
+    banner: str = ""
+    schedules: tuple[ScheduleChip, ...] = ()
+
+    @property
+    def header(self) -> tuple:
+        """Static part of the panel (cached background). Quota figures, bars and
+        TPS are animated per frame, so only their labels and reset texts are here."""
+        return (self.letter, self.title, self.status, self.status_tone,
+                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:2]), self.banner,
+                tuple((chip.key, chip.title, chip.running, chip.letter, chip.when) for chip in self.schedules),
+                not self.bubbles)
 
 
-def pack(bubbles) -> tuple[dict[str, tuple[float, float]], float]:
+CHIP_ROW = 34
+METER_TOP = PAD + 32        # Top of the quota / TPS row.
+
+
+def meter_columns(count: int) -> list[tuple[float, float]]:
+    """(left, bar end) of each header column; the last column is TPS."""
+    column = (WIDTH - 2 * PAD) / (count + 1)
+    return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in range(count + 1)]
+
+
+def chip_height(model) -> float:
+    rows = chip_rows(model) if model.schedules else 0
+    return CHIP_ROW + 26 * (rows - 1) if rows else 0.0
+
+
+def field_top(model: PanelModel | None) -> float:
+    if model is None:
+        return FIELD_TOP
+    top = FIELD_TOP + (14 if any(len(item) > 2 and item[2] for item in model.quota) else 0)
+    return top + (26 if model.banner else 0)
+
+
+def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
     """Centred shelf layout: home position per bubble and the field height."""
     room = WIDTH - 2 * PAD
     rows: list[list] = [[]]
@@ -77,7 +120,7 @@ def pack(bubbles) -> tuple[dict[str, tuple[float, float]], float]:
         if rows[-1] and used + 2 * bubble.half_width > room:
             rows.append([])
         rows[-1].append(bubble)
-    homes, y = {}, FIELD_TOP + GAP / 2
+    homes, y = {}, top + GAP / 2
     for row in rows:
         if not row:
             continue
@@ -87,7 +130,7 @@ def pack(bubbles) -> tuple[dict[str, tuple[float, float]], float]:
             homes[bubble.key] = (x + bubble.half_width, y + height / 2 - LABEL / 2)
             x += 2 * bubble.half_width
         y += height
-    return homes, float(max(96.0, y - FIELD_TOP + GAP / 2))
+    return homes, float(max(96.0, y - top + GAP / 2))
 
 
 def field_height(bubbles) -> float:
@@ -95,8 +138,7 @@ def field_height(bubbles) -> float:
 
 
 def panel_height(model: PanelModel, field: float) -> float:
-    hint = 22 if len(model.bubbles) > 1 or any(b.members for b in model.bubbles) else 0
-    return FIELD_TOP + field + hint + 12
+    return field_top(model) + field + chip_height(model) + 12
 
 
 # ----- motion helpers ------------------------------------------------------------
@@ -148,7 +190,8 @@ class Body:
 
     @property
     def size(self) -> float:
-        return self.radius.value * max(0.0, self.scale.value) * (1 + 0.05 * self.hover.value + 0.1 * self.glow.value)
+        lift = 0.07 * (1 - self.still.value)        # picked up: slightly larger, closer to the viewer
+        return self.radius.value * max(0.0, self.scale.value) * (1 + 0.05 * self.hover.value + 0.1 * self.glow.value + lift)
 
 
 @dataclass
@@ -192,15 +235,19 @@ class Scene:
         self.left = self.right = False
         self.origins: dict[str, tuple[float, float, float]] = {}
         self.homes: dict[str, tuple[float, float]] = {}
+        self.meters: list[Spring] = []          # quota bars count up from zero when the panel opens
+        self.rate = Spring(0.0, 120.0, 22.0)    # TPS figure eases between readings
+        self.opened = 0.0
 
     # ----- geometry --------------------------------------------------------
     @property
     def bounds(self) -> tuple[float, float, float, float]:
-        return PAD, FIELD_TOP, WIDTH - PAD, FIELD_TOP + self.field.value
+        top = field_top(self.model)
+        return PAD, top, WIDTH - PAD, top + self.field.value
 
     @property
     def height(self) -> float:
-        return panel_height(self.model, self.field.value) if self.model else FIELD_TOP + self.field.value
+        return panel_height(self.model, self.field.value) if self.model else field_top(None) + self.field.value
 
     def _free_spot(self, radius: float) -> tuple[float, float]:
         x0, y0, x1, y1 = self.bounds
@@ -229,8 +276,16 @@ class Scene:
     def set_model(self, model: PanelModel, now: float):
         first = self.model is None
         self.model = model
+        if first:
+            self.opened = now
+        values = [item[1] for item in model.quota[:2]]
+        if len(self.meters) != len(values):
+            self.meters = [Spring(0.0, 90.0, 19.0) for _ in values]
+        for spring, value in zip(self.meters, values):
+            spring.target = 0.0 if value is None else float(value)
+        self.rate.target = float(model.tps or 0.0)
         bubbles = model.bubbles[:MAX_BUBBLES]
-        self.homes, self.field.target = pack(bubbles)
+        self.homes, self.field.target = pack(bubbles, field_top(model))
         if first:
             self.field.value = self.field.target
         keys = {bubble.key for bubble in bubbles}
@@ -258,6 +313,11 @@ class Scene:
                     body = Body(bubble, x, y, now + (index * 0.05 if first else 0.0))
                 body.radius.value = body.radius.target = bubble.radius
                 self.bodies[bubble.key] = body
+            if body.model.live != bubble.live and not first:
+                if bubble.live:     # picked work up again: a ring announces it
+                    self.ripples.append(Ripple(body.x, body.y, body.size, now, bubble.letter, 0.7, bubble.key))
+                else:               # just finished: a small settling dip
+                    body.scale.velocity -= 1.6
             body.model = bubble
             body.radius.target = bubble.radius
             body.scale.target = 1.0
@@ -313,6 +373,10 @@ class Scene:
                 distance = math.hypot(other.x - body.x, other.y - body.y)
                 if distance < other.size * 0.95 + body.size * 0.4 and distance < best:
                     self.target, best = key, distance
+            if self.target:         # gentle magnet toward the bubble it would join
+                other = self.bodies[self.target]
+                body.x += (other.x - body.x) * min(1.0, dt * 6) * 0.35
+                body.y += (other.y - body.y) * min(1.0, dt * 6) * 0.35
         if not left and self.left:
             if self.dragging and self.target:
                 events.append(("merge", self.dragging, self.target))
@@ -323,6 +387,10 @@ class Scene:
         self.hovered = None if self.dragging else under
 
         self.field.step(dt)
+        if now - self.opened > 0.08:            # let the window fade in before the bars run
+            for spring in self.meters:
+                spring.step(dt)
+        self.rate.step(dt)
         x0, y0, x1, y1 = self.bounds
         bodies = list(self.bodies.items())
         for key, body in bodies:
@@ -373,7 +441,8 @@ class Scene:
 
     @property
     def animating(self) -> bool:
-        return bool(self.dragging or self.ghosts or self.ripples or not self.field.settled or any(
+        return bool(self.dragging or self.ghosts or self.ripples or not self.field.settled or not self.rate.settled
+                    or any(not spring.settled for spring in self.meters) or any(
             not (b.scale.settled and b.radius.settled and b.hover.settled and b.glow.settled) for b in self.bodies.values()))
 
     def float_offset(self, body: Body) -> tuple[float, float]:
@@ -385,13 +454,17 @@ class Scene:
     def render(self, scale: float) -> Image.Image:
         model = self.model
         field_h = round(self.field.value / 2) * 2
-        frame = background(model.letter, model.title, model.status, model.quota, model.tps,
-                           len(model.bubbles) > 1 or any(b.members for b in model.bubbles), field_h, scale,
-                           not model.bubbles).copy()
+        frame = background(model.header, field_h, scale).copy()
         origin = round(MARGIN * scale)
 
         def at(value):
             return origin + value * scale
+
+        self._header(frame, model, field_h, scale, at)
+        for chip, (x0, y0, x1, y1) in chip_layout(model, field_h):
+            if chip is not None and chip.running:      # a breathing dot marks the run in progress
+                level = 0.55 + 0.45 * math.sin(self.time * 3.2)
+                blit(frame, faded(dot(round(3.2 * scale), chip.letter or model.letter), level), at(x1 - 9), at((y0 + y1) / 2))
 
         for ripple in self.ripples:
             p = (self.time_since(ripple.start)) / ripple.duration
@@ -425,9 +498,8 @@ class Scene:
                                   0.5 * (1 - p) ** 2 * (1 if m.focus else 0.5)), x, y)
             if body.glow.value > 0.02:
                 blit(frame, faded(halo(round((r + 4) * scale), m.letter), min(1.0, body.glow.value)), x, y)
-            note = "松开合并为同一任务" if key == self.target else ""
             self._bubble(frame, m, x, y, r, scale, min(1.0, max(0.0, body.scale.value)), label=key != self.dragging,
-                         expanded=body.hover.value > 0.5, note=note)
+                         expanded=body.hover.value > 0.5)
             if m.members:
                 count = min(6, len(m.members))
                 for index, (letter, live) in enumerate(m.members[:count]):
@@ -440,10 +512,45 @@ class Scene:
                 blit(frame, spinner.rotate(-self.time * 300 % 360, resample=Image.BICUBIC), x, y)
         return frame
 
+    def _header(self, frame, model, field_h, scale, at):
+        """Animated header: counting quota figures and bars, easing TPS, a sonar
+        ping on the title dot while agents work, drifting shells when idle."""
+        draw = ImageDraw.Draw(frame)
+        columns = meter_columns(len(self.meters))
+        for (x, end), spring, item in zip(columns, self.meters, model.quota[:2]):
+            value = item[1]
+            shade = TEXT if value is None or value >= 50 else ring_color(value, model.letter)
+            shown = None if value is None else spring.value
+            blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
+                                  shade, shade, scale), at(x), at(METER_TOP + 38))
+            if shown and shown > 0.3:
+                fill = ring_color(value, model.letter)
+                draw.rounded_rectangle((round(at(x)), round(at(METER_TOP + 45)),
+                                        round(at(x + max(4.0, (end - x) * min(100.0, shown) / 100))), round(at(METER_TOP + 49))),
+                                       radius=max(1, round(2 * scale)), fill=fill)
+        x = columns[-1][0]
+        color = accent(model.letter)
+        if model.tps is None:
+            blit_at(frame, figure("—", "", TEXT, TEXT, scale), at(x), at(METER_TOP + 38))
+        else:
+            blit_at(frame, figure(f"{max(0.0, self.rate.value):.0f}", "tok/s", color, SECONDARY_TEXT, scale), at(x), at(METER_TOP + 38))
+        if model.status_tone == "live":
+            p = (self.time % 1.8) / 1.8
+            blit(frame, faded(ring(round((4 + 7 * ease_out_cubic(p)) * scale), max(1, round(1.2 * scale)), model.letter),
+                              0.8 * (1 - p) ** 1.6), at(PAD + 4), at(PAD + 9))
+        if not model.bubbles:
+            top = field_top(model)
+            for index, (dx, dy, radius) in enumerate(((-96, -6, 16), (92, 4, 12), (-58, 18, 8), (64, -20, 7))):
+                t = self.time * (0.35 + 0.07 * index) + index * 1.9
+                cx = WIDTH / 2 + dx + 5 * math.sin(t)
+                cy = top + field_h / 2 + dy + 4 * math.cos(t * 1.3)
+                blit(frame, faded(ring(round(radius * scale), max(1, round(scale)), model.letter), 0.11 + 0.05 * math.sin(t * 2)),
+                     at(cx), at(cy))
+
     def time_since(self, moment: float) -> float:
         return max(0.0, (self.last or moment) - moment)
 
-    def _bubble(self, frame, m: BubbleModel, x, y, r, scale, alpha, label=True, expanded=False, note=""):
+    def _bubble(self, frame, m: BubbleModel, x, y, r, scale, alpha, label=True, expanded=False):
         base = bubble(m.title, m.letter, m.live, m.focus, round(m.radius * scale), scale)
         factor = r / m.radius
         if abs(factor - 1) > 0.01:
@@ -451,8 +558,8 @@ class Scene:
             base = base.resize((size, size), Image.BILINEAR)
         blit(frame, faded(base, alpha), x, y)
         if label and alpha > 0.3:
-            text = note or (m.detail if expanded and m.detail and m.detail != m.title else m.doing)
-            tag = caption(text, m.letter if m.live or note else "", round(r * 2 + 40), expanded or bool(note), scale)
+            text = m.detail if expanded and m.detail and m.detail != m.title else m.doing
+            tag = caption(text, m.letter if m.live else "", round(r * 2 + 40), expanded, scale)
             blit(frame, faded(tag, alpha * (1 if m.focus or expanded else 0.75)), x, y + (r + 4) * scale + tag.height / 2)
 
 
@@ -466,6 +573,28 @@ def blit(frame: Image.Image, sprite: Image.Image, cx: float, cy: float):
         return
     piece = sprite if crop == (0, 0, sprite.width, sprite.height) else sprite.crop(crop)
     frame.alpha_composite(piece, (left + crop[0], top + crop[1]))
+
+
+def blit_at(frame: Image.Image, sprite: tuple[Image.Image, int], left: float, baseline: float):
+    """Composite a (sprite, baseline offset) pair with its left baseline at the point."""
+    image, offset = sprite
+    frame.alpha_composite(image, (max(0, round(left)), max(0, round(baseline) - offset)))
+
+
+@lru_cache(maxsize=512)
+def figure(number: str, unit: str, shade, unit_shade, scale: float) -> tuple[Image.Image, int]:
+    """Big header figure with its unit, e.g. "72 %" or "85 tok/s"."""
+    px = lambda value: round(value * scale)  # noqa: E731
+    value_font, unit_font = figure_font(px(21)), ui_font(px(11), "bold")
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    width = probe.textlength(number, font=value_font) + (px(3) + probe.textlength(unit, font=unit_font) if unit else 0)
+    baseline = px(24)
+    image = Image.new("RGBA", (round(width) + px(4), px(30)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.text((0, baseline), number, font=value_font, fill=shade, anchor="ls")
+    if unit:
+        draw.text((probe.textlength(number, font=value_font) + px(3), baseline - px(1)), unit, font=unit_font, fill=unit_shade, anchor="ls")
+    return image, baseline
 
 
 @lru_cache(maxsize=64)
@@ -610,10 +739,53 @@ def arc(radius: int, letter: str) -> Image.Image:
     return image.resize((big // SUPERSAMPLE, big // SUPERSAMPLE), Image.LANCZOS)
 
 
+def chip_layout(model: PanelModel, field_h: float, scale: float = 1.0) -> list[tuple[ScheduleChip | None, tuple]]:
+    """Scheduled task chips in up to two rows under the field; None marks "+N"."""
+    placed: list = []
+    if not model.schedules:
+        return placed
+    start, limit = PAD + text_units("定时任务") * 10.5 + 8, WIDTH - PAD
+    x, y, row = start, field_top(model) + field_h + 12, 0
+    for index, chip in enumerate(model.schedules):
+        width = text_units(chip_text(chip)) * 10.5 + 26 + (10 if chip.running else 0)
+        rest = len(model.schedules) - index - 1
+        if x + width > limit - (34 if rest and row == 1 else 0) and x > start:
+            if row == 1:
+                placed.append((None, (x, y, x + 30, y + 20)))
+                break
+            x, y, row = start, y + 26, 1
+        placed.append((chip, (x, y, min(limit, x + width), y + 20)))
+        x += width + 6
+    return placed
+
+
+def chip_rows(model: PanelModel) -> int:
+    rows = {round(box[1]) for _, box in chip_layout(model, 0)}
+    return len(rows)
+
+
+def chip_text(chip: ScheduleChip) -> str:
+    from agent_tasks import shorten
+    return shorten(chip.title, 9) + " · " + ("运行中" if chip.running else chip.when or "待运行")
+
+
+def _clock(draw, cx, cy, r, color, stroke):
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=stroke)
+    draw.line((cx, cy, cx, cy - r * 0.55), fill=color, width=stroke)
+    draw.line((cx, cy, cx + r * 0.45, cy), fill=color, width=stroke)
+
+
+PILL_TONES = {"stale": ((229, 168, 75, 46), (229, 168, 75, 255)), "error": ((226, 92, 92, 46), (226, 92, 92, 255)),
+              "idle": ((240, 238, 230, 20), SECONDARY_TEXT)}
+
+
 @lru_cache(maxsize=24)
-def background(letter: str, title: str, status: str, quota: tuple, tps: float | None, hint: bool, field_h: int, scale: float,
-               empty: bool = False) -> Image.Image:
-    height = FIELD_TOP + field_h + (22 if hint else 0) + 12
+def background(header: tuple, field_h: int, scale: float) -> Image.Image:
+    letter, title, status, tone, meters, banner, chips, empty = header
+    model = PanelModel("", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (), tone, banner,
+                       tuple(ScheduleChip(*chip) for chip in chips))
+    top = field_top(model)
+    height = top + field_h + chip_height(model) + 12
     s = scale
     px = lambda value: round(value * s)  # noqa: E731
     content = Image.new("RGBA", (px(WIDTH), px(height)), (0, 0, 0, 0))
@@ -625,33 +797,42 @@ def background(letter: str, title: str, status: str, quota: tuple, tps: float | 
     draw.text((px(PAD + 16), px(y + 9)), title, font=ui_font(px(14), "bold"), fill=TEXT, anchor="lm")
     pill = ui_font(px(11))
     width = draw.textlength(status, font=pill) / s + 18
-    draw.rounded_rectangle((px(right - width), px(y), px(right), px(y + 18)), radius=px(9), fill=color)
-    draw.text((px(right - width / 2), px(y + 9)), status, font=pill, fill=(31, 30, 28, 255), anchor="mm")
+    fill, ink = PILL_TONES.get(tone, (color, (31, 30, 28, 255)))
+    draw.rounded_rectangle((px(right - width), px(y), px(right), px(y + 18)), radius=px(9), fill=fill)
+    draw.text((px(right - width / 2), px(y + 9)), status, font=pill, fill=ink, anchor="mm")
 
-    y += 32
-    columns = list(quota[:2]) + [("TPS", None)]
-    column = (WIDTH - 2 * PAD) / len(columns)
-    label_font, value_font, unit_font = ui_font(px(11)), figure_font(px(21)), ui_font(px(11), "bold")
-    for index, (label, value) in enumerate(columns):
-        x = PAD + index * column
+    y = METER_TOP
+    label_font, small = ui_font(px(11)), ui_font(px(10))
+    columns = meter_columns(len(meters))
+    for (x, end), (label, reset) in zip(columns, tuple(meters) + (("TPS", ""),)):
         draw.text((px(x), px(y)), label, font=label_font, fill=MUTED_TEXT, anchor="lt")
-        if label == "TPS":
-            figure, unit, tone = ("—", "", TEXT) if tps is None else (f"{tps:.0f}", "tok/s", color)
-        else:
-            figure, unit, tone = ("—", "", TEXT) if value is None else (f"{value:.0f}", "%", TEXT if value >= 50 else ring_color(value, letter))
-        draw.text((px(x), px(y + 38)), figure, font=value_font, fill=tone, anchor="ls")
-        if unit:
-            draw.text((px(x) + draw.textlength(figure, font=value_font) + px(3), px(y + 37)), unit, font=unit_font, fill=SECONDARY_TEXT if label == "TPS" else tone, anchor="ls")
         if label != "TPS":
-            end = x + column - 16
             draw.rounded_rectangle((px(x), px(y + 45), px(end), px(y + 49)), radius=px(2), fill=TRACK)
-            if value:
-                draw.rounded_rectangle((px(x), px(y + 45), px(x + max(4, (end - x) * min(100.0, value) / 100)), px(y + 49)),
-                                       radius=px(2), fill=ring_color(value, letter))
-    draw.rounded_rectangle((px(PAD - 6), px(FIELD_TOP - 6), px(right + 6), px(FIELD_TOP + field_h + 4)), radius=px(12),
+            if reset:
+                draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
+    if banner:
+        y_banner = top - 32
+        draw.rounded_rectangle((px(PAD - 6), px(y_banner), px(right + 6), px(y_banner + 20)), radius=px(7),
+                               fill=_with_alpha(RESET_BLUE, 38), outline=_with_alpha(RESET_BLUE, 110), width=max(1, round(s)))
+        draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=ui_font(px(11), "bold"), fill=RESET_BLUE, anchor="lm")
+    draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     if empty:
-        draw.text((px(WIDTH / 2), px(FIELD_TOP + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
-    if hint:
-        draw.text((px(WIDTH / 2), px(FIELD_TOP + field_h + 16)), HINT, font=ui_font(px(10)), fill=_with_alpha(MUTED_TEXT, 190), anchor="mm")
+        draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
+    placed = chip_layout(model, field_h)
+    if placed:
+        row = placed[0][1]
+        draw.text((px(PAD), px((row[1] + row[3]) / 2)), "定时任务", font=small, fill=MUTED_TEXT, anchor="lm")
+        face = ui_font(px(10.5))
+        for chip, (x0, y0, x1, y1) in placed:
+            middle = (y0 + y1) / 2
+            tint = accent(chip.letter or letter) if chip is not None and chip.running else (240, 238, 230, 255)
+            draw.rounded_rectangle((px(x0), px(y0), px(x1), px(y1)), radius=px(10),
+                                   fill=_with_alpha(tint, 34 if chip is not None and chip.running else 14),
+                                   outline=_with_alpha(tint, 120 if chip is not None and chip.running else 30), width=max(1, round(s)))
+            if chip is None:
+                draw.text((px((x0 + x1) / 2), px(middle)), f"+{len(chips) - len(placed) + 1}", font=face, fill=SECONDARY_TEXT, anchor="mm")
+                continue
+            _clock(draw, px(x0 + 11), px(middle), px(4.2), _with_alpha(tint, 230), max(1, round(s)))
+            draw.text((px(x0 + 19), px(middle)), chip_text(chip), font=face, fill=TEXT if chip.running else SECONDARY_TEXT, anchor="lm")
     return _compose(content, scale)

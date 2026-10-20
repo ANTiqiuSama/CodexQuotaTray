@@ -1,4 +1,5 @@
-"""Non-activating, topmost tracking tooltip for the AI tray icons."""
+"""Hover UI for the AI tray icons: the agent panel, with the native tooltip
+as a fallback when the layered panel cannot be created."""
 from __future__ import annotations
 
 import ctypes
@@ -10,7 +11,7 @@ import time
 import pystray
 from pystray._util import win32
 
-from detail_card import MARGIN, render_card, text_card
+from detail_card import MARGIN
 import agent_panel
 
 
@@ -321,109 +322,44 @@ class TrackingTooltip:
                 setattr(self, name, None)
 
 
-class DetailCardWindow:
-    """Layered, click-through, never-activated card rendered by detail_card.
+def work_area(anchor):
+    """(monitor, work rectangle) of the monitor holding the tray icon."""
+    native_anchor = wintypes.RECT(*anchor)
+    monitor = user.MonitorFromRect(ctypes.byref(native_anchor), 2)
+    info = MonitorInfo(cbSize=ctypes.sizeof(MonitorInfo))
+    if not user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    work = info.rcWork
+    return monitor, (work.left, work.top, work.right, work.bottom)
 
-    Mirrors TrackingTooltip's guarantees: a steady card with unchanged content
-    performs no window calls at all; SWP_SHOWWINDOW is only reasserted after
-    real occlusion, so fullscreen apps and refreshes cannot make it flicker.
-    """
 
-    FADE_STEPS = (64, 128, 192, 255)
-
-    def __init__(self):
-        self.hwnd = user.CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
-            "STATIC", "AI 数据详情", 0x80000000, 0, 0, 0, 0, None, None, None, None)
-        if not self.hwnd:
+def present(hwnd, image, x, y, alpha=255):
+    """Hand a straight-alpha PIL image to a layered window (premultiplied BGRA)."""
+    width, height = image.size
+    data = image.convert("RGBa").tobytes("raw", "BGRa")
+    header = BitmapInfoHeader(biSize=ctypes.sizeof(BitmapInfoHeader), biWidth=width,
+        biHeight=-height, biPlanes=1, biBitCount=32, biCompression=0)
+    screen = user.GetDC(None)
+    memory = gdi.CreateCompatibleDC(screen)
+    bits = ctypes.c_void_p()
+    bitmap = gdi.CreateDIBSection(screen, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
+    try:
+        if not bitmap or not bits:
             raise ctypes.WinError(ctypes.get_last_error())
-        self.visible = False
-        self.content = None
-        self.scale = None
-        self.image = None
-        self.position = None
-
-    def _work_area(self, anchor):
-        native_anchor = wintypes.RECT(*anchor)
-        monitor = user.MonitorFromRect(ctypes.byref(native_anchor), 2)
-        info = MonitorInfo(cbSize=ctypes.sizeof(MonitorInfo))
-        if not user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        ctypes.memmove(bits, data, len(data))
+        previous = gdi.SelectObject(memory, bitmap)
+        blend = BlendFunction(0, 0, alpha, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
+        ok = user.UpdateLayeredWindow(hwnd, screen, ctypes.byref(wintypes.POINT(x, y)),
+            ctypes.byref(wintypes.SIZE(width, height)), memory, ctypes.byref(wintypes.POINT(0, 0)),
+            0, ctypes.byref(blend), ULW_ALPHA)
+        gdi.SelectObject(memory, previous)
+        if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
-        work = info.rcWork
-        return monitor, (work.left, work.top, work.right, work.bottom)
-
-    def _present(self, image, x, y, alpha=255):
-        width, height = image.size
-        data = image.convert("RGBa").tobytes("raw", "BGRa")  # premultiplied BGRA
-        header = BitmapInfoHeader(biSize=ctypes.sizeof(BitmapInfoHeader), biWidth=width,
-            biHeight=-height, biPlanes=1, biBitCount=32, biCompression=0)
-        screen = user.GetDC(None)
-        memory = gdi.CreateCompatibleDC(screen)
-        bits = ctypes.c_void_p()
-        bitmap = gdi.CreateDIBSection(screen, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
-        try:
-            if not bitmap or not bits:
-                raise ctypes.WinError(ctypes.get_last_error())
-            ctypes.memmove(bits, data, len(data))
-            previous = gdi.SelectObject(memory, bitmap)
-            blend = BlendFunction(0, 0, alpha, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
-            ok = user.UpdateLayeredWindow(self.hwnd, screen, ctypes.byref(wintypes.POINT(x, y)),
-                ctypes.byref(wintypes.SIZE(width, height)), memory, ctypes.byref(wintypes.POINT(0, 0)),
-                0, ctypes.byref(blend), ULW_ALPHA)
-            gdi.SelectObject(memory, previous)
-            if not ok:
-                raise ctypes.WinError(ctypes.get_last_error())
-        finally:
-            if bitmap:
-                gdi.DeleteObject(bitmap)
-            gdi.DeleteDC(memory)
-            user.ReleaseDC(None, screen)
-
-    def _fade(self, alpha):
-        blend = BlendFunction(0, 0, alpha, 1)
-        user.UpdateLayeredWindow(self.hwnd, None, None, None, None, None, 0, ctypes.byref(blend), ULW_ALPHA)
-
-    def show(self, content, anchor):
-        first_show = not self.visible
-        monitor, work = self._work_area(anchor)
-        scale = monitor_scale(monitor)
-        changed = content != self.content or scale != self.scale or self.image is None
-        if changed:
-            model = text_card(content) if isinstance(content, str) else content
-            self.image = render_card(model, scale)
-            self.content, self.scale = content, scale
-        margin = round(MARGIN * scale)
-        size = self.image.size
-        x, y = tooltip_position(anchor, size, work, gap=round(6 * scale) - margin)
-        moved = (x, y) != self.position
-        if changed or moved:
-            self._present(self.image, x, y, 0 if first_show else 255)
-            self.position = (x, y)
-        elif first_show:
-            self._fade(0)  # Re-shown with identical pixels: start transparent.
-        rect = wintypes.RECT(x, y, x + size[0], y + size[1])
-        covered = is_window_covered(self.hwnd, rect)
-        if first_show or covered or not user.IsWindowVisible(self.hwnd):
-            if not user.SetWindowPos(self.hwnd, wintypes.HWND(-1), x, y, 0, 0,
-                    0x0001 | SWP_NOACTIVATE | 0x0040):
-                raise ctypes.WinError(ctypes.get_last_error())
-        if first_show:
-            for alpha in self.FADE_STEPS:  # ~70 ms ease-in, still non-activating
-                self._fade(alpha)
-                time.sleep(0.018)
-        self.visible = True
-
-    def hide(self):
-        if self.visible:
-            user.ShowWindow(self.hwnd, SW_HIDE)
-            self.visible = False
-
-    pump = staticmethod(TrackingTooltip.pump)
-
-    def close(self):
-        if self.hwnd:
-            user.DestroyWindow(self.hwnd)
-            self.hwnd = None
+    finally:
+        if bitmap:
+            gdi.DeleteObject(bitmap)
+        gdi.DeleteDC(memory)
+        user.ReleaseDC(None, screen)
 
 
 class AgentPanelWindow:
@@ -454,7 +390,7 @@ class AgentPanelWindow:
         return self.provider is not None
 
     def open(self, provider, model, anchor, now):
-        monitor, self.work = DetailCardWindow._work_area(self, anchor)
+        monitor, self.work = work_area(anchor)
         self.scale = monitor_scale(monitor)
         if self.provider is None or self.closing_at is not None:
             self.scene = agent_panel.Scene()
@@ -497,7 +433,7 @@ class AgentPanelWindow:
             progress = agent_panel.ease_out_cubic((now - self.opened_at) / self.OPEN_SECONDS)
             alpha, lift = progress, 10 * (1 - progress)
         y += round(lift * self.scale)
-        DetailCardWindow._present(self, image, x, y, round(255 * alpha))
+        present(self.hwnd, image, x, y, round(255 * alpha))
         self.rect = (x, y, x + image.width, y + image.height)
         if not self.shown or now - self.checked_at > 0.5:
             # Z-order walk is cheap but not free; twice a second is plenty.
@@ -518,18 +454,10 @@ class AgentPanelWindow:
             self.hwnd = None
 
 
-def create_popup():
-    """Prefer the rendered card; fall back to the native tooltip."""
-    try:
-        return DetailCardWindow()
-    except Exception:
-        logging.getLogger(__name__).exception("detail card unavailable, using tooltip")
-        return TrackingTooltip()
-
-
 class HoverDetails:
-    """Hover a tray icon for its card; when agents are working, the bubble
-    panel replaces the card and stays while the pointer is on it."""
+    """Hover a tray icon for its agent panel; it stays while the pointer is on
+    it. Without a panel (no `agents`, or a GDI failure) the native tooltip
+    shows `text_for(provider)`."""
 
     PANEL_GRACE = 0.45          # Time to travel from the icon to the panel.
     PANEL_REFRESH = 0.5
@@ -567,8 +495,10 @@ class HoverDetails:
         """One frame of the open panel: hand input to the scene, act on drops."""
         if provider and provider != panel.provider and not panel.scene.dragging:
             model = self.agents.panel(provider)
-            if model is not None:
-                panel.open(provider, model, anchor, now)
+            if model is None:           # e.g. Claude without a subscription: tooltip only
+                panel.close(now)
+                return
+            panel.open(provider, model, anchor, now)
         over = panel.contains(point) or provider == panel.provider
         if over or panel.scene.dragging:
             self.panel_seen = now
@@ -576,9 +506,11 @@ class HoverDetails:
             panel.close(now)
         if (now - self.panel_built >= self.PANEL_REFRESH and panel.closing_at is None
                 and not panel.scene.press and not panel.scene.dragging):
-            model = self.agents.panel(panel.provider, keep=True)
-            if model is not None:
-                panel.refresh(model, now)
+            model = self.agents.panel(panel.provider)
+            if model is None:
+                panel.close(now)
+                return
+            panel.refresh(model, now)
             self.panel_built = now
         for event in panel.frame(point, left, right, now):
             if event[0] == "merge":
@@ -589,65 +521,66 @@ class HoverDetails:
                 members = self.agents.split(event[1])
                 if members:
                     panel.scene.burst(event[1], members, now)
-            model = self.agents.panel(panel.provider, keep=True)
+            model = self.agents.panel(panel.provider)
             if model is not None:
                 panel.refresh(model, now)
 
     def run(self):
-        popup = panel = None
+        tooltip = panel = None
         try:
             enable_thread_dpi_awareness()
-            popup = create_popup()
             if self.agents is not None:
                 try:
                     panel = AgentPanelWindow()
                 except Exception:
-                    logging.getLogger(__name__).exception("agent panel unavailable")
+                    logging.getLogger(__name__).exception("agent panel unavailable, using tooltip")
+            if panel is None:
+                tooltip = TrackingTooltip()
             while not self.stop_event.wait(0.016 if panel and panel.active else 0.1):
-                popup.pump()
+                TrackingTooltip.pump()
                 point = wintypes.POINT()
                 provider, anchor = None, None
                 have_point = user.GetCursorPos(ctypes.byref(point))
                 left, right = (bool(user.GetAsyncKeyState(key) & 0x8000) for key in (1, 2))
                 if have_point and notification_area_at(point) and not (left or right):
                     provider, anchor = self.target_at(point)
-                if panel and panel.active:
-                    for key, icon in self.icons.items():
-                        icon.details_visible = key == panel.provider
+                now = time.monotonic()
+                if panel is not None:
                     try:
-                        self.drive_panel(panel, point, provider, anchor, left, right, time.monotonic())
+                        if panel.active:
+                            self.drive_panel(panel, point, provider, anchor, left, right, now)
+                        else:
+                            if provider != self.candidate:
+                                self.candidate, self.entered_at = provider, now
+                            shell_dwell = provider and getattr(self.icons[provider], "_version4", False)
+                            model = (self.agents.panel(provider)
+                                     if provider and now - self.entered_at >= (0 if shell_dwell else 0.4) else None)
+                            if model is not None:
+                                panel.open(provider, model, anchor, now)
+                                self.panel_seen = self.panel_built = now
+                            elif provider and now - self.entered_at >= (0 if shell_dwell else 0.4):
+                                # Sources without a quota panel keep the native tooltip.
+                                tooltip = tooltip or TrackingTooltip()
+                                tooltip.show(self.text_for(provider), anchor)
+                        if tooltip and (panel.active or provider is None):
+                            tooltip.hide()
+                        shown = panel.provider if panel.active else (provider if tooltip and tooltip.visible else None)
                     except Exception:
-                        logging.getLogger(__name__).exception("agent panel failed")
+                        # A rendering/GDI failure downgrades to the native tooltip
+                        # instead of losing hover details for the whole session.
+                        logging.getLogger(__name__).exception("agent panel failed, using tooltip")
                         panel.hide()
                         panel.destroy()
-                        panel = None
-                    self.candidate = provider
-                    continue
+                        panel, tooltip = None, TrackingTooltip()
+                        shown = None
+                    if panel is not None:
+                        for key, icon in self.icons.items():
+                            icon.details_visible = key == shown
+                        continue
                 for key, icon in self.icons.items():
                     icon.details_visible = key == provider
                 shell_dwell = provider and getattr(self.icons[provider], "_version4", False)
-                now = time.monotonic()
-                if panel and provider:
-                    if provider != self.candidate:
-                        popup.hide()
-                        self.candidate, self.entered_at = provider, now
-                    if now - self.entered_at >= (0 if shell_dwell else 0.4):
-                        model = self.agents.panel(provider)
-                        if model is not None:
-                            popup.hide()
-                            panel.open(provider, model, anchor, now)
-                            self.panel_seen = self.panel_built = now
-                            continue
-                try:
-                    self.update(popup, provider, anchor, now, dwell=0 if shell_dwell else 0.4)
-                except Exception:
-                    if not isinstance(popup, DetailCardWindow):
-                        raise
-                    # A rendering/GDI failure downgrades to the native tooltip
-                    # instead of losing hover details for the whole session.
-                    logging.getLogger(__name__).exception("detail card failed, using tooltip")
-                    popup.close()
-                    popup = TrackingTooltip()
+                self.update(tooltip, provider, anchor, now, dwell=0 if shell_dwell else 0.4)
         except Exception:
             logging.getLogger(__name__).exception("AI hover details stopped")
             # Restore the Shell tooltip if the independent popup cannot run.
@@ -656,7 +589,7 @@ class HoverDetails:
         finally:
             for icon in self.icons.values():
                 icon.details_visible = False
-            if popup:
-                popup.close()
+            if tooltip:
+                tooltip.close()
             if panel:
                 panel.destroy()
