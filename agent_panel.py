@@ -917,9 +917,10 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
         draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
     reset_y = top + field_h + 10
     gap = 8
-    column_w = (WIDTH - 2 * PAD - 2 * gap) / 3
+    column_left = PAD - 6   # Same outer edges as the bubble field above.
+    column_w = (WIDTH - 2 * column_left - 2 * gap) / 3
     for index in range(3):
-        x = PAD + index * (column_w + gap)
+        x = column_left + index * (column_w + gap)
         y = reset_y
         draw.rounded_rectangle((px(x), px(y), px(x + column_w), px(y + 42)), radius=px(8),
                                fill=(240, 238, 230, 8), outline=(240, 238, 230, 18), width=max(1, round(s)))
