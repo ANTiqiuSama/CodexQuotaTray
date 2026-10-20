@@ -1,6 +1,9 @@
 import threading
 from types import SimpleNamespace
+import time
 import unittest
+
+import agent_panel
 from unittest.mock import Mock, call, patch
 
 import pystray
@@ -403,7 +406,7 @@ class AgentPanelTests(unittest.TestCase):
     def tearDown(self):
         self.folder.cleanup()
 
-    def test_panel_for_every_provider_with_focus_first_and_schedules_apart(self):
+    def test_panel_for_every_provider_same_layout_and_schedules_apart(self):
         idle = self.tray.panel("gemini")
         self.assertNotEqual(idle.status_tone, "live")
         self.assertEqual(len(idle.bubbles), 3)
@@ -413,10 +416,29 @@ class AgentPanelTests(unittest.TestCase):
         self.assertEqual([(chip.title, chip.running) for chip in model.schedules], [("任务s1", True), ("日报", False)])
         self.assertEqual(model.schedules[1].when, "待运行")
         self.assertEqual(model.tps, 42.0)
-        self.assertEqual([bubble.focus for bubble in model.bubbles], [True, True, False])
+        self.assertEqual(sorted(bubble.focus for bubble in model.bubbles), [False, True, True])
+        # Same bubbles, order and header height on every icon: the panel never changes size when switching.
+        other = self.tray.panel("grok")
+        self.assertEqual([b.key for b in other.bubbles], [b.key for b in model.bubbles])
+        self.assertEqual(agent_panel.field_top(other), agent_panel.field_top(model))
+        self.assertEqual(other.tps, 42.0)
         group = next(bubble for bubble in model.bubbles if bubble.members)
         self.assertEqual(len(group.members), 2)
         self.assertTrue(model.quota)
+
+    def test_gemini_pools_fill_the_panel_header(self):
+        snapshot = tray_app.placeholder("gemini")
+        snapshot.error, snapshot.remaining_percent, snapshot.used_percent = None, 25.0, 75.0
+        snapshot.pools = [{"key": "argon", "label": "Argon", "remaining_percent": 25.0, "resets_at": int(time.time()) + 3600},
+                          {"key": "claude_gpt", "label": "Claude/GPT", "remaining_percent": 40.0, "resets_at": None},
+                          {"key": "gemini", "label": "Gemini", "remaining_percent": 90.0, "resets_at": int(time.time()) + 3 * 86400}]
+        self.tray.snapshots["gemini"] = snapshot
+        model = self.tray.panel("gemini")
+        self.assertEqual([item[:2] for item in model.quota], [("Argon", 25.0), ("Claude/GPT", 40.0), ("Gemini", 90.0)])
+        self.assertTrue(model.quota[0][2].endswith(" 重置") and ":" in model.quota[0][2])
+        self.assertTrue(model.quota[2][2].startswith("周"))
+        self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
+        self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
 
     def test_claude_without_subscription_keeps_the_tooltip(self):
         free = tray_app.placeholder("claude")

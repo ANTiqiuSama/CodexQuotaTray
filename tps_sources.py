@@ -884,7 +884,9 @@ class TpsMonitor:
         by_index: dict[int, float] = {}
         # Model reply steps (step_type 15) per generation: (first created, last completed).
         spans: dict[Any, tuple[float, float]] = {}
-        for _, status, metadata, step_type in steps:
+        conversation = path.stem
+        request, doing = None, None          # newest user message / in-progress step
+        for _, status, metadata, step_type, body in steps:
             try:
                 completed = proto_seconds(proto_message(metadata, 7), epoch=True)
                 created = proto_seconds(proto_message(metadata, 1), epoch=True)
@@ -903,6 +905,15 @@ class TpsMonitor:
                         spans[span_key] = (min(first, created), max(last, completed))
                 if status not in (3, 4, 5) and not completed and generation_index >= 0 and created and created > now - 600:
                     self.activity[path.stem] = ("gemini", created, "请求中")
+                    if doing is None and step_type == AGY_REPLY_STEP:
+                        doing = ("思考中", created)
+                    elif doing is None and step_type is not None and step_type not in AGY_USER_STEPS:
+                        doing = ("调用工具", created)
+                if body and request is None and step_type in AGY_USER_STEPS:
+                    # Steps are newest first: the first user step is the current request.
+                    text = antigravity_request(body)
+                    if text:
+                        request = (text, created or moment)
             except (ValueError, TypeError):
                 skipped += 1
         for index, blob in reversed(rows):
@@ -939,8 +950,18 @@ class TpsMonitor:
                                      span[1] - span[0] if tps else None, basis, True, tps), now)
                 if ended > now - 3:
                     self.activity[path.stem] = (provider, ended, "刚完成生成")
+                if conversation not in self.context or not self.context[conversation].get("model"):
+                    self.context.setdefault(conversation, {}).update({"source": source, "model": model, "provider": provider})
             except (ValueError, TypeError):
                 skipped += 1
+        self.context.setdefault(conversation, {}).setdefault("source", source)
+        if request:
+            self.notes.ask(conversation, *request)
+        if doing:
+            self.notes.act(conversation, *doing)
+        title = antigravity_title(self.home, conversation)
+        if title:
+            self.notes.describe(conversation, title=title)
         return skipped
 
     def poll(self, now: float | None = None) -> dict[str, Any]:
@@ -1058,12 +1079,90 @@ def _find_text(value: Any, wanted: str) -> str:
     return ""
 
 
+# Antigravity keeps the Cascade step enum: 14 is the user's message, 15 the
+# model's reply. CODEX_QUOTA_AGY_USER_STEPS overrides (comma separated).
+AGY_USER_STEPS = {int(part) for part in (os.environ.get("CODEX_QUOTA_AGY_USER_STEPS") or "14").split(",") if part.strip().isdigit()}
+AGY_REPLY_STEP = 15
+STEP_PAYLOAD_COLUMNS = ("step", "data", "payload", "content", "proto", "value", "blob")
+
+
 def _antigravity_query(db) -> tuple[list, list]:
     rows = db.execute("SELECT idx,data FROM gen_metadata ORDER BY idx DESC LIMIT 300").fetchall()
-    columns = {row[1] for row in db.execute("PRAGMA table_info(steps)")}
+    columns = [row[1] for row in db.execute("PRAGMA table_info(steps)")]
     kind = "step_type" if "step_type" in columns else "NULL"
-    steps = db.execute(f"SELECT idx,status,metadata,{kind} FROM steps WHERE metadata IS NOT NULL ORDER BY idx DESC LIMIT 3000").fetchall()
+    body = next((name for name in STEP_PAYLOAD_COLUMNS if name in columns), None)
+    # The step body (prompt text) is only read for user-message steps.
+    payload = f"CASE WHEN {kind} IN ({','.join(map(str, sorted(AGY_USER_STEPS)))}) THEN {body} END" if body and kind != "NULL" and AGY_USER_STEPS else "NULL"
+    steps = db.execute(f"SELECT idx,status,metadata,{kind},{payload} FROM steps WHERE metadata IS NOT NULL "
+                       "ORDER BY idx DESC LIMIT 3000").fetchall()
     return rows, steps
+
+
+def _looks_human(text: str) -> bool:
+    if len(text) < 2 or len(text) > 8000:
+        return False
+    if any(ord(ch) < 32 and ch not in "\n\r\t" for ch in text):
+        return False
+    if re.fullmatch(r"[0-9a-fA-F-]{16,}|[A-Za-z0-9+/=_-]{24,}|[\w.-]+(?:[\\/][\w .-]+)+|[a-z][\w.-]*", text):
+        return False            # ids, hashes, base64, bare paths, enum-like tokens
+    return bool(re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]|[A-Za-z]{2,}\W+[A-Za-z]{2,}", text))
+
+
+def proto_texts(data: bytes, depth: int = 0) -> list[str]:
+    """Human-looking strings inside a protobuf message, in field order."""
+    found: list[str] = []
+    try:
+        fields = proto_fields(data)
+    except ValueError:
+        return found
+    for number_ in sorted(fields):
+        for value in fields[number_]:
+            if not isinstance(value, bytes) or not value:
+                continue
+            # A nested message can also decode as UTF-8: take it as a message
+            # when its strings make up most of its bytes.
+            nested = proto_texts(value, depth + 1) if depth < 6 else []
+            if nested and sum(len(t.encode("utf-8")) for t in nested) >= 0.6 * len(value):
+                found.extend(nested)
+                continue
+            try:
+                text = value.decode("utf-8")
+            except UnicodeDecodeError:
+                text = ""
+            if text and _looks_human(text):
+                found.append(text)
+            else:
+                found.extend(nested)
+    return found
+
+
+def antigravity_request(payload) -> str:
+    """The user's message from an Antigravity user-input step body."""
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8", errors="replace")
+    if not isinstance(payload, (bytes, bytearray)) or not payload:
+        return ""
+    texts = proto_texts(bytes(payload))
+    if not texts:
+        return ""
+    # Prefer prose over pasted code/context: the longest line that is not mostly symbols.
+    prose = [t for t in texts if len(re.findall(r"[{}();=<>]", t)) < max(4, len(t) // 25)]
+    return max(prose or texts, key=len)[:4000]
+
+
+def antigravity_title(home: Path, conversation: str) -> str:
+    """Antigravity desktop's task artifact for a conversation, if any."""
+    for name in ("task.md", "implementation_plan.md"):
+        path = home / ".gemini/antigravity/brain" / conversation / name
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for line in handle.read(4000).splitlines():
+                    line = line.strip().lstrip("#").strip()
+                    if line and not line.startswith(("-", "*", "[", "<!--")):
+                        return re.sub(r"^(?:task|任务)\s*[:：]\s*", "", line, flags=re.I)[:200]
+        except OSError:
+            continue
+    return ""
 
 
 def read_antigravity_db(path: Path) -> tuple[list, list]:
@@ -1089,6 +1188,17 @@ def read_antigravity_db(path: Path) -> tuple[list, list]:
             return _antigravity_query(db)
         finally:
             db.close()
+
+
+def step_columns(path: Path) -> list[str]:
+    try:
+        db = readonly_db(path)
+        try:
+            return [row[1] for row in db.execute("PRAGMA table_info(steps)")]
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return []
 
 
 def _proto_summary(data: bytes, depth: int = 0) -> dict[str, Any]:
@@ -1147,7 +1257,11 @@ def antigravity_diagnostics(home: Path | None = None, databases: int = 3, genera
                               "completed": proto_seconds(proto_message(meta, 7), epoch=True),
                               "generation_index": proto_int(proto_message(meta, 20), 3, -1) if proto_message(meta, 20) else None,
                               "has_response_id": bool(proto_message(proto_message(meta, 9), 11))}
-                             for idx, status, meta, kind in step_rows[:steps]]
+                             for idx, status, meta, kind, _body in step_rows[:steps]]
+            # Which step types carry the user's text, without showing the text itself.
+            item["user_steps"] = [{"idx": idx, "step_type": kind, "request_chars": len(antigravity_request(body))}
+                                  for idx, _status, _meta, kind, body in step_rows if body][:5]
+            item["step_columns"] = step_columns(path)
             entry["newest"].append(item)
         result["roots"].append(entry)
     performance = monitor.poll()

@@ -84,7 +84,7 @@ class PanelModel:
         """Static part of the panel (cached background). Quota figures, bars and
         TPS are animated per frame, so only their labels and reset texts are here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:2]), self.banner,
+                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]), self.banner,
                 tuple((chip.key, chip.title, chip.running, chip.letter, chip.when) for chip in self.schedules),
                 not self.bubbles)
 
@@ -107,8 +107,8 @@ def chip_height(model) -> float:
 def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
-    top = FIELD_TOP + (14 if any(len(item) > 2 and item[2] for item in model.quota) else 0)
-    return top + (26 if model.banner else 0)
+    # The reset-text row is always reserved so every source's panel is the same height.
+    return FIELD_TOP + 14 + (26 if model.banner else 0)
 
 
 def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
@@ -278,7 +278,7 @@ class Scene:
         self.model = model
         if first:
             self.opened = now
-        values = [item[1] for item in model.quota[:2]]
+        values = [item[1] for item in model.quota[:3]]
         if len(self.meters) != len(values):
             self.meters = [Spring(0.0, 90.0, 19.0) for _ in values]
         for spring, value in zip(self.meters, values):
@@ -517,7 +517,7 @@ class Scene:
         ping on the title dot while agents work, drifting shells when idle."""
         draw = ImageDraw.Draw(frame)
         columns = meter_columns(len(self.meters))
-        for (x, end), spring, item in zip(columns, self.meters, model.quota[:2]):
+        for (x, end), spring, item in zip(columns, self.meters, model.quota[:3]):
             value = item[1]
             shade = TEXT if value is None or value >= 50 else ring_color(value, model.letter)
             shown = None if value is None else spring.value
@@ -530,10 +530,9 @@ class Scene:
                                        radius=max(1, round(2 * scale)), fill=fill)
         x = columns[-1][0]
         color = accent(model.letter)
-        if model.tps is None:
-            blit_at(frame, figure("—", "", TEXT, TEXT, scale), at(x), at(METER_TOP + 38))
-        else:
-            blit_at(frame, figure(f"{max(0.0, self.rate.value):.0f}", "tok/s", color, SECONDARY_TEXT, scale), at(x), at(METER_TOP + 38))
+        rate = max(0.0, self.rate.value)
+        blit_at(frame, figure(f"{rate:.0f}", "tok/s", color if model.tps and rate >= 0.5 else TEXT, SECONDARY_TEXT, scale),
+                at(x), at(METER_TOP + 38))
         if model.status_tone == "live":
             p = (self.time % 1.8) / 1.8
             blit(frame, faded(ring(round((4 + 7 * ease_out_cubic(p)) * scale), max(1, round(1.2 * scale)), model.letter),

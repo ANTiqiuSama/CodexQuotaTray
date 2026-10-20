@@ -98,6 +98,32 @@ def reset_hint(timestamp: int | None) -> str:
     return countdown if countdown == "已到重置时间" else f"{countdown}后重置"
 
 
+def short_reset(timestamp: int | None, now: float | None = None) -> str:
+    """Compact reset time for narrow columns: "14:30 重置" or "周三 重置"."""
+    if not timestamp:
+        return ""
+    now = now or time.time()
+    if timestamp <= now:
+        return "已到重置"
+    moment = datetime.fromtimestamp(timestamp)
+    if timestamp - now < 86400:
+        return moment.strftime("%H:%M") + " 重置"
+    if timestamp - now < 6 * 86400:
+        return "周" + "一二三四五六日"[moment.weekday()] + " 重置"
+    return moment.strftime("%m-%d") + " 重置"
+
+
+def pool_lines(snapshot: QuotaSnapshot) -> list[str]:
+    """One line per extra model pool (Antigravity), ring pool first."""
+    lines = []
+    for pool in snapshot.pools or []:
+        left = pool.get("remaining_percent")
+        value = "未知" if left is None else f"剩余 {left:.0f}%"
+        reset = f" · {reset_text(pool['resets_at'])} 重置" if pool.get("resets_at") else ""
+        lines.append(f"  {pool.get('label') or pool.get('key')}：{value}{reset}")
+    return lines
+
+
 def schedule_when(chip: dict, now: float) -> str:
     if chip.get("next_at") and chip["next_at"] > now:
         moment, prefix = chip["next_at"], "下次"
@@ -162,6 +188,9 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
         if snapshot.secondary_remaining_percent is not None:
             second = window_label(snapshot.secondary_window_minutes) or "第二窗口"
             status += f" · {second}剩余 {snapshot.secondary_remaining_percent:.0f}%"
+        for pool in (snapshot.pools or [])[1:]:
+            if pool.get("remaining_percent") is not None:
+                status += f" · {pool.get('label') or pool.get('key')} {pool['remaining_percent']:.0f}%"
     stale = " · 旧数据" if snapshot.stale else ""
     return f"{snapshot.label}: {status}{stale}"
 
@@ -354,11 +383,16 @@ class QuotaTray:
             bubbles.append(agent_panel.BubbleModel(cluster.key, agent_tasks.shorten(title, 16), doing, provider_letter(lead),
                                                    cluster.live, detail, members, busy, provider in kinds,
                                                    tuple(m["key"] for m in cluster.members)))
-        bubbles.sort(key=lambda bubble: not bubble.focus)
+        # Same order for every icon so the panel keeps its size and layout when switching.
         snapshot = self.snapshots.get(provider)
         quota: list[tuple] = []
         if snapshot is not None and provider == "mimo":
             quota.append(("套餐额度", snapshot.display_remaining, ""))
+        elif snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
+            compact = len(snapshot.pools) > 2
+            for pool in snapshot.pools[:3]:
+                reset = short_reset(pool.get("resets_at"), now) if compact else reset_hint(pool.get("resets_at"))
+                quota.append((pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"), reset))
         elif snapshot is not None:
             quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent, reset_hint(snapshot.resets_at)))
             if snapshot.secondary_window_minutes or snapshot.secondary_remaining_percent is not None:
@@ -373,14 +407,17 @@ class QuotaTray:
             status, tone = "读取失败", "error"
         else:
             status, tone = "空闲", "idle"
-        banner = ""
-        if provider == "codex" and reset_watch.ENABLED and snapshot is not None:
-            banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), snapshot.display_remaining, now)[0]
+        # The Codex reset notice is shown on every panel (same size everywhere).
+        banner, codex = "", self.snapshots.get("codex")
+        if reset_watch.ENABLED and codex is not None and "codex" in self.snapshots:
+            banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), codex.display_remaining, now)[0]
+            if banner and provider != "codex":
+                banner = "Codex · " + banner
         chips = tuple(agent_panel.ScheduleChip(chip["key"], chip["title"], chip["running"],
                                                provider_letter(chip["provider"]) if chip["provider"] else "", schedule_when(chip, now))
                       for chip in agent_tasks.schedule_chips(getattr(self.tps_monitor, "schedules", []), self.agents, now))
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
-                                      status, tuple(quota), data.get("display_tps"), tuple(bubbles[:agent_panel.MAX_BUBBLES]),
+                                      status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, chips)
 
     def merge(self, first: str, second: str) -> str | None:
@@ -463,7 +500,7 @@ class QuotaTray:
 
     def open_details(self, provider: str) -> None:
         snapshot = self.snapshots[provider]
-        lines = [quota_line(snapshot)]
+        lines = [quota_line(snapshot)] + (pool_lines(snapshot) if snapshot.pools and len(snapshot.pools) > 1 else [])
         for label, item in self.forecasts(provider):
             lines.append(f"预测{f'（{label}）' if label else ''}：{item.text}")
         lines += ["", self.performance_line(provider), self.output_rate_line(provider), "", self.menu_reset(provider), self.menu_countdown(provider)]
