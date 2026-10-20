@@ -58,9 +58,14 @@ def parse_reset(text: str) -> int | None:
             try:
                 parsed = datetime.strptime(value, fmt)
                 if parsed.year == 1900:
+                    # No year shown.  A date a little in the past is a reset
+                    # that just passed (the CLI can lag behind the server);
+                    # only one well in the past belongs to next year.
                     parsed = parsed.replace(year=datetime.now().year)
-                    if parsed.timestamp() < time.time():
+                    if parsed.timestamp() < time.time() - 3 * 86400:
                         parsed = parsed.replace(year=parsed.year + 1)
+                    elif parsed.timestamp() > time.time() + 300 * 86400:
+                        parsed = parsed.replace(year=parsed.year - 1)   # "December 30" read in early January
                 return int(parsed.timestamp())
             except ValueError:
                 continue
