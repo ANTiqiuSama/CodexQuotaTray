@@ -19,7 +19,7 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from icon_art import AMBER, CLAY, RESET_BLUE, accent, ring_color
+from icon_art import AMBER, CLAY, RESET_BLUE, UNIFORM_LETTERS, accent, ring_color
 
 WIDTH = 420
 PAD = 18
@@ -603,7 +603,7 @@ class Scene:
         columns = meter_columns(len(self.meters) + (model.provider == "mimo"))
         for (x, end), spring, item in zip(columns, self.meters, model.quota[:3]):
             value = item[1]
-            shade = TEXT if value is None or value >= 50 else ring_color(value, model.letter)
+            shade = TEXT if value is None or value >= 50 or model.letter in UNIFORM_LETTERS else ring_color(value, model.letter)
             shown = None if value is None else spring.value
             blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
                                   shade, shade, scale), at(x), at(meter_top + 38))

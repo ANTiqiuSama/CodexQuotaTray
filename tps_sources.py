@@ -965,8 +965,9 @@ class TpsMonitor:
                     tps = round(output / (span[1] - span[0]), 1)
                     basis = "本地步骤时间（输出token数÷回复步骤创建至完成的时间，含首字延迟）"
                 identity = key("response", response.decode("utf-8", errors="replace")) if response else key("antigravity", path.stem, index)
-                provider = provider_for(model)
-                provider = "gemini" if provider == "other" else provider   # unlabelled Antigravity replies
+                # Every Antigravity reply (Gemini, Claude Opus or GPT pools alike) draws on
+                # the Gemini/Antigravity quota: its TPS, bubbles and colour belong there.
+                provider = "gemini"
                 self.add(Observation(identity, source, path.stem, provider, model, ended, output,
                                      span[1] - span[0] if tps else None, basis, True, tps), now)
                 if ended > now - 3:

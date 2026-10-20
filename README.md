@@ -93,10 +93,13 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 | 移开鼠标 | 关闭详情，图标恢复最新数值 |
 | 左键点击图标 | 打开对应桌面程序或 CLI |
 | 右键图标 / 点击面板右下角齿轮 | 收起悬停面板并打开设置页 |
-| 设置 → 常规与额度 | 立即刷新、额度详情、全部 AI 速率、MiMo 登录、诊断、开机自启与退出全部 |
-| 设置 → 任务命名 API | 配置 Base URL、隐藏输入的 API Key 与模型，测试连接，保存并即时应用；启用后会发送任务请求摘要和最近动作 |
+| 设置 → 概览 | 每个来源一张卡片：当前托盘图标、状态、各额度窗口/模型池的剩余条与重置倒计时、TPS、60 秒速率、会话数与耗尽预测（每 2 秒刷新，点击打开额度详情）；下方为最近 30 分钟按来源堆叠的输出柱状图 |
+| 设置 → 额度来源 | Claude 额度检测开关、MiMo 登录/退出、全部 AI 速率，以及各本机记录（Codex、Claude Code、Antigravity、herdr 等）的接入状态 |
+| 设置 → 任务与 herdr | herdr 适配开关与状态、图标自动排序开关、当前任务列表（来源色点、任务名、所在文件夹/herdr 窗格、动作与 TPS） |
+| 设置 → 任务命名 API | 启用开关、Base URL、隐藏输入的 API Key 与模型，测试连接，保存并即时应用；启用后会发送任务请求摘要和最近动作 |
+| 设置 → 常规 | 开机自启、诊断信息、全局重置预测、打开数据文件夹、退出全部 |
 
-空闲时是深色圆盘与字母，生成时是来源主色的亮圆盘与 TPS 数字。字母、数字优先使用 Sitka Small Bold，并回退到 Cambria、Palatino、Georgia 等系统字体。低于 50% 为琥珀色，低于 20% 为玫瑰红；未知值显示 `?`，旧数据增加琥珀色圆点。
+空闲时是深色圆盘与字母，生成时是来源主色的亮圆盘与 TPS 数字。字母、数字优先使用 Sitka Small Bold，并回退到 Cambria、Palatino、Georgia 等系统字体。低于 50% 为琥珀色，低于 20% 为玫瑰红（Gemini 的模型池常在 50% 以下，额度环、面板额度条和 TPS 圆盘统一使用它的 TPS 主色；Antigravity 中 Claude/GPT 模型的回复同样计入 Gemini）；未知值显示 `?`，旧数据增加琥珀色圆点。
 
 悬停期间暂缓重绘对应托盘图标，面板内容继续更新，移开后再补上图标数值。面板无法显示时回退为原生文字提示。
 
@@ -343,6 +346,7 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `mimo-edge-profile/` | MiMo 登录用的应用自有浏览器配置 |
 | `mimo-ledger.json`、`mimo-days.json` | 本机 MiMo Credits 账本（40 天）与每日首次控制台读数 |
 | `mimo.json` | 可选的 MiMo 手动套餐配置 |
+| `settings.json` | 设置页中的 herdr 适配与图标排序选择（对应环境变量设置时以环境变量为准） |
 | `agent_groups.json` | 手动合并的任务分组与拆开记录（仅会话 ID，7 天未用自动清理） |
 | `agent_summary.json` | 可选的气泡命名接口配置 |
 | `mimo-login.log` | MiMo 登录/续期诊断：步骤、HTTP 状态码、cookie 与请求头的**名称**（不含值） |
@@ -432,6 +436,8 @@ hover_details.py      Win32 分层窗口、DPI、悬停、任务面板窗口及�
 agent_tasks.py        各 agent 在做什么：请求/动作提取、自动与手动分组、可选模型命名
 herdr_source.py       可选 herdr 适配：按窗格归并会话、补充无本地日志的 agent
 agent_panel.py        任务气泡面板：布局、弹簧动画、拖动合并与拆分、Pillow 渲染
+settings_window.py    设置窗口（Tk 深色界面：侧栏导航与五个页面）
+settings_view.py      设置页的可视化：来源卡片、输出柱状图、任务列表（Pillow 绘制）
 hover_check.py        任务面板窗口显示自检
 mimo_usage.py         MiMo 控制台读取、登录、Credits 账本与年度节奏
 tray_app.py           程序入口、菜单、线程协调与登录启动项
@@ -448,7 +454,8 @@ build.ps1             测试与 PyInstaller 构建入口
 
 ```powershell
 python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py `
-  test_tray_app.py test_features.py test_claude.py test_mimo.py test_reset_watch.py
+  test_tray_app.py test_features.py test_claude.py test_mimo.py test_reset_watch.py `
+  test_agent_tasks.py test_settings.py
 ```
 
 2026-10-16，本机 Windows 11 / Python 3.12.10 对代码版本 `d5a553a`（合入提交 `ea19ed0`）运行 **97 项测试，全部通过**。测试覆盖解析、计数去重、来源注册表、图标、卡片、刷新调度和预测计算；这是一份本机验证记录。
