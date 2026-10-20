@@ -610,6 +610,36 @@ def group_title(members: tuple[dict, ...]) -> str:
     return titled[max(range(len(titled)), key=lambda index: (score(index), -len(titled[index]["title"])))]["title"]
 
 
+HELPER_MARK = re.compile(r"subagent|sub_agent|guardian|review|compact|memory", re.I)
+
+
+def _anonymous(agent: dict) -> bool:
+    return not (agent.get("title") or agent.get("thread_title") or agent.get("role") or agent.get("folder") or agent.get("parent"))
+
+
+def _helpers(agents: list[dict]) -> list[tuple[dict, dict]]:
+    """Side threads one client process starts for itself (title generation,
+    approval reviews, compaction, sub-agents whose parent link is missing).
+    They have no request or folder of their own, or are marked as a
+    sub-agent without a parent; each joins the main session of the same
+    client (same folder when known) that was active most recently."""
+    hosts = [agent for agent in agents if not agent.get("parent") and not _anonymous(agent) and
+             not HELPER_MARK.search(str(agent.get("origin") or ""))]
+    pairs = []
+    for agent in agents:
+        if agent.get("parent") or agent in hosts:
+            continue
+        orphan = bool(HELPER_MARK.search(str(agent.get("origin") or "")))
+        if not (_anonymous(agent) or orphan):
+            continue
+        same = [host for host in hosts if host["provider"] == agent["provider"] and host["key"] != agent["key"] and
+                (not agent.get("folder") or host.get("folder") == agent["folder"]) and
+                (not agent.get("pane") or host.get("pane") in (None, "", agent["pane"]))]
+        if same:
+            pairs.append((agent, max(same, key=lambda host: (host["live"], host.get("at") or 0))))
+    return pairs
+
+
 class AgentGroups:
     """User-made groups plus automatic parent/sub-agent links."""
 
@@ -660,14 +690,29 @@ class AgentGroups:
             for agent in agents:
                 if agent.get("parent") and agent["key"] not in self.detached and agent["key"] not in owner:
                     join(agent["key"], agent["parent"] if agent["parent"] not in owner else "group:" + owner[agent["parent"]])
+            # One herdr pane is one agent process: everything it ran is one bubble.
+            panes: dict[str, str] = {}
+            for agent in agents:
+                pane = agent.get("pane")
+                if pane and agent["key"] not in self.detached and agent["key"] not in owner:
+                    if pane in panes:
+                        join(agent["key"], panes[pane])
+                    else:
+                        panes[pane] = agent["key"]
+            for agent, host in _helpers(agents):
+                if agent["key"] not in self.detached and agent["key"] not in owner:
+                    join(agent["key"], host["key"])
             buckets: dict[str, list[dict]] = {}
             for agent in agents:
                 buckets.setdefault(root(agent["key"]), []).append(agent)
             clusters = []
             for members in buckets.values():
                 gid = next((owner[m["key"]] for m in members if m["key"] in owner), None)
+                pane = next((m["pane"] for m in members if m.get("pane")), "")
                 if gid:
                     key = "group:" + gid
+                elif pane and len(members) > 1:
+                    key = "pane:" + pane
                 elif len(members) > 1:
                     key = "auto:" + min(m.get("parent") or m["key"] for m in members)
                 else:

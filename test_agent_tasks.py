@@ -545,5 +545,89 @@ class SteadyBubbleTests(unittest.TestCase):
         self.assertFalse(scene.bodies["a"].model.live)
 
 
+
+class HerdrAndHelperTests(unittest.TestCase):
+    @staticmethod
+    def agent(key, **extra):
+        base = {"key": key, "provider": "codex", "source": "Codex", "model": "", "title": "", "thread_title": "",
+                "request": "", "doing": "生成中", "live": True, "at": 100.0, "parent": "", "role": "", "folder": "",
+                "tps": None, "schedule": "", "origin": ""}
+        base.update(extra)
+        return base
+
+    def groups(self):
+        import tempfile
+        from pathlib import Path
+        folder = tempfile.mkdtemp()
+        return agent_tasks.AgentGroups(Path(folder) / "groups.json")
+
+    def test_untitled_side_threads_join_the_main_session(self):
+        main = self.agent("main", title="修复气泡", folder="repo", at=90.0)
+        side = self.agent("side", at=99.0)                       # title generation / log-only stream
+        review = self.agent("review", title="审查", folder="repo", origin='{"subagent": "review"}')
+        clusters = self.groups().compose([main, side, review])
+        self.assertEqual(1, len(clusters))
+        self.assertEqual({"main", "side", "review"}, {m["key"] for m in clusters[0].members})
+
+    def test_separate_sessions_stay_separate(self):
+        first = self.agent("a", title="任务一", folder="repo")
+        second = self.agent("b", title="任务二", folder="repo")
+        other = self.agent("c", provider="claude")               # anonymous, but no Claude host
+        self.assertEqual(3, len(self.groups().compose([first, second, other])))
+
+    def test_same_herdr_pane_is_one_bubble(self):
+        import herdr_source
+        listing = json.dumps({"id": "1", "result": {"type": "agent_list", "agents": [
+            {"pane_id": "w1:p1", "terminal_id": "t1", "workspace_id": "w1", "tab_id": "w1:t1", "focused": True, "revision": 1,
+             "agent": "codex", "agent_status": "working", "cwd": "/x/repo",
+             "agent_session": {"source": "herdr:codex", "agent": "codex", "kind": "id", "value": "aaaaaaaa-0000-0000-0000-000000000001"}},
+            {"pane_id": "w1:p2", "terminal_id": "t2", "workspace_id": "w1", "tab_id": "w1:t1", "focused": False, "revision": 1,
+             "agent": "claude", "agent_status": "blocked", "cwd": "/x/site", "title": "部署网站"},
+            {"pane_id": "w1:p3", "terminal_id": "t3", "workspace_id": "w1", "tab_id": "w1:t1", "focused": False, "revision": 1,
+             "agent": "grok", "agent_status": "idle"},
+        ]}})
+        calls = []
+
+        def runner(command, **_):
+            calls.append(command)
+            return type("Result", (), {"returncode": 0, "stdout": listing})()
+
+        herdr = herdr_source.Herdr(exe="herdr", runner=runner, enabled=True)
+        native = [self.agent("aaaaaaaa-0000-0000-0000-000000000001", title="主任务", folder="repo"),
+                  self.agent("bbbbbbbb-0000-0000-0000-000000000002", title="另一个线程", folder="repo")]
+        native[1]["parent"] = ""
+        agents = herdr.attach(native, 100.0)
+        self.assertEqual(["herdr", "agent", "list"], calls[0])
+        self.assertEqual("w1:p1", agents[0]["pane"] if agents[0]["key"].startswith("aaaa") else
+                         next(a for a in agents if a["key"].startswith("aaaa"))["pane"])
+        blocked = next(a for a in agents if a["key"] == "herdr:w1:p2")
+        self.assertEqual(("claude", "等你确认", "部署网站", "site"), (blocked["provider"], blocked["doing"], blocked["title"], blocked["folder"]))
+        self.assertFalse(any(a["key"] == "herdr:w1:p3" for a in agents))      # idle pane without logs: no bubble
+        # the second native thread joins via a shared pane once herdr links it
+        for agent in agents:
+            if agent["key"].startswith("bbbb"):
+                agent["pane"] = "w1:p1"
+        clusters = self.groups().compose(agents)
+        pane = next(c for c in clusters if c.key == "pane:w1:p1")
+        self.assertEqual(2, len(pane.members))
+        herdr.attach(native, 101.0)
+        self.assertEqual(1, len(calls))                                      # rate limited
+
+    def test_herdr_without_server_changes_nothing(self):
+        import herdr_source
+        herdr = herdr_source.Herdr(exe="herdr", runner=lambda *a, **k: type("R", (), {"returncode": 1, "stdout": ""})(), enabled=True)
+        native = [self.agent("x", title="任务")]
+        self.assertEqual(native, herdr.attach(native, 10.0))
+        self.assertEqual("服务未运行", herdr.status)
+        self.assertEqual([], herdr_source.Herdr(enabled=False).poll(10.0))
+
+    def test_unmatched_pane_claims_single_same_folder_session(self):
+        import herdr_source
+        listing = json.dumps({"result": {"agents": [{"pane_id": "p9", "agent": "codex", "agent_status": "working", "foreground_cwd": "C:\\\\work\\\\repo"}]}})
+        herdr = herdr_source.Herdr(exe="herdr", runner=lambda *a, **k: type("R", (), {"returncode": 0, "stdout": listing})(), enabled=True)
+        agents = herdr.attach([self.agent("k", title="任务", folder="repo")], 5.0)
+        self.assertEqual(["p9"], [a.get("pane") for a in agents])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -25,6 +26,7 @@ from typing import Any
 import psutil
 
 import providers
+from herdr_source import Herdr
 from agent_tasks import AgentNotes, RECUR_SPREAD, clean as clean_request, read_schedules, tool_action
 
 
@@ -147,6 +149,8 @@ def proto_seconds(data: bytes, *, epoch=False) -> float | None:
     return value if epoch or value <= 86400 else None
 
 
+log = logging.getLogger(__name__)
+THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 MIN_TPS_TOKENS = 16      # shorter replies give meaningless rates
 MIN_TPS_SECONDS = 0.3
 TPS_GROUP_SECONDS = 90   # replies finished this close together are averaged
@@ -252,6 +256,8 @@ class TpsMonitor:
         self.thread_columns: set[str] | None = None
         self.schedules: list[dict[str, Any]] = []       # scheduled task definitions + recurring requests
         self.codex_recurring: dict[str, float] = {}
+        # herdr panes group one agent process's sessions; off for test homes.
+        self.herdr = Herdr(enabled=False if home is not None else None)
 
     def add(self, observation: Observation, now: float):
         if observation.identity in self.seen or not now - 86400 <= observation.ended_at <= now + 5:
@@ -317,7 +323,10 @@ class TpsMonitor:
         elif now - self.last_slow_discovery >= SLOW_DISCOVERY_SECONDS:
             for path in self.codex_root.glob("sessions/*/*/*/rollout-*.jsonl"):
                 if self._recent(path, now):
-                    self._register(path, path.stem.split("T", 1)[-1], "Codex")
+                    # Same thread id the stream logs use, not the "HH-MM-SS-<id>" tail of
+                    # the file name (which made one session show up as two bubbles).
+                    found = THREAD_ID.findall(path.stem)
+                    self._register(path, found[-1] if found else path.stem.split("T", 1)[-1], "Codex")
         grok_paths = [path for path in self.grok_root.glob("sessions/*/*/updates.jsonl")
                       if path in self.readers or self._recent(path, now)]
         for path in grok_paths:
@@ -1040,7 +1049,13 @@ class TpsMonitor:
                 break
             if event.native_tps is not None:
                 rates.setdefault(event.session, event.native_tps)
-        return self.notes.export(self.activity, self.context, rates, now, provider_for, self.schedules)
+        agents = self.notes.export(self.activity, self.context, rates, now, provider_for, self.schedules)
+        try:
+            agents = self.herdr.attach(agents, now)
+        except Exception:      # an optional extra must never hide the native agents
+            log.debug("herdr attach failed", exc_info=True)
+        self.health["herdr"] = {"status": self.herdr.status, "panes": len(self.herdr.rows)}
+        return agents
 
     def snapshot(self, now: float) -> dict[str, Any]:
         # The installed Codex bridge emits a second copy of agy's usage. Only
