@@ -508,5 +508,42 @@ class SceneTests(unittest.TestCase):
         self.assertIsNotNone(scene.render(1.0))
 
 
+class SteadyBubbleTests(unittest.TestCase):
+    def run_frames(self, scene, start, frames=60):
+        moment = start
+        for _ in range(frames):
+            moment += 1 / 60
+            scene.step(moment, None, False, False)
+        return moment
+
+    def test_bubbles_keep_their_slots_when_activity_order_changes(self):
+        scene = agent_panel.Scene()
+        scene.set_model(panel(bubble("a"), bubble("b"), bubble("c")), 0.0)
+        moment = self.run_frames(scene, 0.0, 120)
+        before = {key: (round(b.x), round(b.y)) for key, b in scene.bodies.items()}
+        # The client reports c, then a, then b as most recent, and actions change length.
+        scene.set_model(panel(bubble("c", doing="编辑 a_very_long_file_name_for_testing.py"), bubble("a"), bubble("b", doing="思考中")), moment)
+        self.run_frames(scene, moment, 120)
+        self.assertEqual(scene.order[:3], ["a", "b", "c"])
+        self.assertEqual({key: (round(b.x), round(b.y)) for key, b in scene.bodies.items()}, before)
+
+    def test_footprint_does_not_depend_on_caption(self):
+        self.assertEqual(bubble("a", doing="思考中").half_width, bubble("a", doing="编辑 a_very_long_file_name.py").half_width)
+
+    def test_brief_live_flicker_is_ignored(self):
+        scene = agent_panel.Scene()
+        scene.set_model(panel(bubble("a")), 0.0)
+        moment = self.run_frames(scene, 0.0, 60)
+        idle = agent_panel.BubbleModel("a", "任务 a", "刚完成", "C", False)
+        scene.set_model(panel(idle), moment)
+        self.assertTrue(scene.bodies["a"].model.live)            # held while it may be a gap between tool calls
+        scene.set_model(panel(bubble("a")), moment + 0.5)
+        scene.set_model(panel(idle), moment + 0.6)
+        scene.set_model(panel(idle), moment + 1.0)
+        self.assertTrue(scene.bodies["a"].model.live)
+        scene.set_model(panel(idle), moment + 2.2)
+        self.assertFalse(scene.bodies["a"].model.live)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from agent_tasks import width as text_units
 from icon_art import AMBER, CLAY, RESET_BLUE, accent, ring_color
 
 WIDTH = 420
@@ -30,6 +29,8 @@ GAP = 10.0                  # Clearance between neighbouring bubble boxes.
 LABEL = 20.0                # Caption height under a bubble.
 SUPERSAMPLE = 3
 MAX_BUBBLES = 9
+CAPTION_SPARE = 24.0        # Caption may be this much wider than its bubble.
+LIVE_HOLD = 1.5             # A live/idle flip must persist this long before it shows.
 
 
 @dataclass(frozen=True)
@@ -52,9 +53,9 @@ class BubbleModel:
 
     @property
     def half_width(self) -> float:
-        """Half the footprint: the bubble or its caption, whichever is wider."""
-        label = min(self.radius * 2 + 40, text_units(self.doing) * 10.5 + 16)
-        return max(self.radius, label / 2) + GAP / 2
+        """Half the footprint. Fixed per bubble size (never from the caption text),
+        so a changing action line does not reflow the shelf and shove neighbours."""
+        return self.radius + CAPTION_SPARE / 2 + GAP / 2
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,8 @@ GEAR_HIT = 17.0
 
 def meter_columns(count: int) -> list[tuple[float, float]]:
     """(left, bar end) of each header column; the last column is TPS."""
-    column = (WIDTH - 2 * PAD) / (count + 1)
+    # At least three slots, so a single quota (Grok) does not stretch across half the panel.
+    column = (WIDTH - 2 * PAD) / max(3, count + 1)
     return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in range(count + 1)]
 
 
@@ -267,6 +269,8 @@ class Scene:
         self.opened = 0.0
         self.gear = Spring(0.0, 260.0, 26.0)    # settings gear highlight under the pointer
         self.gear_angle = 0.0
+        self.order: list[str] = []              # first-seen order: bubbles keep their slots
+        self.live_since: dict[str, tuple[bool, float]] = {}
         self.gear_press = False
 
     def over_gear(self, pointer) -> bool:
@@ -321,7 +325,7 @@ class Scene:
             spring.target = 0.0 if value is None else float(value)
         self.rate.target = float(model.tps or 0.0)
         self.today_usage.target = float(model.today_used or 0.0)
-        bubbles = model.bubbles[:MAX_BUBBLES]
+        bubbles = self._stable(model.bubbles[:MAX_BUBBLES], now, first)
         self.homes, self.field.target = pack(bubbles, field_top(model))
         if first:
             self.field.value = self.field.target
@@ -337,7 +341,8 @@ class Scene:
                 heir = next((key for key, old in removed.items() if mine & set(old.model.keys or (key,))), None)
                 if heir:
                     body = self.bodies[bubble.key] = removed.pop(heir)
-                    body.scale.velocity += 3.0
+                    if len(bubble.keys) != len(body.model.keys):    # really regrouped, not just renamed
+                        body.scale.velocity += 3.0
             if body is None:
                 origin = self.origins.pop(bubble.key, None)
                 if origin:
@@ -350,16 +355,39 @@ class Scene:
                     body = Body(bubble, x, y, now + (index * 0.05 if first else 0.0))
                 body.radius.value = body.radius.target = bubble.radius
                 self.bodies[bubble.key] = body
-            if body.model.live != bubble.live and not first:
-                if bubble.live:     # picked work up again: a ring announces it
-                    self.ripples.append(Ripple(body.x, body.y, body.size, now, bubble.letter, 0.7, bubble.key))
-                else:               # just finished: a small settling dip
-                    body.scale.velocity -= 1.6
+            if body.model.live != bubble.live and not first and bubble.live:
+                # picked work up again (after LIVE_HOLD): a ring announces it
+                self.ripples.append(Ripple(body.x, body.y, body.size, now, bubble.letter, 0.7, bubble.key))
             body.model = bubble
             body.radius.target = bubble.radius
             body.scale.target = 1.0
         for body in removed.values():
             self.ghosts.append(Ghost(body.model, body.x, body.y, body.size, now, "fade", duration=0.28))
+
+    def _stable(self, bubbles, now: float, first: bool) -> list:
+        """Keep each bubble in the slot it first appeared in (the client's
+        activity order changes every few seconds) and debounce live/idle
+        flips between tool calls, which otherwise make bubbles twitch."""
+        known = {key: index for index, key in enumerate(self.order)}
+        ordered = sorted(bubbles, key=lambda b: known.get(b.key, len(known) + bubbles.index(b)))
+        self.order = [b.key for b in ordered]
+        result = []
+        for bubble in ordered:
+            body = self.bodies.get(bubble.key)
+            shown = body.model.live if body is not None and not first else bubble.live
+            if bubble.live != shown:
+                state, since = self.live_since.get(bubble.key, (bubble.live, now))
+                if state != bubble.live:
+                    since = now
+                self.live_since[bubble.key] = (bubble.live, since)
+                if now - since < LIVE_HOLD:
+                    bubble = replace(bubble, live=shown)
+                else:
+                    self.live_since.pop(bubble.key, None)
+            else:
+                self.live_since.pop(bubble.key, None)
+            result.append(bubble)
+        return result
 
     def absorb(self, source: str, destination: str, merged: str, now: float):
         """Animate `source` flowing into `destination`, which becomes `merged`."""
@@ -498,8 +526,8 @@ class Scene:
 
     def float_offset(self, body: Body) -> tuple[float, float]:
         t, still = self.time, body.still.value
-        return (1.6 * math.sin(t * 0.83 + body.phase) * still,
-                2.4 * math.sin(t * 1.07 + body.phase * 1.7) * still)
+        return (1.2 * math.sin(t * 0.7 + body.phase) * still,
+                1.8 * math.sin(t * 0.9 + body.phase * 1.7) * still)
 
     # ----- drawing ---------------------------------------------------------
     def render(self, scale: float) -> Image.Image:
@@ -616,13 +644,15 @@ class Scene:
     def _bubble(self, frame, m: BubbleModel, x, y, r, scale, alpha, label=True, expanded=False):
         base = bubble(m.title, m.letter, m.live, m.focus, round(m.radius * scale), scale)
         factor = r / m.radius
-        if abs(factor - 1) > 0.01:
+        # Spring overshoot hovers around 1.0; switching between the crisp sprite and a
+        # resampled one at that point flickers, so only resize clearly scaled bubbles.
+        if abs(factor - 1) > 0.025:
             size = max(2, round(base.width * factor))
             base = base.resize((size, size), Image.BILINEAR)
         blit(frame, faded(base, alpha), x, y)
         if label and alpha > 0.3:
             text = m.detail if expanded and m.detail and m.detail != m.title else m.doing
-            tag = caption(text, m.letter if m.live else "", round(r * 2 + 40), expanded, scale)
+            tag = caption(text, m.letter if m.live else "", round(m.radius * 2 + CAPTION_SPARE), expanded, scale)
             blit(frame, faded(tag, alpha * (1 if m.focus or expanded else 0.75)), x, y + (r + 4) * scale + tag.height / 2)
 
 
