@@ -89,9 +89,22 @@ class QuotaTests(unittest.TestCase):
         self.assertIn("not available", value.error)
 
     def test_gemini_label_and_window(self):
-        value = quota_sources.get_gemini_quota()
-        self.assertEqual(value.window_minutes, 300)
-        self.assertIn("5 小时", value.label)
+        gemini = {"name": "Gemini Models", "buckets": [{"id": "gemini-5h", "remaining_fraction": 0.9}]}
+        argon = {"name": "Argon", "buckets": [{"id": "argon-weekly", "remaining_fraction": 0.75}]}
+        claude = {"name": "Claude/GPT Models", "buckets": [{"id": "claude-gpt-5h", "remaining_fraction": 0.8}]}
+        for groups, minutes, label, keys in (
+            ([gemini], 300, "5 小时", ["gemini"]),
+            ([gemini, claude, argon], 10080, "Argon", ["argon", "claude_gpt", "gemini"]),
+        ):
+            with self.subTest(pools=keys):
+                parsed = parse_agy_usage_json({"status": "SUCCESS", "command": {"data": {"groups": groups}}})
+                with patch.object(quota_sources, "run_agy_usage", return_value=parsed):
+                    value = quota_sources.get_gemini_quota()
+                self.assertIsNone(value.error)
+                self.assertEqual(value.window_minutes, minutes)
+                self.assertIn(label, value.label)
+                self.assertEqual([pool["key"] for pool in value.pools], keys)
+                self.assertEqual(value.remaining_percent, 90 if len(keys) == 1 else 75)
 
     def test_failure_preserves_old_value_and_marks_stale(self):
         old = self.sample(42)
