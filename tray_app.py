@@ -11,13 +11,13 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pystray
 from PIL import Image
 
 import agent_panel
 import agent_tasks
-from detail_card import CardModel
 from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
 from icon_art import color_for, live_icon, quota_icon  # noqa: F401  (color_for re-exported)
@@ -82,6 +82,32 @@ def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, r
     if performance.get("active_sessions", 0) and performance.get("display_tps") is not None:
         return make_tps_icon(performance, letter, reset_hint)
     return make_provider_icon(snapshot, letter, reset_hint)
+
+
+def has_panel(provider: str, snapshot: QuotaSnapshot | None) -> bool:
+    """Every quota source gets the bubble panel except Claude without a plan."""
+    if provider != "claude" or snapshot is None:
+        return True
+    return not (snapshot.display_remaining is None and "订阅" in (snapshot.error or ""))
+
+
+def reset_hint(timestamp: int | None) -> str:
+    if not timestamp:
+        return ""
+    countdown = reset_countdown(timestamp)
+    return countdown if countdown == "已到重置时间" else f"{countdown}后重置"
+
+
+def schedule_when(chip: dict, now: float) -> str:
+    if chip.get("next_at") and chip["next_at"] > now:
+        moment, prefix = chip["next_at"], "下次"
+    elif chip.get("last_at"):
+        moment, prefix = chip["last_at"], "上次"
+    else:
+        return "待运行"
+    stamp = datetime.fromtimestamp(moment)
+    same_day = stamp.date() == datetime.fromtimestamp(now).date()
+    return f"{prefix} " + stamp.strftime("%H:%M" if same_day else "%m-%d %H:%M").lstrip("0")
 
 
 def provider_letter(provider: str) -> str:
@@ -305,115 +331,18 @@ class QuotaTray:
             return f"按近期速度可用到到期，预计剩余 {share:.0f}%", "ok"
         return f"日均消耗 {mimo_usage.credits_text(view.pace_daily)}", "ok"
 
-    def mimo_card(self, snapshot: QuotaSnapshot, data: dict, letter: str) -> CardModel:
-        view = mimo_tracker().view()
-        now = time.time()
-        live = data.get("active_sessions", 0) > 0
-        tps = data.get("display_tps")
-        if live:
-            status, tone = ("生成中" + (f" · {tps:.0f} tok/s" if tps is not None else "")), "live"
-        elif snapshot.stale:
-            status, tone = "旧数据", "stale"
-        elif view.remaining is None:
-            status, tone = ("未登录" if view.error and "未登录" in view.error else "读取失败"), "error"
-        else:
-            status, tone = "空闲", "idle"
-        period = window_label(snapshot.window_minutes) or "年度"
-        bars = []
-        if snapshot.remaining_percent is not None:
-            elapsed = f"（时间已过 {view.time_percent:.0f}%）" if view.time_percent is not None else ""
-            bars.append((f"{period}额度{elapsed}", snapshot.remaining_percent))
-        binding = f"{period}额度"
-        used = snapshot.used_percent
-        forecast_text, forecast_tone = self.mimo_forecast()
-        metrics = (
-            ("剩余 Credits", mimo_usage.credits_text(view.remaining)),
-            ("已用 Credits", mimo_usage.credits_text(view.used)),
-            ("今日已用", mimo_usage.credits_text(view.today_used)),
-            ("日均消耗", mimo_usage.credits_text(view.pace_daily)),
-        )
-        footer = []
-        if view.period_end:
-            footer.append(f"到期  {datetime.fromtimestamp(view.period_end).strftime('%Y-%m-%d')} · {duration_text(view.period_end - now)}后")
-        if view.by_source:
-            footer.append("本机今日  " + " · ".join(f"{name} {mimo_usage.credits_text(value)}" for name, value in list(view.by_source.items())[:3]))
-        updated = datetime.fromtimestamp(view.anchor_at).strftime("%H:%M") if view.anchor_at else "未知"
-        plan = self.scheduler.describe("mimo", now) if self.scheduler else ""
-        source = "手动配置" if view.source == "manual" else "控制台"
-        footer.append(f"{source}更新 {updated}" + (f" · {plan}" if plan else ""))
-        notes = []
-        if view.plan_name:
-            notes.append(f"套餐：{view.plan_name}")
-        if mimo_usage.is_night(now):
-            notes.append("当前为夜间时段（0:00–8:00），按 0.8 倍扣 Credits")
-        if view.estimated:
-            notes.append("含未收录价格的 MiMo 型号，按 pro 价格估算")
-        error = view.error if view.remaining is None or snapshot.stale else None
-        return CardModel(letter, "Xiaomi MiMo", status, tone, snapshot.display_remaining, used, binding,
-            tuple(bars), forecast_text, forecast_tone, metrics, tuple(footer), tuple(notes),
-            error, text=self.hover_text("mimo"))
-
-    def hover_card(self, provider: str) -> CardModel:
-        if provider == "mimo":
-            return self.mimo_card(self.snapshots[provider], self.performance["providers"][provider], PROVIDERS[provider])
-        snapshot = self.snapshots[provider]
-        data = self.performance["providers"][provider]
-        letter = PROVIDERS[provider]
-        now = time.time()
-        live = data.get("active_sessions", 0) > 0
-        tps = data.get("display_tps")
-        if live:
-            status, tone = ("生成中" + (f" · {tps:.0f} tok/s" if tps is not None else "")), "live"
-        elif snapshot.stale:
-            status, tone = "旧数据", "stale"
-        elif snapshot.error and snapshot.remaining_percent is None:
-            status, tone = "读取失败", "error"
-        else:
-            status, tone = "空闲", "idle"
-        primary_label = window_label(snapshot.window_minutes) or "当前"
-        bars = [(f"{primary_label}窗口", snapshot.remaining_percent)]
-        binding = primary_label if snapshot.window_minutes else ""
-        used = snapshot.used_percent
-        if snapshot.secondary_remaining_percent is not None:
-            secondary_label = window_label(snapshot.secondary_window_minutes) or "第二"
-            bars.append((f"{secondary_label}窗口", snapshot.secondary_remaining_percent))
-            if snapshot.remaining_percent is None or snapshot.secondary_remaining_percent < snapshot.remaining_percent:
-                binding, used = secondary_label, snapshot.secondary_used_percent
-        forecast_text, forecast_tone = self.headline_forecast(provider)
-        value = data.get("generation_tps")
-        metrics = (
-            ("生成 TPS", "—" if value is None else f"{value:.1f} tok/s"),
-            ("60 秒输出", f"{data.get('output_tps_60', 0):.1f} tok/s"),
-            ("活动会话", str(data.get("active_sessions", 0))),
-            ("60 秒 tokens", str(data.get("output_tokens_60", 0))),
-        )
-        footer = [self.reset_summary(primary_label if snapshot.secondary_remaining_percent is not None else "", snapshot.resets_at, now)]
-        if snapshot.secondary_remaining_percent is not None:
-            footer.append(self.reset_summary(window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_resets_at, now))
-        updated = datetime.fromtimestamp(snapshot.updated_at).strftime("%H:%M:%S") if snapshot.updated_at else "未知"
-        plan = self.scheduler.describe(provider, now) if self.scheduler else ""
-        footer.append(f"更新 {updated}" + (f" · {plan}" if plan else ""))
-        notes = []
-        if value is not None:
-            basis = "、".join(data.get("basis") or [])
-            sample = datetime.fromtimestamp(data["last_sample_at"]).strftime("%H:%M:%S") if data.get("last_sample_at") else ""
-            notes.append(f"来源：{basis}" + (f"（样本 {sample}）" if sample else ""))
-        banner = ""
-        if provider == "codex" and reset_watch.ENABLED:
-            banner, reset_notes = reset_watch.card_lines(getattr(self, "reset_outlook", None), snapshot.display_remaining, now)
-            notes += reset_notes
-        return CardModel(letter, data["label"], status, tone, snapshot.display_remaining, used, binding,
-            tuple(bars), forecast_text, forecast_tone, metrics, tuple(footer), tuple(notes),
-            snapshot.error, banner, text=self.hover_text(provider))
-
     # ----- agent panel (hover thread) ---------------------------------------------
 
-    def panel(self, provider: str, keep: bool = False) -> agent_panel.PanelModel | None:
-        """Bubble panel for a working provider; None keeps the ordinary card."""
-        clusters = self.agent_groups.compose(list(self.agents))
-        working = sum(1 for c in clusters for m in c.members if m["live"] and m["provider"] == provider)
-        if not working and not keep:
+    def panel(self, provider: str) -> agent_panel.PanelModel | None:
+        """The hover panel: minimal quota header, task bubbles, scheduled tasks.
+        None for a source without a quota to show (Claude without a
+        subscription), which keeps the native tooltip instead."""
+        now = time.time()
+        if not has_panel(provider, self.snapshots.get(provider)):
             return None
+        agents = [agent for agent in self.agents if not agent.get("schedule")]
+        clusters = self.agent_groups.compose(agents)
+        working = sum(1 for agent in agents if agent["live"] and agent["provider"] == provider)
         self.clusters = {cluster.key: cluster for cluster in clusters}
         bubbles = []
         for cluster in clusters:
@@ -427,17 +356,32 @@ class QuotaTray:
                                                    tuple(m["key"] for m in cluster.members)))
         bubbles.sort(key=lambda bubble: not bubble.focus)
         snapshot = self.snapshots.get(provider)
-        quota: list[tuple[str, float | None]] = []
+        quota: list[tuple] = []
         if snapshot is not None and provider == "mimo":
-            quota.append(("套餐额度", snapshot.display_remaining))
+            quota.append(("套餐额度", snapshot.display_remaining, ""))
         elif snapshot is not None:
-            quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent))
+            quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent, reset_hint(snapshot.resets_at)))
             if snapshot.secondary_window_minutes or snapshot.secondary_remaining_percent is not None:
-                quota.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent))
+                quota.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent,
+                              reset_hint(snapshot.secondary_resets_at)))
         data = self.performance["providers"].get(provider, {})
-        status = f"{working} 个在工作" if working else "空闲"
+        if working:
+            status, tone = f"{working} 个在工作", "live"
+        elif snapshot is not None and snapshot.stale:
+            status, tone = "旧数据", "stale"
+        elif snapshot is not None and snapshot.error and snapshot.display_remaining is None:
+            status, tone = "读取失败", "error"
+        else:
+            status, tone = "空闲", "idle"
+        banner = ""
+        if provider == "codex" and reset_watch.ENABLED and snapshot is not None:
+            banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), snapshot.display_remaining, now)[0]
+        chips = tuple(agent_panel.ScheduleChip(chip["key"], chip["title"], chip["running"],
+                                               provider_letter(chip["provider"]) if chip["provider"] else "", schedule_when(chip, now))
+                      for chip in agent_tasks.schedule_chips(getattr(self.tps_monitor, "schedules", []), self.agents, now))
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
-                                      status, tuple(quota), data.get("display_tps"), tuple(bubbles[:agent_panel.MAX_BUBBLES]))
+                                      status, tuple(quota), data.get("display_tps"), tuple(bubbles[:agent_panel.MAX_BUBBLES]),
+                                      tone, banner, chips)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
@@ -979,7 +923,7 @@ class QuotaTray:
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
         if reset_watch.ENABLED and "codex" in PROVIDERS:
             threading.Thread(target=self.reset_loop, name="codex-reset-watch", daemon=True).start()
-        hover = HoverDetails(self.icons, self.hover_card, self.stop_event, agents=self)
+        hover = HoverDetails(self.icons, self.hover_text, self.stop_event, agents=self)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
         ready = [threading.Event() for _ in self.slots]
 
@@ -1068,17 +1012,21 @@ def check_agents(destination: Path) -> int:
     monitor.poll()
     time.sleep(1)
     tray.performance = monitor.poll()
+    tray.tps_monitor = monitor
+    monitor.last_slow_discovery = 0
+    monitor.discover(time.time())          # schedules are read with the slow discovery
     tray.agents = monitor.agents(time.time())
     tray.agent_groups = agent_tasks.AgentGroups()
     tray.summarizer = agent_tasks.Summarizer(agent_tasks.summary_config())
     tray.clusters = {}
-    clusters = tray.agent_groups.compose(tray.agents)
+    clusters = tray.agent_groups.compose([agent for agent in tray.agents if not agent.get("schedule")])
     for cluster in clusters:
         tray.summarizer.lookup(cluster)
     deadline = time.time() + 15
     while tray.summarizer.pending and time.time() < deadline:
         time.sleep(0.2)
-    report = {"summarizer": bool(tray.summarizer.enabled), "agents": [
+    report = {"summarizer": bool(tray.summarizer.enabled), "schedules": monitor.schedules,
+              "schedule_chips": agent_tasks.schedule_chips(monitor.schedules, tray.agents, time.time()), "agents": [
         {key: value for key, value in agent.items() if key != "request"} for agent in tray.agents], "bubbles": []}
     for cluster in clusters:
         title, doing, detail = agent_tasks.describe(cluster, tray.summarizer.lookup(cluster)[0])
@@ -1087,7 +1035,7 @@ def check_agents(destination: Path) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     provider = next((m["provider"] for m in tray.agents if m["live"] and m["provider"] in PROVIDERS), next(iter(PROVIDERS)))
-    model = tray.panel(provider, keep=True)
+    model = tray.panel(provider)
     scene = agent_panel.Scene()
     scene.set_model(model, 0.0)
     for index in range(120):
@@ -1108,7 +1056,10 @@ def main() -> int:
         tray.snapshots = {provider: cached.get(provider) or placeholder(provider) for provider in PROVIDERS}
         tray.performance = json.loads(PERFORMANCE_PATH.read_text(encoding="utf-8"))
         tray.history = QuotaHistory()
-        return check_hover_runtime(tray.hover_card("codex"), Path(sys.argv[2]).resolve())
+        tray.agents, tray.agent_groups, tray.clusters = [], agent_tasks.AgentGroups(), {}
+        tray.summarizer = agent_tasks.Summarizer(None)
+        tray.tps_monitor = SimpleNamespace(schedules=[])
+        return check_hover_runtime(tray.panel(next(iter(PROVIDERS))), Path(sys.argv[2]).resolve())
     if len(sys.argv) == 3 and sys.argv[1] == "--check-agents":
         return check_agents(Path(sys.argv[2]).resolve())
     if len(sys.argv) == 3 and sys.argv[1] == "--check-tps":

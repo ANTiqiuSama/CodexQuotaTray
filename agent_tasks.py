@@ -216,6 +216,9 @@ class Note:
     active_at: float = 0.0
     buffer: str = ""
     working: bool = False    # full task lifetime, including tools between output chunks
+    first: str = ""          # first substantive request: what a scheduled run is started with
+    started: float = 0.0
+    origin: str = ""         # launcher markers (originator, entrypoint, thread source)
 
 
 class AgentNotes:
@@ -231,6 +234,8 @@ class AgentNotes:
         cleaned = clean(text)
         if cleaned:
             note = self.note(key)
+            if not note.first:
+                note.first, note.started = cleaned, moment or note.started
             note.prompt, note.request = cleaned, re.sub(r"\s+", " ", str(text)).strip()[:600]
             note.action, note.action_at = "", moment or note.action_at
         if moment:
@@ -247,8 +252,10 @@ class AgentNotes:
         note = self.note(key)
         note.active_at = max(note.active_at, moment)
 
-    def describe(self, key: str, *, title: str = "", cwd: str = "", parent: str = "", role: str = ""):
+    def describe(self, key: str, *, title: str = "", cwd: str = "", parent: str = "", role: str = "", origin: str = ""):
         note = self.note(key)
+        if origin and origin not in note.origin:
+            note.origin = (note.origin + " " + origin)[-400:]
         cleaned = clean(title) if title else ""
         note.title = cleaned or note.title
         note.cwd = cwd or note.cwd
@@ -265,8 +272,11 @@ class AgentNotes:
             if moment:
                 self.touch(key, moment)
         if kind == "session_meta":
+            markers = [str(payload.get("originator") or ""), json.dumps(payload.get("source") or "", ensure_ascii=False)]
+            markers += [f"{name}={value}" for name, value in payload.items() if SCHEDULE_MARK.search(str(name))]
             self.describe(key, cwd=str(payload.get("cwd") or ""), parent=str(_find(payload.get("source"), "parent_thread_id") or ""),
-                          role=str(_find(payload, "agent_nickname") or _find(payload, "agent_role") or ""))
+                          role=str(_find(payload, "agent_nickname") or _find(payload, "agent_role") or ""),
+                          origin=" ".join(marker for marker in markers if marker and marker != '""')[:300])
         elif kind == "turn_context":
             self.describe(key, cwd=str(payload.get("cwd") or ""))
         elif kind == "event_msg" and payload.get("type") == "user_message":
@@ -297,7 +307,7 @@ class AgentNotes:
             return
         if record.get("type") not in ("user", "assistant"):
             return
-        self.describe(key, cwd=str(record.get("cwd") or ""), parent=parent)
+        self.describe(key, cwd=str(record.get("cwd") or ""), parent=parent, origin=str(record.get("entrypoint") or ""))
         content = (record.get("message") or {}).get("content")
         if record.get("type") == "user":
             if record.get("isMeta"):
@@ -346,9 +356,20 @@ class AgentNotes:
             if key not in keep and note.active_at < now - 2 * 86400:
                 self.notes.pop(key, None)
 
-    def export(self, activity: dict, context: dict, rates: dict, now: float, provider_of=lambda model: "other") -> list[dict]:
-        """Agents that are working or finished within RECENT_SECONDS."""
+    def recurring(self) -> dict[str, float]:
+        """Requests that started separate sessions at clearly different times."""
+        runs: dict[str, list[float]] = {}
+        for note in self.notes.values():
+            if note.first and note.started and not note.parent:
+                runs.setdefault(note.first, []).append(note.started)
+        return {prompt: max(starts) for prompt, starts in runs.items() if len(starts) > 1 and max(starts) - min(starts) >= RECUR_SPREAD}
+
+    def export(self, activity: dict, context: dict, rates: dict, now: float, provider_of=lambda model: "other",
+               schedules: list | None = None) -> list[dict]:
+        """Agents that are working or finished within RECENT_SECONDS. Scheduled
+        runs are flagged with their schedule and never linger once finished."""
         result = []
+        schedules = schedules or []
         keys = set(activity) | {key for key, note in self.notes.items() if note.active_at > now - RECENT_SECONDS}
         for key in keys:
             note = self.notes.get(key) or Note(key)
@@ -372,15 +393,148 @@ class AgentNotes:
             if provider == "other" and source == "Claude Code":
                 provider = "claude"
             action = note.action if note.action and note.action_at >= note.active_at - 120 else ""
+            schedule = match_schedule(note, schedules)
+            if schedule and not live:
+                continue
             result.append({
                 "key": key, "provider": provider, "source": source, "model": str(info.get("model") or ""),
                 "title": note.prompt or note.title or "", "thread_title": note.title, "request": note.request or note.title,
                 "doing": action if live else "刚完成", "live": live, "at": note.active_at,
                 "parent": note.parent, "role": note.role, "folder": _basename(note.cwd) if note.cwd else "",
-                "tps": rates.get(key),
+                "tps": rates.get(key), "schedule": schedule, "origin": note.origin,
             })
         result.sort(key=lambda item: (not item["live"], -item["at"]))
         return result
+
+
+# ----- scheduled tasks ----------------------------------------------------------
+
+SCHEDULE_MARK = re.compile(r"automation|schedul|cron|heartbeat|定时", re.I)
+RECUR_SPREAD = 1800        # Same request starting sessions this far apart = a recurring job.
+
+
+def _same_task(first: str, other: str) -> bool:
+    if not first or not other:
+        return False
+    if first == other:
+        return True
+    shorter, longer = sorted((first, other), key=len)
+    return len(shorter) >= 8 and shorter in longer
+
+
+def match_schedule(note: Note, schedules: list) -> str:
+    """Key of the schedule this session runs for, or ""."""
+    for schedule in schedules:
+        if schedule.get("session") == note.key or _same_task(note.first, schedule.get("prompt", "")):
+            return schedule["key"]
+    if note.origin and SCHEDULE_MARK.search(note.origin):
+        return "origin:" + (note.first or note.title or note.key)
+    return ""
+
+
+def _pick(row: dict, *names: str):
+    lowered = {str(key).lower(): value for key, value in row.items()}
+    for name in names:
+        for key, value in lowered.items():
+            if name in key and value not in (None, ""):
+                return value
+    return None
+
+
+def _frontmatter(text: str) -> tuple[dict, str]:
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, flags=re.S)
+    if not match:
+        return {}, text
+    fields = {}
+    for line in match.group(1).splitlines():
+        if ":" in line:
+            name, value = line.split(":", 1)
+            fields[name.strip().lower()] = value.strip().strip("'\"")
+    return fields, match.group(2)
+
+
+def _definition(row: dict, source: str, fallback: str) -> dict | None:
+    prompt = clean(str(_pick(row, "prompt", "instruction", "message", "task", "description") or ""))
+    name = str(_pick(row, "name", "title", "label") or "")
+    if not (prompt or name):
+        return None
+    if str(_pick(row, "enabled", "status", "active") or "").lower() in ("0", "false", "disabled", "paused", "deleted", "archived"):
+        return None
+    return {"key": f"{source}:{name or fallback}", "title": clean(name) or name or prompt, "prompt": prompt, "source": source,
+            "last_at": _moment(_pick(row, "last_run", "lastrun", "last_triggered", "updated")) or 0.0,
+            "next_at": _moment(_pick(row, "next_run", "nextrun", "next_trigger")) or 0.0}
+
+
+def read_schedules(codex_root: Path, claude_root: Path) -> list[dict]:
+    """Scheduled task definitions the local clients keep, best effort:
+    Codex automations (state tables or files) and Claude scheduled tasks."""
+    found: list[dict] = []
+    state = codex_root / "state_5.sqlite"
+    if state.is_file():
+        try:
+            import sqlite3
+            db = sqlite3.connect(state.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.3)
+            try:
+                tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%automation%'")]
+                for table in [name for name in tables if not re.search(r"run|log|history|event", name, re.I)][:4]:
+                    cursor = db.execute(f'SELECT * FROM "{table}" LIMIT 100')
+                    names = [column[0] for column in cursor.description]
+                    for index, row in enumerate(cursor.fetchall()):
+                        item = _definition(dict(zip(names, row)), "Codex", f"{table}{index}")
+                        if item:
+                            found.append(item)
+            finally:
+                db.close()
+        except Exception as error:   # unknown schemas must never break the panel
+            log.debug("codex automations unreadable: %s", type(error).__name__)
+    for folder, source in ((codex_root / "automations", "Codex"), (claude_root / "scheduled-tasks", "Claude")):
+        if not folder.is_dir():
+            continue
+        try:
+            paths = sorted(folder.glob("**/*"))[:200]
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                if path.suffix.lower() == ".json":
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    rows = value if isinstance(value, list) else [value]
+                elif path.suffix.lower() == ".toml":
+                    import tomllib
+                    rows = [tomllib.loads(path.read_text(encoding="utf-8"))]
+                elif path.suffix.lower() == ".md":
+                    fields, body = _frontmatter(path.read_text(encoding="utf-8"))
+                    rows = [{"name": fields.get("name") or path.parent.name, "description": fields.get("description", ""), "prompt": body[:600]}]
+                else:
+                    continue
+            except (OSError, ValueError, UnicodeDecodeError):
+                continue
+            for index, row in enumerate(rows):
+                if isinstance(row, dict):
+                    item = _definition(row, source, f"{path.stem}{index}")
+                    if item:
+                        found.append(item)
+    unique: dict[str, dict] = {}
+    for item in found:
+        unique.setdefault(item["key"], item)
+    return list(unique.values())
+
+
+def schedule_chips(schedules: list[dict], agents: list[dict], now: float) -> list[dict]:
+    """One entry per scheduled task: running now, or when it last ran."""
+    chips: dict[str, dict] = {}
+    for schedule in schedules:
+        chips[schedule["key"]] = {"key": schedule["key"], "title": schedule.get("title") or schedule.get("prompt") or "定时任务",
+                                  "running": False, "provider": "", "last_at": schedule.get("last_at") or 0.0,
+                                  "next_at": schedule.get("next_at") or 0.0}
+    for agent in agents:
+        key = agent.get("schedule")
+        if not key or not agent["live"]:
+            continue
+        chip = chips.setdefault(key, {"key": key, "title": agent.get("title") or "定时任务", "running": False,
+                                      "provider": "", "last_at": 0.0, "next_at": 0.0})
+        chip.update(running=True, provider=agent["provider"], last_at=max(chip["last_at"], agent["at"]))
+    return sorted(chips.values(), key=lambda chip: (not chip["running"], -chip["last_at"]))
 
 
 # ----- grouping ------------------------------------------------------------------

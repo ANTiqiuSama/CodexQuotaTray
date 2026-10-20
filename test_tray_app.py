@@ -8,8 +8,7 @@ from PIL import Image
 
 import tray_app
 from tray_app import PROVIDERS, QuotaTray, reset_countdown, startup_command
-from detail_card import CardModel
-from hover_details import DetailCardWindow, HoverDetails, HoverIcon, TrackingTooltip, is_window_covered, tooltip_position, wintypes
+from hover_details import HoverDetails, HoverIcon, TrackingTooltip, is_window_covered, tooltip_position, wintypes
 from refresh_scheduler import RefreshScheduler
 from quota_sources import QuotaSnapshot
 
@@ -246,15 +245,6 @@ class FeatureIntegrationTests(unittest.TestCase):
             "last_sample_at": 1792132045, "basis": ["客户端流式统计"]}}}
         return tray
 
-    def test_card_shows_binding_window_and_both_bars(self):
-        card = self.tray().hover_card("codex")
-        self.assertIsInstance(card, CardModel)
-        self.assertEqual(card.remaining, 29)
-        self.assertEqual(card.window, "每周")
-        self.assertEqual([label for label, _ in card.bars], ["5 小时窗口", "每周窗口"])
-        self.assertEqual(card.status_tone, "live")
-        self.assertIn("剩余 87%", card.as_text())
-
     def test_weekly_countdown_uses_days(self):
         with patch("tray_app.time.time", return_value=0):
             self.assertEqual(reset_countdown(5 * 86400 + 3 * 3600 + 60), "5 天 3 小时")
@@ -276,24 +266,6 @@ class FeatureIntegrationTests(unittest.TestCase):
         tray.feed_scheduler(tray.performance, 500)
         self.assertTrue(tray.wake.is_set())
         self.assertLessEqual(tray.scheduler.due["codex"], 510)
-
-    def test_steady_card_performs_no_window_calls(self):
-        card = DetailCardWindow.__new__(DetailCardWindow)
-        card.hwnd, card.visible, card.scale = 123, True, 1.0
-        card.content = "same"
-        card.image = SimpleNamespace(size=(368, 300))
-        card.position = None
-        card._work_area = Mock(return_value=(1, (0, 0, 1920, 1040)))
-        card._present = Mock()
-        with patch("hover_details.monitor_scale", return_value=1.0), \
-             patch("hover_details.is_window_covered", return_value=False), \
-             patch("hover_details.user.IsWindowVisible", return_value=True), \
-             patch("hover_details.user.SetWindowPos") as move:
-            for _ in range(20):
-                card.show("same", (1600, 1040, 1624, 1064))
-        card._present.assert_called_once()  # Initial placement only.
-        move.assert_not_called()
-
 
 class IconArtTests(unittest.TestCase):
     def test_every_state_renders_a_64px_rgba_icon(self):
@@ -418,26 +390,42 @@ class AgentPanelTests(unittest.TestCase):
         tray.agent_groups = agent_tasks.AgentGroups(Path(self.folder.name) / "groups.json")
         tray.summarizer = agent_tasks.Summarizer(None)
         tray.clusters = {}
+        tray.tps_monitor = SimpleNamespace(schedules=[{"key": "Codex:日报", "title": "日报", "prompt": "整理今日日报", "last_at": 0.0, "next_at": 0.0}])
 
-        def agent(key, provider, live=True, parent=""):
+        def agent(key, provider, live=True, parent="", schedule=""):
             return {"key": key, "provider": provider, "source": "", "model": "", "title": f"任务{key}", "thread_title": "",
-                    "request": "", "doing": "运行测试", "live": live, "at": 1.0, "parent": parent, "role": "", "folder": "", "tps": None}
-        tray.agents = [agent("g1", "grok"), agent("c1", "codex"), agent("c2", "codex", parent="c1"), agent("c3", "codex", live=False)]
+                    "request": "", "doing": "运行测试", "live": live, "at": 1.0, "parent": parent, "role": "", "folder": "",
+                    "tps": None, "schedule": schedule}
+        tray.agents = [agent("g1", "grok"), agent("c1", "codex"), agent("c2", "codex", parent="c1"), agent("c3", "codex", live=False),
+                       agent("s1", "codex", schedule="origin:巡检")]
         self.tray = tray
 
     def tearDown(self):
         self.folder.cleanup()
 
-    def test_panel_only_for_working_provider_and_focus_first(self):
-        self.assertIsNone(self.tray.panel("gemini"))
-        self.assertIsNotNone(self.tray.panel("gemini", keep=True))
+    def test_panel_for_every_provider_with_focus_first_and_schedules_apart(self):
+        idle = self.tray.panel("gemini")
+        self.assertNotEqual(idle.status_tone, "live")
+        self.assertEqual(len(idle.bubbles), 3)
         model = self.tray.panel("codex")
         self.assertEqual(model.status, "2 个在工作")
+        self.assertNotIn("s1", [key for bubble in model.bubbles for key in bubble.keys])
+        self.assertEqual([(chip.title, chip.running) for chip in model.schedules], [("任务s1", True), ("日报", False)])
+        self.assertEqual(model.schedules[1].when, "待运行")
         self.assertEqual(model.tps, 42.0)
         self.assertEqual([bubble.focus for bubble in model.bubbles], [True, True, False])
         group = next(bubble for bubble in model.bubbles if bubble.members)
         self.assertEqual(len(group.members), 2)
         self.assertTrue(model.quota)
+
+    def test_claude_without_subscription_keeps_the_tooltip(self):
+        free = tray_app.placeholder("claude")
+        free.error, free.remaining_percent = "未找到订阅额度（当前 Claude 账号无订阅）", None
+        self.assertFalse(tray_app.has_panel("claude", free))
+        self.assertTrue(tray_app.has_panel("grok", free))
+        self.assertTrue(tray_app.has_panel("claude", tray_app.placeholder("claude")))
+        self.tray.snapshots["claude"] = free
+        self.assertIsNone(self.tray.panel("claude"))
 
     def test_merge_and_split_through_clusters(self):
         model = self.tray.panel("codex")

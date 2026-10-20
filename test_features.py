@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import quota_sources
-from detail_card import CardModel, render_card, text_card
 from forecast import QuotaHistory, Sample, current_window, duration_text, forecast
 from refresh_scheduler import ACTIVE, IDLE, RETRY, SETTLE, RefreshScheduler
 
@@ -260,39 +259,6 @@ class QuotaParsingTests(unittest.TestCase):
         self.assertEqual(result["grok"].remaining_percent, 70)
         self.assertTrue(result["grok"].stale)
         self.assertEqual(result["codex"].remaining_percent, 90)
-
-
-class CardTests(unittest.TestCase):
-    def model(self, **changes):
-        base = dict(letter="C", title="GPT / Codex", status="生成中 · 58 tok/s", status_tone="live",
-                    remaining=64, used=36, window="每周", bars=(("5 小时窗口", 87.0), ("每周窗口", 64.0)),
-                    forecast_text="按当前速度约 2 小时后用完，早于重置 1 天", forecast_tone="warn",
-                    metrics=(("生成 TPS", "58.5 tok/s"), ("60 秒输出", "12.0 tok/s")),
-                    footer=("重置 10-16 18:00 · 2 小时后",), notes=("来源：客户端流式统计",), error=None, text="plain")
-        base.update(changes)
-        return CardModel(**base)
-
-    def test_card_renders_at_any_dpi_with_shadow_margin(self):
-        small, large = render_card(self.model(), 1.0), render_card(self.model(), 2.0)
-        self.assertEqual(small.mode, "RGBA")
-        self.assertAlmostEqual(large.width / small.width, 2.0, delta=0.02)
-        self.assertEqual(small.getpixel((0, 0))[3], 0)  # Transparent corner.
-        self.assertGreater(small.getpixel((small.width // 2, small.height // 2))[3], 200)
-
-    def test_card_grows_with_content_and_long_text_wraps(self):
-        short = render_card(self.model(error=None), 1.0)
-        long = render_card(self.model(error="读取失败：" + "很长的错误信息" * 12), 1.0)
-        self.assertEqual(short.width, long.width)
-        self.assertGreater(long.height, short.height + 30)
-
-    def test_unknown_and_text_cards_render(self):
-        render_card(self.model(remaining=None, used=None, bars=(("5 小时窗口", None),)), 1.25)
-        card = text_card("Title\nline")
-        self.assertEqual(card.as_text(), "Title\nline")
-        render_card(card, 1.0)
-
-    def test_equality_ignores_fallback_text(self):
-        self.assertEqual(self.model(text="a"), self.model(text="b"))
 
 
 if __name__ == "__main__":

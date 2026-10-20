@@ -25,7 +25,7 @@ from typing import Any
 import psutil
 
 import providers
-from agent_tasks import AgentNotes
+from agent_tasks import AgentNotes, RECUR_SPREAD, clean as clean_request, read_schedules
 
 
 PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray/performance.json"
@@ -250,7 +250,8 @@ class TpsMonitor:
         self.usage_versions: dict[Path, tuple[int, int]] = {}
         self.notes = AgentNotes()          # what each agent is doing; memory only
         self.thread_columns: set[str] | None = None
-        self.titles_checked: dict[Path, float] = {}
+        self.schedules: list[dict[str, Any]] = []       # scheduled task definitions + recurring requests
+        self.codex_recurring: dict[str, float] = {}
 
     def add(self, observation: Observation, now: float):
         if observation.identity in self.seen or not now - 86400 <= observation.ended_at <= now + 5:
@@ -330,8 +331,35 @@ class TpsMonitor:
             # single most expensive thing this app did while idle.
             self.software = running_software()
             self._forget_idle(now)
+            self._refresh_schedules(state, now)
             self.last_slow_discovery = now
         self.last_discovery = now
+
+    def _refresh_schedules(self, state: Path, now: float):
+        if state.is_file():
+            try:
+                with readonly_db(state) as db:
+                    columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+                    text = [name for name in ("first_user_message", "title") if name in columns]
+                    if text and "created_at" in columns:
+                        rows = db.execute(f"SELECT {','.join(text)},created_at FROM threads ORDER BY created_at DESC LIMIT 2000").fetchall()
+                        runs: dict[str, list[float]] = {}
+                        for row in rows:
+                            prompt = clean_request(next((str(value) for value in row[:-1] if value), ""))
+                            started = timestamp(row[-1])
+                            if prompt and started and started > now - 7 * 86400:
+                                runs.setdefault(prompt, []).append(started)
+                        self.codex_recurring = {prompt: max(starts) for prompt, starts in runs.items()
+                                                if len(starts) > 1 and max(starts) - min(starts) >= RECUR_SPREAD}
+            except sqlite3.Error:
+                pass
+        recurring = {**self.codex_recurring, **self.notes.recurring()}
+        schedules = read_schedules(self.codex_root, self.claude_root)
+        known = [item["prompt"] for item in schedules]
+        for prompt, last in recurring.items():
+            if prompt not in known:
+                schedules.append({"key": "recur:" + prompt, "title": prompt, "prompt": prompt, "source": "重复运行", "last_at": last, "next_at": 0.0})
+        self.schedules = schedules
 
     def _codex_titles(self, state: Path, now: float):
         """Thread title, folder and spawning parent of live Codex threads."""
@@ -359,7 +387,11 @@ class TpsMonitor:
             parent = _find_text(value.get("source"), "parent_thread_id")
             self.notes.describe(row[0], title=str(value.get("title") or value.get("first_user_message") or ""),
                                 cwd=str(value.get("cwd") or ""), parent=parent,
-                                role=str(value.get("agent_nickname") or value.get("agent_role") or ""))
+                                role=str(value.get("agent_nickname") or value.get("agent_role") or ""),
+                                origin=str(value.get("source") or "")[:200])
+            note = self.notes.note(row[0])
+            if not note.first:
+                note.first = clean_request(str(value.get("first_user_message") or value.get("title") or ""))
 
     def _discover_claude(self, now: float):
         """Claude Code transcripts: ~/.claude/projects/<project>/<session>.jsonl
@@ -973,7 +1005,7 @@ class TpsMonitor:
                 break
             if event.native_tps is not None:
                 rates.setdefault(event.session, event.native_tps)
-        return self.notes.export(self.activity, self.context, rates, now, provider_for)
+        return self.notes.export(self.activity, self.context, rates, now, provider_for, self.schedules)
 
     def snapshot(self, now: float) -> dict[str, Any]:
         # The installed Codex bridge emits a second copy of agy's usage. Only
