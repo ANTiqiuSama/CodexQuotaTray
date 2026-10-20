@@ -224,6 +224,26 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(parsed["used_percent"], 37.5)
         self.assertEqual(parsed["resets_at"], 1790143200)
 
+    def test_agy_three_pools_ring_prefers_argon_then_claude_gpt_then_gemini(self):
+        def payload(*groups):
+            return {"status": "SUCCESS", "command": {"data": {"groups": list(groups)}}}
+        gemini = {"name": "Gemini Models", "buckets": [{"id": "gemini-5h", "remaining_fraction": 0.9, "reset_time": "2026-09-23T06:00:00Z"},
+                                                        {"id": "gemini-weekly", "remaining_fraction": 0.7}]}
+        claude = {"name": "Claude and GPT Models", "buckets": [{"id": "claude-gpt-5h", "remaining_fraction": 0.4}]}
+        argon = {"name": "Argon", "buckets": [{"id": "argon-5h", "remaining_fraction": 0.25, "reset_time": "2026-09-23T07:00:00Z"}]}
+        parsed = parse_agy_usage_json(payload(gemini, claude, argon))
+        self.assertEqual([pool["key"] for pool in parsed["pools"]], ["argon", "claude_gpt", "gemini"])
+        self.assertEqual((parsed["pool"], parsed["remaining_percent"], parsed["window_minutes"]), ("Argon", 25.0, 300))
+        self.assertEqual(parsed["pools"][2]["remaining_percent"], 70.0)          # binding weekly bucket
+        self.assertEqual(parsed["pools"][2]["window_minutes"], 10080)
+        parsed = parse_agy_usage_json(payload(gemini, claude))
+        self.assertEqual((parsed["pool"], parsed["remaining_percent"]), ("Claude/GPT", 40.0))
+        # Buckets for several families inside one group are split by their own ids.
+        mixed = {"name": "Models", "buckets": [{"id": "gemini-5h", "remaining_fraction": 0.5}, {"id": "gpt-oss-5h", "remaining_fraction": 0.6}]}
+        self.assertEqual([p["key"] for p in parse_agy_usage_json(payload(mixed))["pools"]], ["claude_gpt", "gemini"])
+        with self.assertRaises(ValueError):
+            parse_agy_usage_json(payload())
+
     def test_cached_snapshots_are_marked_stale(self):
         original = quota_sources.CACHE_PATH
         temporary = Path(original).with_name("state-test.json")

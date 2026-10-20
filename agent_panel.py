@@ -84,7 +84,7 @@ class PanelModel:
         """Static part of the panel (cached background). Quota figures, bars and
         TPS are animated per frame, so only their labels and reset texts are here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:2]), self.banner,
+                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]), self.banner,
                 tuple((chip.key, chip.title, chip.running, chip.letter, chip.when) for chip in self.schedules),
                 not self.bubbles)
 
@@ -278,7 +278,7 @@ class Scene:
         self.model = model
         if first:
             self.opened = now
-        values = [item[1] for item in model.quota[:2]]
+        values = [item[1] for item in model.quota[:3]]
         if len(self.meters) != len(values):
             self.meters = [Spring(0.0, 90.0, 19.0) for _ in values]
         for spring, value in zip(self.meters, values):
@@ -517,7 +517,7 @@ class Scene:
         ping on the title dot while agents work, drifting shells when idle."""
         draw = ImageDraw.Draw(frame)
         columns = meter_columns(len(self.meters))
-        for (x, end), spring, item in zip(columns, self.meters, model.quota[:2]):
+        for (x, end), spring, item in zip(columns, self.meters, model.quota[:3]):
             value = item[1]
             shade = TEXT if value is None or value >= 50 else ring_color(value, model.letter)
             shown = None if value is None else spring.value

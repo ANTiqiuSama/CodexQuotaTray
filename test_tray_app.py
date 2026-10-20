@@ -1,5 +1,6 @@
 import threading
 from types import SimpleNamespace
+import time
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -417,6 +418,20 @@ class AgentPanelTests(unittest.TestCase):
         group = next(bubble for bubble in model.bubbles if bubble.members)
         self.assertEqual(len(group.members), 2)
         self.assertTrue(model.quota)
+
+    def test_gemini_pools_fill_the_panel_header(self):
+        snapshot = tray_app.placeholder("gemini")
+        snapshot.error, snapshot.remaining_percent, snapshot.used_percent = None, 25.0, 75.0
+        snapshot.pools = [{"key": "argon", "label": "Argon", "remaining_percent": 25.0, "resets_at": int(time.time()) + 3600},
+                          {"key": "claude_gpt", "label": "Claude/GPT", "remaining_percent": 40.0, "resets_at": None},
+                          {"key": "gemini", "label": "Gemini", "remaining_percent": 90.0, "resets_at": int(time.time()) + 3 * 86400}]
+        self.tray.snapshots["gemini"] = snapshot
+        model = self.tray.panel("gemini")
+        self.assertEqual([item[:2] for item in model.quota], [("Argon", 25.0), ("Claude/GPT", 40.0), ("Gemini", 90.0)])
+        self.assertTrue(model.quota[0][2].endswith(" 重置") and ":" in model.quota[0][2])
+        self.assertTrue(model.quota[2][2].startswith("周"))
+        self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
+        self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
 
     def test_claude_without_subscription_keeps_the_tooltip(self):
         free = tray_app.placeholder("claude")

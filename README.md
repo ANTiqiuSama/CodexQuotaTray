@@ -30,7 +30,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 | --- | --- | --- | --- | --- |
 | C | GPT / Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
 | G | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
-| M | Gemini / Antigravity | `agy --print /usage --output-format json`，读取 `gemini-5h` 桶 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
+| M | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），圆环优先显示 Argon，其次 Claude/GPT，最后 Gemini | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
 | A | Claude Code，可选 | 临时 Claude Code 会话执行 `/usage`，解析当前会话与每周订阅窗口 | 读取本地会话的 `message.usage.output_tokens` | 解析、去重与错误路径已有测试；真实订阅账号额度尚缺端到端验收；免费桌面端额度未接入 |
 | X | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
 
@@ -131,7 +131,11 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 Gemini TPS = 输出 token 数 / 回复步骤创建至完成的时间（含首字延迟）
 ```
 
-数据库被 Antigravity 锁定时读取其临时副本。经 Codex 桥接使用 Gemini 时，同样采用 Codex 客户端的流式统计。
+数据库被 Antigravity 锁定时读取其临时副本。
+
+Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。M 图标圆环、排序、预测与通知跟随优先级最高的池（Argon > Claude/GPT > Gemini）；任务面板顶部并列显示各池剩余与重置时间，右键“额度详情”逐行列出。
+
+Gemini 气泡的任务名来自会话数据库中用户消息步骤（step_type 14）的文字，桌面端还会读取 `~/.gemini/antigravity/brain/<会话>/task.md` 的标题；若客户端版本的步骤编号不同，可用 `CODEX_QUOTA_AGY_USER_STEPS=14,…` 指定。`--check-gemini-tps` 的 `user_steps`、`step_columns` 只报告字数与列名，便于核对。经 Codex 桥接使用 Gemini 时，同样采用 Codex 客户端的流式统计。
 
 **Claude 模型的 Claude Code** 当前没有可核验的原生生成 TPS，界面保留未知值，只展示可读到的输出计数和活动状态。
 

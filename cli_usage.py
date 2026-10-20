@@ -252,27 +252,91 @@ def parse_grok_usage(text: str) -> dict[str, Any]:
     }
 
 
-def parse_agy_usage_json(payload: dict[str, Any]) -> dict[str, Any]:
-    groups = payload.get("command", {}).get("data", {}).get("groups", [])
-    for group in groups:
-        if group.get("name") != "Gemini Models":
+# Antigravity reports separate quota pools; the tray ring shows the first one
+# present in this order. Matched against group name + bucket id/name.
+AGY_POOLS = (
+    ("argon", "Argon", ("argon",)),
+    ("claude_gpt", "Claude/GPT", ("claude", "gpt", "anthropic", "openai")),
+    ("gemini", "Gemini", ("gemini",)),
+)
+
+
+def _bucket_window(text: str) -> int | None:
+    text = text.lower()
+    match = re.search(r"(\d+)\s*h(?:our)?s?\b", text)
+    if match:
+        return int(match.group(1)) * 60
+    if "week" in text:
+        return 10080
+    if "day" in text or "daily" in text:
+        return 1440
+    if "month" in text:
+        return 43200
+    return None
+
+
+def _bucket_reset(value) -> int | None:
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value / 1000 if value > 1e11 else value)
+    return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+
+
+def _pool_of(text: str) -> tuple[str, str]:
+    lower = text.lower()
+    for key, label, words in AGY_POOLS:
+        if any(word in lower for word in words):
+            return key, label
+    return "", ""
+
+
+def parse_agy_pools(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every quota pool in `agy /usage --output-format json`, in display
+    priority (Argon, Claude/GPT, Gemini, then unrecognised groups). Each pool
+    takes its binding bucket: whichever window has the least left."""
+    data = payload.get("command", {}).get("data", {}) if isinstance(payload.get("command"), dict) else {}
+    pools: dict[str, dict[str, Any]] = {}
+    for group in data.get("groups", []) or []:
+        if not isinstance(group, dict):
             continue
-        for bucket in group.get("buckets", []):
-            if bucket.get("id") != "gemini-5h":
+        group_name = str(group.get("name") or group.get("title") or group.get("id") or "")
+        for bucket in group.get("buckets", []) or []:
+            if not isinstance(bucket, dict) or bucket.get("remaining_fraction") is None:
                 continue
-            remaining = float(bucket["remaining_fraction"]) * 100.0
-            remaining = max(0.0, min(100.0, remaining))
-            reset_text_value = bucket.get("reset_time")
-            reset_at = None
-            if reset_text_value:
-                reset_at = int(datetime.fromisoformat(reset_text_value.replace("Z", "+00:00")).timestamp())
-            return {
-                "used_percent": max(0.0, min(100.0, 100.0 - remaining)),
-                "remaining_percent": remaining,
-                "resets_at": reset_at,
-                "window_minutes": 300,
-            }
-    raise ValueError("Agy /usage JSON 未找到 gemini-5h")
+            bucket_text = " ".join(str(bucket.get(name) or "") for name in ("id", "name", "display_name", "label", "title"))
+            # A bucket naming its own model family wins over the group it sits in.
+            key, label = _pool_of(bucket_text)
+            if not key:
+                key, label = _pool_of(group_name)
+            if not key:
+                key = label = group_name.removesuffix(" Models").strip() or str(bucket.get("id") or "其他")
+            remaining = max(0.0, min(100.0, float(bucket["remaining_fraction"]) * 100.0))
+            window = _bucket_window(bucket_text) or _bucket_window(str(bucket.get("window") or ""))
+            entry = {"key": key, "label": label, "remaining_percent": remaining, "used_percent": 100.0 - remaining,
+                     "resets_at": _bucket_reset(bucket.get("reset_time") or bucket.get("resets_at")),
+                     "window_minutes": window, "bucket": str(bucket.get("id") or "")}
+            current = pools.get(key)
+            if current is None or remaining < current["remaining_percent"] or (
+                    remaining == current["remaining_percent"] and (window or 0) < (current["window_minutes"] or 1e9)):
+                pools[key] = entry
+    order = {key: index for index, (key, _, _) in enumerate(AGY_POOLS)}
+    return sorted(pools.values(), key=lambda pool: order.get(pool["key"], len(order)))
+
+
+def parse_agy_usage_json(payload: dict[str, Any]) -> dict[str, Any]:
+    pools = parse_agy_pools(payload)
+    if not pools:
+        raise ValueError("Agy /usage JSON 未找到额度池")
+    first = pools[0]
+    return {
+        "used_percent": first["used_percent"],
+        "remaining_percent": first["remaining_percent"],
+        "resets_at": first["resets_at"],
+        "window_minutes": first["window_minutes"] or 300,
+        "pool": first["label"],
+        "pools": pools,
+    }
 
 
 def run_agy_usage(executable: str, timeout: float = 10.0) -> dict[str, Any]:

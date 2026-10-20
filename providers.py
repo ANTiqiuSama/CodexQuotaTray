@@ -126,7 +126,7 @@ SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         "gemini", "M", "Gemini（5 小时）", 300, (164, 176, 245, 255), 5 * 60, 2 * 60, 8,
         ("gui", lambda: _local_appdata() / "Programs/antigravity/Antigravity.exe"),
-        source_note="agy --print /usage（gemini-5h 桶）",
+        source_note="agy --print /usage（Argon > Claude/GPT > Gemini 额度池）",
     ),
     ProviderSpec(
         # Claude Code's /usage reports a 5-hour session and a weekly window.

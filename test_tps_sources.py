@@ -207,6 +207,34 @@ class TpsTests(unittest.TestCase):
         self.assertEqual(newest["steps"][0]["step_type"], 15)
         self.assertEqual(newest["gen_metadata"][0]["chat_model"]["19"], "gemini-3.8-flash")
 
+    def test_antigravity_conversation_gets_its_request_and_title(self):
+        path = self.make_agy_db(step_type=15)
+        db = sqlite3.connect(path)
+        db.execute("ALTER TABLE steps ADD COLUMN step BLOB")
+        prompt = "帮我把 Gemini 的额度池拆成三个并更新托盘".encode()
+        body = pb(2, pb(1, b"9f1c2d3e-4b5a-6c7d-8e9f-0a1b2c3d4e5f") + pb(3, pb(1, prompt)))
+        db.execute("INSERT INTO steps VALUES(1,14,3,?,?)", (pb(1, stamp(self.now - 5)), body))
+        db.commit()
+        db.close()
+        brain = self.home / ".gemini/antigravity/brain/a"
+        brain.mkdir(parents=True)
+        (brain / "task.md").write_text("# Task: 拆分 Gemini 额度池\n- [ ] step", encoding="utf-8")
+        self.monitor._antigravity(self.now)
+        note = self.monitor.notes.notes["a"]
+        self.assertEqual(note.request, prompt.decode())
+        self.assertEqual(note.title, "拆分 Gemini 额度池")
+        agents = self.monitor.agents(self.now)
+        agent = next(item for item in agents if item["key"] == "a")
+        self.assertEqual(agent["provider"], "gemini")
+        self.assertEqual(agent["source"], "Antigravity CLI")
+        self.assertIn("额度池", agent["title"])
+
+    def test_antigravity_request_skips_ids_and_code(self):
+        from tps_sources import antigravity_request
+        body = pb(1, b"0123456789abcdef0123456789abcdef") + pb(2, b"def f(x): return {(x)}; y = (1); z = [2]; {a}") + pb(3, b"fix the login flow please")
+        self.assertEqual(antigravity_request(body), "fix the login flow please")
+        self.assertEqual(antigravity_request(b""), "")
+
     def test_antigravity_preserves_counts_without_estimating_tps(self):
         self.make_agy_db()
         self.monitor._antigravity(self.now)

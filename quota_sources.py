@@ -36,6 +36,9 @@ class QuotaSnapshot:
     secondary_used_percent: float | None = None
     secondary_remaining_percent: float | None = None
     secondary_resets_at: int | None = None
+    # Separate model pools (Antigravity: Argon, Claude/GPT, Gemini). The
+    # primary fields above mirror the first pool, which the ring shows.
+    pools: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -235,7 +238,9 @@ def get_gemini_quota() -> QuotaSnapshot:
     executable = os.environ.get("CODEX_QUOTA_GEMINI_EXE") or shutil.which("agy") or str(Path.home() / "AppData/Local/agy/bin/agy.exe")
     try:
         parsed = run_agy_usage(executable)
-        return QuotaSnapshot("gemini", "Gemini（5 小时）", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"], parsed["resets_at"], time.time(), False, None)
+        label = f"Gemini · {parsed['pool']}" if len(parsed["pools"]) > 1 else "Gemini（5 小时）"
+        return QuotaSnapshot("gemini", label, parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
+                             parsed["resets_at"], time.time(), False, None, pools=parsed["pools"])
     except Exception as exc:
         return _unknown("gemini", "Gemini（5 小时）", 300, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
 
@@ -359,6 +364,7 @@ def load_cached_snapshots() -> dict[str, QuotaSnapshot]:
                 stale=True,
                 error=None,
                 **{name: item.get(name) for name in SECONDARY_FIELDS},
+                pools=item.get("pools") if isinstance(item.get("pools"), list) else None,
             )
             result[snapshot.provider] = snapshot
         return result
