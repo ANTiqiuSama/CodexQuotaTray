@@ -103,7 +103,7 @@ class PanelModel:
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-RESET_HEIGHT = 56           # Source name and countdown only.
+RESET_HEIGHT = 62           # Leave a clear gap between task bubbles and countdowns.
 GEAR_RADIUS = 9.0
 GEAR_HIT = 17.0
 
@@ -130,7 +130,7 @@ def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
     # Reserve the subtitle row (e.g. MiMo Credits) to keep every source the same height.
-    return FIELD_TOP + 14 + header_offset(model)
+    return FIELD_TOP + 6 + header_offset(model)
 
 
 def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
@@ -900,7 +900,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
     for (x, end), (label, reset) in zip(columns, labels):
         draw.text((px(x), px(y)), label, font=label_font, fill=MUTED_TEXT, anchor="lt")
         if daily and label == "今日用量":
-            draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
+            draw.text((px(x), px(y + 51)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
             continue
         if label != "TPS":
             draw.rounded_rectangle((px(x), px(y + 45), px(end), px(y + 49)), radius=px(2), fill=TRACK)
@@ -915,7 +915,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     if empty:
         draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
-    reset_y = top + field_h + 10
+    reset_y = top + field_h + 16
     gap = 8
     column_left = PAD - 6   # Same outer edges as the bubble field above.
     column_w = (WIDTH - 2 * column_left - 2 * gap) / 3
