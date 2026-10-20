@@ -30,7 +30,8 @@ GROUP_KEEP_SECONDS = 7 * 86400
 log = logging.getLogger(__name__)
 
 TRIVIAL = {"继续", "继续吧", "接着", "接着来", "好", "好的", "可以", "行", "嗯", "是", "对", "开始", "确认", "ok", "okay",
-           "yes", "y", "go", "go on", "continue", "proceed", "next", "sure", "thanks", "谢谢", "完成了吗", "然后呢"}
+           "yes", "y", "go", "go on", "continue", "proceed", "next", "sure", "thanks", "谢谢", "完成了吗", "然后呢",
+           "my request", "用户请求"}
 FILLER = re.compile(r"^(?:请你?|麻烦你?|帮我|帮忙|给我|你好|你能|你可以|能不能|可不可以|我想要?|我需要|我要|现在|然后|接下来|另外|那就|那么|"
                     r"please|pls|can you|could you|would you|help me|i want to|i need to|now|then|also|hey|hi)[\s,，:：、]*", re.I)
 CLAUSE = re.compile(r"[。！？!?\n；;，]+|(?<=[\u4e00-\u9fff]),")
@@ -216,6 +217,8 @@ class Note:
     active_at: float = 0.0
     buffer: str = ""
     working: bool = False    # full task lifetime, including tools between output chunks
+    schedule_id: str = ""
+    turn_origin: str = ""
     first: str = ""          # first substantive request: what a scheduled run is started with
     started: float = 0.0
     origin: str = ""         # launcher markers (originator, entrypoint, thread source)
@@ -231,9 +234,17 @@ class AgentNotes:
         return self.notes.setdefault(key, Note(key))
 
     def ask(self, key: str, text: str, moment: float | None = None):
+        note = self.note(key)
+        envelope = re.search(r"<heartbeat>.*?<automation_id>([^<]+)</automation_id>.*?</heartbeat>", str(text), re.S)
+        if envelope:
+            note.schedule_id = envelope.group(1).strip()
+            note.turn_origin = f"heartbeat:{note.schedule_id}"
+            instructions = re.search(r"<instructions>(.*?)</instructions>", str(text), re.S)
+            text = instructions.group(1) if instructions else "定时任务"
         cleaned = clean(text)
         if cleaned:
-            note = self.note(key)
+            if not envelope:
+                note.schedule_id = note.turn_origin = ""
             if not note.first:
                 note.first, note.started = cleaned, moment or note.started
             note.prompt, note.request = cleaned, re.sub(r"\s+", " ", str(text)).strip()[:600]
@@ -269,6 +280,8 @@ class AgentNotes:
         event = payload.get("type")
         if kind == "event_msg" and event in ("task_started", "task_complete", "turn_aborted", "error"):
             self.note(key).working = event == "task_started"
+            if event == "task_started":
+                self.note(key).schedule_id = self.note(key).turn_origin = ""
             if moment:
                 self.touch(key, moment)
         if kind == "session_meta":
@@ -401,7 +414,7 @@ class AgentNotes:
                 "title": note.prompt or note.title or "", "thread_title": note.title, "request": note.request or note.title,
                 "doing": action if live else "刚完成", "live": live, "at": note.active_at,
                 "parent": note.parent, "role": note.role, "folder": _basename(note.cwd) if note.cwd else "",
-                "tps": rates.get(key), "schedule": schedule, "origin": note.origin,
+                "tps": rates.get(key), "schedule": schedule, "origin": " ".join(x for x in (note.origin, note.turn_origin) if x),
             })
         result.sort(key=lambda item: (not item["live"], -item["at"]))
         return result
@@ -425,8 +438,11 @@ def _same_task(first: str, other: str) -> bool:
 def match_schedule(note: Note, schedules: list) -> str:
     """Key of the schedule this session runs for, or ""."""
     for schedule in schedules:
-        if schedule.get("session") == note.key or _same_task(note.first, schedule.get("prompt", "")):
+        if (note.schedule_id and schedule.get("id") == note.schedule_id or
+                schedule.get("session") == note.key or _same_task(note.prompt or note.first, schedule.get("prompt", ""))):
             return schedule["key"]
+    if note.schedule_id:
+        return "heartbeat:" + note.schedule_id
     if note.origin and SCHEDULE_MARK.search(note.origin):
         return "origin:" + (note.first or note.title or note.key)
     return ""
@@ -458,10 +474,11 @@ def _definition(row: dict, source: str, fallback: str) -> dict | None:
     name = str(_pick(row, "name", "title", "label") or "")
     if not (prompt or name):
         return None
-    if str(_pick(row, "enabled", "status", "active") or "").lower() in ("0", "false", "disabled", "paused", "deleted", "archived"):
+    status = _pick(row, "enabled", "status", "active")
+    if status is False or status == 0 or str(status or "").lower() in ("0", "false", "disabled", "paused", "deleted", "archived"):
         return None
-    return {"key": f"{source}:{name or fallback}", "title": clean(name) or name or prompt, "prompt": prompt, "source": source,
-            "last_at": _moment(_pick(row, "last_run", "lastrun", "last_triggered", "updated")) or 0.0,
+    return {"key": f"{source}:{name or fallback}", "id": str(row.get("id") or fallback), "title": clean(name) or name or prompt, "prompt": prompt, "source": source,
+            "last_at": _moment(_pick(row, "last_run", "lastrun", "last_triggered")) or 0.0,
             "next_at": _moment(_pick(row, "next_run", "nextrun", "next_trigger")) or 0.0}
 
 
@@ -469,8 +486,9 @@ def read_schedules(codex_root: Path, claude_root: Path) -> list[dict]:
     """Scheduled task definitions the local clients keep, best effort:
     Codex automations (state tables or files) and Claude scheduled tasks."""
     found: list[dict] = []
-    state = codex_root / "state_5.sqlite"
-    if state.is_file():
+    for state in (codex_root / "sqlite/codex-dev.db", codex_root / "state_5.sqlite"):
+        if not state.is_file():
+            continue
         try:
             import sqlite3
             db = sqlite3.connect(state.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.3)
@@ -491,7 +509,8 @@ def read_schedules(codex_root: Path, claude_root: Path) -> list[dict]:
         if not folder.is_dir():
             continue
         try:
-            paths = sorted(folder.glob("**/*"))[:200]
+            paths = (sorted(folder.glob("*/automation.toml")) + sorted(folder.glob("*/automation.json"))
+                     if source == "Codex" else sorted(folder.glob("**/*")))[:200]
         except OSError:
             continue
         for path in paths:

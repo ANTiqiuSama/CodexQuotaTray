@@ -1,6 +1,7 @@
 import io
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import time
 import unittest
@@ -99,7 +100,7 @@ class NotesTests(unittest.TestCase):
                 {"type": "event_msg", "timestamp": stamp(now - 4), "payload": {"type": "task_started"}},
                 {"type": "event_msg", "timestamp": stamp(now - 4), "payload": {"type": "user_message", "message": "继续"}},
             ]) + "\n", encoding="utf-8")
-            with sqlite3.connect(home / ".codex/state_5.sqlite") as db:
+            with closing(sqlite3.connect(home / ".codex/state_5.sqlite")) as db, db:
                 db.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, model TEXT, model_provider TEXT, updated_at INT, title TEXT, cwd TEXT)")
                 db.execute("INSERT INTO threads VALUES ('t1', ?, 'gpt-5', 'openai', 1, '整理发布说明', 'D:/proj')", (str(rollout),))
             db.close()
@@ -113,6 +114,45 @@ class NotesTests(unittest.TestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_native_codex_database_and_definition_files_ignore_memory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home=Path(folder)
+            native=home/'.codex/sqlite/codex-dev.db'
+            native.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(native)) as db, db:
+                db.execute('CREATE TABLE automations (id TEXT,name TEXT,prompt TEXT,status TEXT,last_run_at INT,next_run_at INT)')
+                db.execute("INSERT INTO automations VALUES ('watch','额度巡检','检查额度是否恢复','ACTIVE',1900000000000,1900003600000)")
+            memory=home/'.codex/automations/deleted/memory.md'
+            memory.parent.mkdir(parents=True)
+            memory.write_text('已经删除的旧任务运行笔记',encoding='utf-8')
+            found=agent_tasks.read_schedules(home/'.codex',home/'.claude')
+            self.assertEqual([x['id'] for x in found],['watch'])
+            self.assertEqual((found[0]['last_at'],found[0]['next_at']),(1900000000,1900003600))
+
+    def test_real_heartbeat_envelope_is_turn_scoped_and_never_a_bubble(self):
+        notes=AgentNotes()
+        schedules=[{'key':'Codex:额度巡检','id':'watch','title':'额度巡检','prompt':'检查额度是否恢复'}]
+        context={'thread':{'source':'Codex','model':'gpt-6.1-sol'}}
+        notes.ask('thread','修改面板动画',100)
+        notes.codex('thread',{'type':'event_msg','timestamp':stamp(110),'payload':{'type':'task_started'}})
+        text='<heartbeat><automation_id>watch</automation_id><instructions>检查额度是否恢复</instructions></heartbeat>'
+        notes.codex('thread',{'type':'response_item','timestamp':stamp(111),'payload':{
+            'type':'message','role':'user','content':[{'type':'input_text','text':text}]}})
+        active=notes.export({'thread':('codex',112,'生成中')},context,{},112,schedules=schedules)
+        self.assertEqual(active[0]['schedule'],'Codex:额度巡检')
+        self.assertIn('heartbeat:watch',active[0]['origin'])
+        self.assertTrue(agent_tasks.schedule_chips(schedules,active,112)[0]['running'])
+        self.assertEqual([a for a in active if not a['schedule']],[])
+        notes.codex('thread',{'type':'event_msg','timestamp':stamp(115),'payload':{'type':'task_complete'}})
+        finished=notes.export({},context,{},116,schedules=schedules)
+        self.assertEqual(finished,[])
+        self.assertFalse(agent_tasks.schedule_chips(schedules,finished,116)[0]['running'])
+        notes.codex('thread',{'type':'event_msg','timestamp':stamp(120),'payload':{'type':'task_started'}})
+        notes.ask('thread','手动检查气泡颜色',121)
+        manual=notes.export({'thread':('codex',121,'生成中')},context,{},122,schedules=schedules)
+        self.assertEqual(manual[0]['schedule'],'')
+        self.assertNotIn('heartbeat:',manual[0]['origin'])
+
     def test_definitions_from_claude_tasks_and_codex_automation_table(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
@@ -120,7 +160,7 @@ class ScheduleTests(unittest.TestCase):
             task.parent.mkdir(parents=True)
             task.write_text("---\nname: daily-digest\ndescription: 汇总昨日提交\n---\n汇总昨天的提交并写日报", encoding="utf-8")
             (home / ".codex").mkdir()
-            with sqlite3.connect(home / ".codex/state_5.sqlite") as db:
+            with closing(sqlite3.connect(home / ".codex/state_5.sqlite")) as db, db:
                 db.execute("CREATE TABLE automations (id TEXT, name TEXT, prompt TEXT, status TEXT, next_run_at INT)")
                 db.execute("INSERT INTO automations VALUES ('a1', '依赖巡检', '检查依赖是否有安全更新', 'ACTIVE', 1900000000)")
                 db.execute("INSERT INTO automations VALUES ('a2', '旧任务', '不再运行', 'PAUSED', 0)")
