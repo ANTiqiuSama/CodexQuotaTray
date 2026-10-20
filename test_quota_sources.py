@@ -76,6 +76,24 @@ class GrokIsolationTests(unittest.TestCase):
 
 
 class QuotaTests(unittest.TestCase):
+    def test_gemini_refresh_replaces_old_argon_pools_and_failure_does_not_reuse_them(self):
+        def read(groups):
+            parsed = parse_agy_usage_json({"command": {"data": {"groups": groups}}})
+            with patch.object(quota_sources, "run_agy_usage", return_value=parsed):
+                return quota_sources.get_gemini_quota()
+        argon = {"name": "Argon", "buckets": [{"id": "argon-weekly", "remaining_fraction": .5}]}
+        gemini = {"name": "Gemini Models", "buckets": [{"id": "gemini-5h", "remaining_fraction": .8}]}
+        third = {"name": "Claude Models", "buckets": [{"id": "3p-5h", "remaining_fraction": .6}]}
+        old = read([argon, gemini, third])
+        fresh = quota_sources.keep_last_good(read([gemini, third]), old)
+        self.assertEqual([p["key"] for p in fresh.pools], ["claude_gpt", "gemini"])
+        self.assertEqual(fresh.remaining_percent, 60)
+        failed = quota_sources.keep_last_good(quota_sources.placeholder("gemini", "读取失败"), old)
+        self.assertIsNone(failed.pools)
+        self.assertIsNone(failed.remaining_percent)
+        weekly = read([{"name": "Gemini Models", "buckets": [{"id": "gemini-weekly", "remaining_fraction": .8}]}])
+        self.assertIn("每周", weekly.label)
+
     def sample(self, remaining=40.0, stale=False, error=None):
         return quota_sources.QuotaSnapshot(
             "sample", "Sample", 300, 100 - remaining, remaining, int(time.time()) + 100,

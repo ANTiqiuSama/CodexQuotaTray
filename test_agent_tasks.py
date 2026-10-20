@@ -329,6 +329,15 @@ def panel(*bubbles):
 
 
 class SceneTests(unittest.TestCase):
+    def test_countdown_cards_precede_bubbles_and_footer_follows_them(self):
+        model = panel(bubble("a"), bubble("b"))
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0)
+        self.assertLess(agent_panel.reset_top(model) + 42, agent_panel.field_top(model) - 6)
+        self.assertGreater(agent_panel.footer_middle(model, scene.field.value), agent_panel.field_top(model) + scene.field.value)
+        for scale in (1, 1.25, 1.5):
+            self.assertIsNotNone(scene.render(scale))
+
     def test_daily_usage_switches_units_and_promotes_rounded_boundaries(self):
         cases = [(None, ("—", "")), (0, ("0", "")), (999, ("999", "")), (1000, ("1", "K")),
                  (12500, ("12.5", "K")), (999500, ("1", "M")), (1250000, ("1.25", "M")),

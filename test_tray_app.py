@@ -533,13 +533,51 @@ class AgentPanelTests(unittest.TestCase):
         snapshot.remaining_percent, snapshot.secondary_remaining_percent = 5, 80
         self.assertEqual(self.tray.upcoming_resets(now)[0].window, "5 小时")
 
-    def test_independent_pool_prioritizes_exhausted_model_pool(self):
+    def test_account_without_argon_has_opus_and_native_gemini_columns(self):
         now = time.time()
         snapshot = self.tray.snapshots["gemini"]
         snapshot.pools = [{"label": "Gemini", "remaining_percent": 99, "window_minutes": 300, "resets_at": now + 60},
                           {"label": "Claude/GPT", "remaining_percent": 0, "window_minutes": 300, "resets_at": now + 3600}]
-        item = next(item for item in self.tray.upcoming_resets(now) if item.provider == "gemini")
-        self.assertEqual(item.window, "Claude/GPT · 5 小时")
+        items = [item for item in self.tray.upcoming_resets(now) if item.provider == "gemini"]
+        self.assertEqual([item.name for item in items], ["Gemini", "Gemini · Opus"])
+        self.assertEqual(items[1].window, "Claude/GPT · 5 小时")
+        self.assertFalse(any("Argon" in item.name for item in items))
+
+    def test_account_pool_change_rebuilds_header_and_countdowns(self):
+        now = time.time()
+        snapshot = self.tray.snapshots["gemini"]
+        native = {"key": "gemini", "label": "Gemini", "remaining_percent": 90, "resets_at": now + 3600}
+        third = {"key": "claude_gpt", "label": "Claude/GPT", "remaining_percent": 50, "resets_at": now + 7200}
+        snapshot.pools = [{"key": "argon", "label": "Argon", "remaining_percent": 30, "resets_at": now + 86400}, third, native]
+        scene = agent_panel.Scene()
+        scene.set_model(self.tray.panel("gemini"), 0)
+        snapshot.pools = [third, native]
+        model = self.tray.panel("gemini")
+        self.assertNotIn("Argon", [q[0] for q in model.quota])
+        self.assertFalse(any("Argon" in item.name for item in model.upcoming_resets))
+        self.assertIn("Gemini", [item.name for item in model.upcoming_resets])
+        scene.set_model(model, 1)
+        for scale in (1, 1.25, 1.5):
+            self.assertIsNotNone(scene.render(scale))
+
+    def test_refresh_clears_only_changed_gemini_pool_history(self):
+        from forecast import QuotaHistory
+        from pathlib import Path
+        tray = self.tray
+        old = tray.snapshots["gemini"]
+        old.pools = [{"key": "argon", "window_minutes": 10080}]
+        now = time.time()
+        fresh = tray_app.placeholder("gemini")
+        fresh.pools = [{"key": "gemini", "window_minutes": 300}]
+        fresh.error, fresh.used_percent, fresh.remaining_percent, fresh.updated_at = None, 20, 80, now
+        tray.history = QuotaHistory(Path(self.folder.name) / "history.json")
+        tray.history.add("gemini", now - 3600, 10, None)
+        tray.history.add("codex", now - 3600, 10, None)
+        tray.update_ui, tray.announce_resets = Mock(), Mock()
+        with patch("tray_app.collect", return_value={"gemini": fresh}):
+            tray.refresh_providers(["gemini"])
+        self.assertEqual([sample.at for sample in tray.history.samples("gemini")], [now])
+        self.assertEqual(len(tray.history.samples("codex")), 1)
 
     def test_forecast_replaces_schedules_in_hover_footer(self):
         self.tray.headline_forecast = Mock(return_value=("按当前速度，可用到下次重置", "ok"))

@@ -103,7 +103,7 @@ class PanelModel:
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-RESET_HEIGHT = 62           # Leave a clear gap between task bubbles and countdowns.
+RESET_HEIGHT = 54           # Countdown cards above the task field, with a 12 px gap.
 GEAR_RADIUS = 9.0
 GEAR_HIT = 17.0
 
@@ -115,7 +115,7 @@ def meter_columns(count: int) -> list[tuple[float, float]]:
 
 
 def footer_middle(model, field_h: float) -> float:
-    return field_top(model) + field_h + RESET_HEIGHT + 32
+    return field_top(model) + field_h + 32
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
@@ -130,7 +130,11 @@ def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
     # Reserve the subtitle row (e.g. MiMo Credits) to keep every source the same height.
-    return FIELD_TOP + 6 + header_offset(model)
+    return FIELD_TOP + 6 + header_offset(model) + RESET_HEIGHT
+
+
+def reset_top(model: PanelModel) -> float:
+    return FIELD_TOP + header_offset(model)
 
 
 def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
@@ -160,7 +164,7 @@ def field_height(bubbles) -> float:
 
 
 def panel_height(model: PanelModel, field: float) -> float:
-    return field_top(model) + field + RESET_HEIGHT + FOOTER + 8
+    return field_top(model) + field + FOOTER + 8
 
 
 # ----- motion helpers ------------------------------------------------------------
@@ -915,7 +919,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     if empty:
         draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
-    reset_y = top + field_h + 16
+    reset_y = reset_top(model)
     gap = 8
     column_left = PAD - 6   # Same outer edges as the bubble field above.
     column_w = (WIDTH - 2 * column_left - 2 * gap) / 3

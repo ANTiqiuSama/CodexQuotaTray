@@ -155,6 +155,13 @@ class QuotaHistory:
             self.series[name] = [s for s in series if s.at >= cutoff][-KEEP_SAMPLES:]
         return True
 
+    def clear(self, provider: str) -> None:
+        """Discard an incompatible provider/pool history before recording a new scope."""
+        with self.lock:
+            for name in list(self.series):
+                if name == provider or name.startswith(provider + ":"):
+                    self.series.pop(name)
+
     def record(self, snapshot: Any) -> bool:
         """Store a fresh snapshot (stale or failed reads are ignored)."""
         if getattr(snapshot, "stale", False) or getattr(snapshot, "error", None):

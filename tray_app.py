@@ -376,9 +376,12 @@ class QuotaTray:
                 # Argon and the third-party (Opus/Claude/GPT) pool are
                 # independent limits; each may occupy a countdown column.
                 named = []
+                has_argon = any(str(p.get("key") or p.get("label") or "").lower() == "argon" for p in snapshot.pools)
                 for pool in snapshot.pools:
                     key = str(pool.get("key") or pool.get("label") or "").lower()
                     label = {"argon": "Argon", "claude_gpt": "Opus", "claude/gpt": "Opus", "opus": "Opus"}.get(key)
+                    if key == "gemini" and not has_argon:
+                        label = "Gemini"
                     if label:
                         named.append((pool, label))
                 if named:
@@ -388,7 +391,8 @@ class QuotaTray:
                             continue
                         window = (pool.get("label") or label) + " · " + (window_label(pool.get("window_minutes")) or "周期")
                         candidates.append((float(stamp), agent_panel.ResetColumn(provider, provider_letter(provider),
-                            "Gemini · " + label, window, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"),
+                            "Gemini" if label == "Gemini" else "Gemini · " + label,
+                            window, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"),
                             duration_text(stamp - now) + "后")))
                     continue
             windows = []
@@ -688,6 +692,13 @@ class QuotaTray:
             results = collect(providers, self.snapshots)
             now = time.time()
             for provider, snapshot in results.items():
+                old = self.snapshots.get(provider)
+                if provider == "gemini" and old is not None and not snapshot.error:
+                    scope = lambda item: tuple((p.get("key"), p.get("window_minutes")) for p in item.pools or [])
+                    if scope(old) != scope(snapshot):
+                        if self.history is not None:
+                            self.history.clear(provider)
+                        log.info("gemini quota pools changed: %s", [p.get("key") for p in snapshot.pools or []])
                 self.announce_resets(provider, self.snapshots.get(provider), snapshot, now)
             snapshots = dict(self.snapshots)
             snapshots.update(results)

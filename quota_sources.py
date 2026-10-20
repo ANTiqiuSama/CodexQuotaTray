@@ -240,11 +240,15 @@ def get_gemini_quota() -> QuotaSnapshot:
     executable = os.environ.get("CODEX_QUOTA_GEMINI_EXE") or shutil.which("agy") or str(Path.home() / "AppData/Local/agy/bin/agy.exe")
     try:
         parsed = run_agy_usage(executable)
-        label = f"Gemini · {parsed['pool']}" if len(parsed["pools"]) > 1 else "Gemini（5 小时）"
+        label = f"Gemini · {parsed['pool']}"
+        if parsed["pool"] == "Gemini":
+            minutes = parsed["window_minutes"]
+            period = "每周" if minutes == 10080 else f"{minutes // 60} 小时" if minutes % 60 == 0 else f"{minutes} 分钟"
+            label = f"Gemini（{period}）"
         return QuotaSnapshot("gemini", label, parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
                              parsed["resets_at"], time.time(), False, None, pools=parsed["pools"])
     except Exception as exc:
-        return _unknown("gemini", "Gemini（5 小时）", 300, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
+        return _unknown("gemini", "Gemini", None, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
 
 
 def get_claude_quota() -> QuotaSnapshot:
@@ -309,7 +313,11 @@ def _reader(provider: str):
 
 
 def keep_last_good(snapshot: QuotaSnapshot, old: QuotaSnapshot | None) -> QuotaSnapshot:
-    """A failed read keeps the last valid numbers and marks them stale."""
+    """Keep stale figures on failure, except Gemini whose CLI account may have changed."""
+    if snapshot.provider == "gemini" and snapshot.error:
+        # CLI logins can change between reads. Without an account identifier
+        # in /usage, carrying old quota across a failed read is misleading.
+        return snapshot
     if snapshot.error and old and old.used_percent is not None:
         snapshot.used_percent = old.used_percent
         snapshot.remaining_percent = old.remaining_percent

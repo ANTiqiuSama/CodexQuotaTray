@@ -15,6 +15,16 @@ HOUR = 3600
 
 
 class ForecastTests(unittest.TestCase):
+    def test_provider_history_clear_keeps_other_sources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            history = QuotaHistory(Path(folder) / "history.json")
+            for name in ("gemini", "gemini:secondary", "codex"):
+                history.add(name, 1000, 20, 9000)
+            history.clear("gemini")
+            self.assertEqual(history.samples("gemini"), [])
+            self.assertEqual(history.samples("gemini:secondary"), [])
+            self.assertEqual(len(history.samples("codex")), 1)
+
     def series(self, now, used_values, step=600, resets_at=None):
         start = now - step * (len(used_values) - 1)
         return [Sample(start + i * step, used, resets_at) for i, used in enumerate(used_values)]
