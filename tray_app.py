@@ -273,6 +273,8 @@ class QuotaTray:
         self.agents: list[dict] = []
         self.agent_groups = agent_tasks.AgentGroups()
         self.summarizer = agent_tasks.Summarizer(agent_tasks.summary_config())
+        self.settings_requested = threading.Event()
+        self.settings_ui = None
         self.clusters: dict[str, agent_tasks.Cluster] = {}
         self.last_samples: dict[str, float | None] = {}
         self.saved_signature: str | None = None
@@ -295,6 +297,8 @@ class QuotaTray:
             for provider, letter in PROVIDERS.items()
         }
         self.slots = list(self.icons.values())   # fixed tray icons; providers move between them
+        for icon in self.slots:
+            icon.settings_action = self.open_settings
 
     # ----- text and card content -------------------------------------------------
 
@@ -363,7 +367,7 @@ class QuotaTray:
     # ----- agent panel (hover thread) ---------------------------------------------
 
     def panel(self, provider: str) -> agent_panel.PanelModel | None:
-        """The hover panel: minimal quota header, task bubbles, scheduled tasks.
+        """The hover panel: quota header, task bubbles, forecast and settings.
         None for a source without a quota to show (Claude without a
         subscription), which keeps the native tooltip instead."""
         now = time.time()
@@ -413,12 +417,10 @@ class QuotaTray:
             banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), codex.display_remaining, now)[0]
             if banner and provider != "codex":
                 banner = "Codex · " + banner
-        chips = tuple(agent_panel.ScheduleChip(chip["key"], chip["title"], chip["running"],
-                                               provider_letter(chip["provider"]) if chip["provider"] else "", schedule_when(chip, now))
-                      for chip in agent_tasks.schedule_chips(getattr(self.tps_monitor, "schedules", []), self.agents, now))
+        forecast, forecast_tone = self.headline_forecast(provider)
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
-                                      tone, banner, chips)
+                                      tone, banner, forecast, forecast_tone)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
@@ -461,6 +463,7 @@ class QuotaTray:
             pystray.MenuItem(lambda _: "立即刷新", self.request_refresh),
             pystray.MenuItem("额度详情", lambda _icon, _item: self.open_details(provider)),
             pystray.MenuItem("本机全部 AI 速率", self.open_all_performance),
+            pystray.MenuItem("设置…", self.open_settings),
             pystray.MenuItem(lambda _: self.menu_quota(provider), None, enabled=False),
             pystray.MenuItem(lambda _: self.forecast_line(provider) or "预测：暂无", None, enabled=False),
             pystray.MenuItem(lambda _: self.menu_reset(provider), None, enabled=False),
@@ -949,9 +952,29 @@ class QuotaTray:
         self.restart_requested = True
         self.exit_app()
 
+    def open_settings(self, _icon=None, _item=None) -> None:
+        from settings_window import SettingsController
+        self.settings_requested.set()
+        for icon in self.icons.values():
+            icon.hover_open = False
+            icon.suppress_hover = True
+        with self.ui_lock:
+            if self.settings_ui is None:
+                self.settings_ui = SettingsController(self)
+            self.settings_ui.show()
+        log.info("settings window requested")
+
+    def apply_summary_settings(self, config: dict, enabled: bool) -> None:
+        from settings_window import save_summary
+        save_summary(config, enabled)
+        self.summarizer = agent_tasks.Summarizer(agent_tasks.summary_config())
+        log.info("agent summary settings applied: enabled=%s", self.summarizer.enabled)
+
     def exit_app(self, _icon=None, _item=None) -> None:
         self.stop_event.set()
         self.wake.set()
+        if getattr(self, "settings_ui", None):
+            self.settings_ui.close()
         for icon in self.icons.values():
             icon.stop()
 

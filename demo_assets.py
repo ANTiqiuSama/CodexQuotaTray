@@ -18,8 +18,7 @@ def demo_models() -> tuple[ap.PanelModel, ap.PanelModel]:
          bubble("b", "补齐测试", "运行测试", "C", True),
          bubble("d", "README 文档", "刚完成", "M", False)),
         "live", "24 小时内全局重置概率 72%",
-        (ap.ScheduleChip("s1", "依赖巡检", True, "C"), ap.ScheduleChip("s2", "每日日报汇总", False, "", "上次 09:00"),
-         ap.ScheduleChip("s3", "清理", False, "", "待运行")))
+        "按当前速度，可用到下次重置", "ok")
     idle = ap.PanelModel("grok", "G", "Grok", "空闲", (("2 小时", 100.0, "已到重置时间"),), None, (), "idle")
     return busy, idle
 

@@ -121,6 +121,18 @@ class HoverTests(unittest.TestCase):
             icon._on_notify(0, (37 << 16) | 0x007B)
             legacy.assert_called_once_with(0, 0x0205)
 
+    def test_context_menu_opens_settings_without_native_menu_overlay(self):
+        for version, event in ((True, (37 << 16) | 0x007B), (False, 0x0205)):
+            icon = HoverIcon("settings-test", Image.new("RGBA", (16, 16)))
+            icon._version4 = version
+            icon.settings_action = Mock()
+            with patch.object(pystray.Icon, "_on_notify") as legacy:
+                icon._on_notify(0, event)
+            icon.settings_action.assert_called_once_with()
+            legacy.assert_not_called()
+            self.assertTrue(icon.suppress_hover)
+            self.assertFalse(icon.hover_open)
+
     def test_shell_hover_events_disambiguate_shared_overflow_rectangles(self):
         icon = HoverIcon("hover-events-test", Image.new("RGBA", (16, 16)))
         icon._version4 = True
@@ -413,8 +425,8 @@ class AgentPanelTests(unittest.TestCase):
         model = self.tray.panel("codex")
         self.assertEqual(model.status, "2 个在工作")
         self.assertNotIn("s1", [key for bubble in model.bubbles for key in bubble.keys])
-        self.assertEqual([(chip.title, chip.running) for chip in model.schedules], [("任务s1", True), ("日报", False)])
-        self.assertEqual(model.schedules[1].when, "待运行")
+        self.assertFalse(hasattr(model, "schedules"))
+        self.assertIsInstance(model.forecast, str)
         self.assertEqual(model.tps, 42.0)
         self.assertEqual(sorted(bubble.focus for bubble in model.bubbles), [False, True, True])
         # Same bubbles, order and header height on every icon: the panel never changes size when switching.
@@ -439,6 +451,25 @@ class AgentPanelTests(unittest.TestCase):
         self.assertTrue(model.quota[2][2].startswith("周"))
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
+
+    def test_forecast_replaces_schedules_in_hover_footer(self):
+        self.tray.headline_forecast = Mock(return_value=("按当前速度，可用到下次重置", "ok"))
+        model = self.tray.panel("codex")
+        self.assertEqual((model.forecast, model.forecast_tone), ("按当前速度，可用到下次重置", "ok"))
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0)
+        self.assertIsNotNone(scene.render(1.25))
+
+    def test_settings_event_hides_panel_before_opening_window(self):
+        native = Mock(provider="codex", closing_at=None)
+        native.scene.dragging = native.scene.press = None
+        native.contains.return_value = True
+        native.frame.return_value = [("settings",)]
+        agents = Mock()
+        hover = HoverDetails({}, Mock(), threading.Event(), agents=agents)
+        hover.drive_panel(native, wintypes.POINT(5, 5), None, None, False, False, 10)
+        native.hide.assert_called_once()
+        agents.open_settings.assert_called_once()
 
     def test_claude_without_subscription_keeps_the_tooltip(self):
         free = tray_app.placeholder("claude")

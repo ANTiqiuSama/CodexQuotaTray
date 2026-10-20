@@ -25,7 +25,7 @@ from typing import Any
 import psutil
 
 import providers
-from agent_tasks import AgentNotes, RECUR_SPREAD, clean as clean_request, read_schedules
+from agent_tasks import AgentNotes, RECUR_SPREAD, clean as clean_request, read_schedules, tool_action
 
 
 PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray/performance.json"
@@ -886,6 +886,7 @@ class TpsMonitor:
         spans: dict[Any, tuple[float, float]] = {}
         conversation = path.stem
         request, doing = None, None          # newest user message / in-progress step
+        last_tool = None                     # newest finished tool call: the last action
         for _, status, metadata, step_type, body in steps:
             try:
                 completed = proto_seconds(proto_message(metadata, 7), epoch=True)
@@ -903,12 +904,22 @@ class TpsMonitor:
                     for span_key in ((response,) if response else ()) + ((generation_index,) if generation_index >= 0 else ()):
                         first, last = spans.get(span_key, (created, completed))
                         spans[span_key] = (min(first, created), max(last, completed))
-                if status not in (3, 4, 5) and not completed and generation_index >= 0 and created and created > now - 600:
+                # Status 1/2 is a step still generating or running (a tool call in
+                # progress carries a provisional #7 time); older builds leave #7 unset.
+                running = status in (1, 2) or status not in (3, 4, 5) and not completed
+                if running and generation_index >= 0 and created and created > now - 600:
                     self.activity[path.stem] = ("gemini", created, "请求中")
-                    if doing is None and step_type == AGY_REPLY_STEP:
+                    tool, arguments = agy_tool(metadata)
+                    if doing is None and tool:
+                        doing = (tool_action(tool, arguments) or "调用工具", created)
+                    elif doing is None and step_type == AGY_REPLY_STEP:
                         doing = ("思考中", created)
                     elif doing is None and step_type is not None and step_type not in AGY_USER_STEPS:
                         doing = ("调用工具", created)
+                elif last_tool is None and step_type not in AGY_USER_STEPS:
+                    tool, arguments = agy_tool(metadata)
+                    if tool and moment:
+                        last_tool = (tool_action(tool, arguments), moment)
                 if body and request is None and step_type in AGY_USER_STEPS:
                     # Steps are newest first: the first user step is the current request.
                     text = antigravity_request(body)
@@ -959,6 +970,8 @@ class TpsMonitor:
             self.notes.ask(conversation, *request)
         if doing:
             self.notes.act(conversation, *doing)
+        elif last_tool and last_tool[0]:
+            self.notes.act(conversation, *last_tool)
         title = antigravity_title(self.home, conversation)
         if title:
             self.notes.describe(conversation, title=title)
@@ -1083,7 +1096,19 @@ def _find_text(value: Any, wanted: str) -> str:
 # model's reply. CODEX_QUOTA_AGY_USER_STEPS overrides (comma separated).
 AGY_USER_STEPS = {int(part) for part in (os.environ.get("CODEX_QUOTA_AGY_USER_STEPS") or "14").split(",") if part.strip().isdigit()}
 AGY_REPLY_STEP = 15
-STEP_PAYLOAD_COLUMNS = ("step", "data", "payload", "content", "proto", "value", "blob")
+STEP_PAYLOAD_COLUMNS = ("step_payload", "step", "data", "payload", "content", "proto", "value", "blob")
+
+
+def agy_tool(metadata: bytes) -> tuple[str, str]:
+    """(tool name, JSON arguments) of the tool call a step carries, if any.
+    Antigravity keeps it in step metadata #4: {1: call id, 2: name, 3: args}."""
+    call = proto_message(metadata, 4)
+    if not call:
+        return "", ""
+    name = proto_message(call, 2).decode("utf-8", errors="replace")
+    if not name or len(name) > 80 or not re.fullmatch(r"[\w.:-]+", name):
+        return "", ""
+    return name, proto_message(call, 3).decode("utf-8", errors="replace")
 
 
 def _antigravity_query(db) -> tuple[list, list]:

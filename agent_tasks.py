@@ -88,6 +88,11 @@ def _basename(value: str) -> str:
 
 def _command_action(command: str) -> str:
     command = re.sub(r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)+", "", command or "").strip()
+    # Skip PowerShell/shell variable set-up ("$o = ...; python ...") to reach the real command.
+    parts = [part.strip() for part in re.split(r"\s*(?:;|&&)\s*", command) if part.strip()]
+    useful = [part for part in parts if not re.match(r"^(?:\$[\w:]+\s*=|set\s+\w+=|export\s+\w+=|cd\s)", part, re.I)]
+    if useful and useful[0] != command:
+        command = "; ".join(useful)
     lower = command.lower()
     if re.search(r"\b(pytest|unittest|jest|vitest|mocha|go test|cargo test|npm (?:run )?test|test_\w+)\b", lower):
         return "运行测试"
@@ -139,25 +144,28 @@ def tool_action(name: str, arguments: Any = None) -> str:
             return "查看图像"
         if "web__" in code:
             return "查资料"
-    path = arguments.get("file_path") or arguments.get("path") or arguments.get("filePath") or ""
+    # Antigravity names its arguments in PascalCase (Path, CommandLine, ...).
+    path = (arguments.get("file_path") or arguments.get("path") or arguments.get("filePath") or arguments.get("Path")
+            or arguments.get("AbsolutePath") or arguments.get("TargetFile") or "")
     if lower.startswith("mcp__"):
         return f"调用 {shorten(lower.split('__')[1], 10)}"
-    if "patch" in lower or lower in ("edit", "multiedit", "write", "str_replace", "str_replace_editor", "notebookedit", "create_file", "write_file"):
+    if "patch" in lower or lower in ("edit", "multiedit", "write", "str_replace", "str_replace_editor", "notebookedit", "create_file",
+                                     "write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"):
         match = re.search(r"\*\*\* (?:Update|Add) File: (.+)", str(arguments.get("input") or ""))
         target = _basename(match.group(1).strip()) if match else _basename(path) if path else ""
         return f"编辑 {shorten(target, 14)}" if target else "编辑代码"
-    if lower in ("read", "view", "read_file", "open_file", "view_image"):
+    if lower in ("read", "view", "read_file", "open_file", "view_image", "view_file"):
         return f"阅读 {shorten(_basename(path), 14)}" if path else "阅读文件"
-    if lower in ("grep", "glob", "search", "codebase_search", "find", "list_dir", "ls"):
+    if lower in ("grep", "glob", "search", "codebase_search", "find", "list_dir", "ls", "grep_search", "find_by_name"):
         return "检索代码"
-    if lower in ("task", "agent", "spawn_agent", "subagent", "delegate", "send_input"):
+    if lower in ("task", "agent", "spawn_agent", "subagent", "delegate", "send_input", "invoke_subagent", "send_message"):
         return "派发子任务"
     if "todo" in lower or "plan" in lower:
         return "规划步骤"
     if "web" in lower or "fetch" in lower or "browser" in lower:
         return "查资料"
     if lower in ("shell", "bash", "exec_command", "local_shell", "local_shell_call", "shell_command", "run_command", "powershell", "execute"):
-        command = arguments.get("cmd") or arguments.get("command") or arguments.get("input") or ""
+        command = arguments.get("cmd") or arguments.get("command") or arguments.get("CommandLine") or arguments.get("input") or ""
         if isinstance(command, list):
             command = " ".join(str(part) for part in command if part not in ("bash", "-lc", "sh", "-c", "powershell", "-Command"))
         return _command_action(str(command))
@@ -707,6 +715,8 @@ def summary_config() -> dict | None:
     if not config["url"]:
         try:
             stored = json.loads(SUMMARY_CONFIG.read_text(encoding="utf-8"))
+            if stored.get("enabled") is False:
+                return None
             config.update({key: str(stored.get(key) or "") for key in config})
         except (OSError, ValueError, AttributeError):
             return None

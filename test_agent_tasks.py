@@ -5,6 +5,7 @@ from contextlib import closing
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import agent_panel
@@ -23,6 +24,11 @@ def stamp(seconds):
 
 
 class TaskTextTests(unittest.TestCase):
+    def test_antigravity_pascal_case_tool_arguments(self):
+        self.assertEqual(tool_action("view_file", {"AbsolutePath": "D:/repo/agent_panel.py"}), "阅读 agent_panel.py")
+        self.assertEqual(tool_action("replace_file_content", {"TargetFile": "D:/repo/tray_app.py"}), "编辑 tray_app.py")
+        self.assertEqual(tool_action("run_command", {"CommandLine": "$env:FOO='x'; cd D:/repo; python -m unittest test_agent_tasks"}), "运行测试")
+
     def test_request_becomes_a_short_task_phrase(self):
         self.assertEqual(clean("请帮我修一下 C:\\repo\\tray_app.py 里的悬停bug，然后跑测试"), "修一下 tray_app.py 里的悬停bug")
         self.assertEqual(clean("<system-reminder>ignore</system-reminder>好的。实现气泡合并动画"), "实现气泡合并动画")
@@ -241,6 +247,20 @@ class GroupTests(unittest.TestCase):
 
 
 class SummarizerTests(unittest.TestCase):
+    def test_settings_save_reload_and_disable_preserves_local_key(self):
+        from settings_window import load_summary, save_summary
+        with tempfile.TemporaryDirectory() as folder, patch.object(agent_tasks, "SUMMARY_CONFIG", Path(folder) / "summary.json"), patch.dict("os.environ", {}, clear=True):
+            config = {"url": "https://token-plan-cn.xiaomimimo.com/v1", "key": "test-only-key", "model": "mimo-v2.6-flash"}
+            save_summary(config, True)
+            self.assertEqual(agent_tasks.summary_config()["url"], config["url"] + "/chat/completions")
+            save_summary(config, False)
+            self.assertIsNone(agent_tasks.summary_config())
+            self.assertEqual(load_summary()["key"], "test-only-key")
+            self.assertFalse((Path(folder) / "summary.tmp").exists())
+            with self.assertRaises(ValueError):
+                save_summary({**config, "url": "bad-url"}, True)
+            self.assertFalse(load_summary()["enabled"])
+
     def test_live_action_updates_even_when_summary_is_cached(self):
         member=agent("a",title="验证布局",doing="运行测试")
         self.assertEqual(describe(Cluster("a",(member,)),{"title":"布局验证","doing":"阅读代码"})[1],"运行测试")
@@ -309,6 +329,20 @@ def panel(*bubbles):
 
 
 class SceneTests(unittest.TestCase):
+    def test_gear_release_and_right_click_open_settings(self):
+        scene = agent_panel.Scene()
+        model = panel()
+        scene.set_model(model, 0)
+        moment = self.settle(scene)
+        point = agent_panel.gear_center(model, scene.field.value)
+        self.assertEqual(scene.step(moment + .01, point, True, False), [])
+        self.assertEqual(scene.step(moment + .02, point, False, False), [("settings",)])
+        self.assertEqual(scene.step(moment + .03, point, False, True), [("settings",)])
+        scene.step(moment + .04, point, False, False)
+        scene.step(moment + .05, point, True, False)
+        self.assertEqual(scene.step(moment + .06, None, False, False), [])
+        self.assertIsNotNone(scene.render(1.5))
+
     def settle(self, scene, start=0.0, frames=90, pointer=None, left=False):
         moment = start
         for _ in range(frames):
@@ -375,7 +409,7 @@ class SceneTests(unittest.TestCase):
         scene.set_model(panel(bubble("solo"), bubble("g", (("C", True), ("G", True)))), 0.0)
         moment = self.settle(scene)
         solo, group = scene.bodies["solo"], scene.bodies["g"]
-        self.assertEqual(scene.step(moment + 0.02, (solo.x, solo.y), False, True), [])
+        self.assertEqual(scene.step(moment + 0.02, (solo.x, solo.y), False, True), [("settings",)])
         scene.step(moment + 0.04, None, False, False)
         self.assertEqual(scene.step(moment + 0.06, (group.x, group.y), False, True), [("split", "g")])
         origin = (group.x, group.y)

@@ -235,6 +235,22 @@ class TpsTests(unittest.TestCase):
         self.assertEqual(antigravity_request(body), "fix the login flow please")
         self.assertEqual(antigravity_request(b""), "")
 
+    def test_antigravity_native_step_payload_and_running_tool_with_provisional_end(self):
+        path = self.make_agy_db(step_type=15)
+        with sqlite3.connect(path) as db:
+            db.execute("ALTER TABLE steps ADD COLUMN step_payload BLOB")
+            prompt = "保留额度耗尽预测并完成设置页面"
+            metadata = pb(1, stamp(self.now - 4))
+            db.execute("INSERT INTO steps VALUES(1,14,3,?,?)", (metadata, pb(3, pb(1, prompt.encode()))))
+            tool = pb(2, b"replace_file_content") + pb(3, json.dumps({"TargetFile": "D:/repo/agent_panel.py"}).encode())
+            metadata = pb(1, stamp(self.now - 1)) + pb(7, stamp(self.now)) + pb(20, pv(3, 1)) + pb(4, tool)
+            db.execute("INSERT INTO steps VALUES(2,8,2,?,NULL)", (metadata,))
+        self.monitor._antigravity(self.now)
+        note = self.monitor.notes.notes["a"]
+        self.assertEqual(note.request, prompt)
+        self.assertEqual(note.action, "编辑 agent_panel.py")
+        self.assertIn("a", self.monitor.activity)
+
     def test_antigravity_preserves_counts_without_estimating_tps(self):
         self.make_agy_db()
         self.monitor._antigravity(self.now)

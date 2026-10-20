@@ -20,7 +20,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
 from agent_tasks import width as text_units
-from icon_art import RESET_BLUE, accent, ring_color
+from icon_art import AMBER, CLAY, RESET_BLUE, accent, ring_color
 
 WIDTH = 360
 PAD = 18
@@ -77,7 +77,8 @@ class PanelModel:
     bubbles: tuple[BubbleModel, ...]
     status_tone: str = "live"                   # live | idle | stale | error
     banner: str = ""
-    schedules: tuple[ScheduleChip, ...] = ()
+    forecast: str = ""                          # pace forecast: will the quota last at the current rate
+    forecast_tone: str = "unknown"              # danger | warn | ok | idle | unknown
 
     @property
     def header(self) -> tuple:
@@ -85,12 +86,13 @@ class PanelModel:
         TPS are animated per frame, so only their labels and reset texts are here."""
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]), self.banner,
-                tuple((chip.key, chip.title, chip.running, chip.letter, chip.when) for chip in self.schedules),
-                not self.bubbles)
+                (self.forecast, self.forecast_tone), not self.bubbles)
 
 
-CHIP_ROW = 34
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
+FOOTER = 30                 # Forecast line and the settings gear under the field.
+GEAR_RADIUS = 8.0
+GEAR_HIT = 14.0
 
 
 def meter_columns(count: int) -> list[tuple[float, float]]:
@@ -99,9 +101,12 @@ def meter_columns(count: int) -> list[tuple[float, float]]:
     return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in range(count + 1)]
 
 
-def chip_height(model) -> float:
-    rows = chip_rows(model) if model.schedules else 0
-    return CHIP_ROW + 26 * (rows - 1) if rows else 0.0
+def footer_middle(model, field_h: float) -> float:
+    return field_top(model) + field_h + 10 + 10
+
+
+def gear_center(model, field_h: float) -> tuple[float, float]:
+    return WIDTH - PAD - GEAR_RADIUS + 2, footer_middle(model, field_h)
 
 
 def field_top(model: PanelModel | None) -> float:
@@ -138,7 +143,7 @@ def field_height(bubbles) -> float:
 
 
 def panel_height(model: PanelModel, field: float) -> float:
-    return field_top(model) + field + chip_height(model) + 12
+    return field_top(model) + field + FOOTER + 8
 
 
 # ----- motion helpers ------------------------------------------------------------
@@ -238,6 +243,15 @@ class Scene:
         self.meters: list[Spring] = []          # quota bars count up from zero when the panel opens
         self.rate = Spring(0.0, 120.0, 22.0)    # TPS figure eases between readings
         self.opened = 0.0
+        self.gear = Spring(0.0, 260.0, 26.0)    # settings gear highlight under the pointer
+        self.gear_angle = 0.0
+        self.gear_press = False
+
+    def over_gear(self, pointer) -> bool:
+        if pointer is None or self.model is None:
+            return False
+        cx, cy = gear_center(self.model, round(self.field.value / 2) * 2)
+        return math.hypot(pointer[0] - cx, pointer[1] - cy) <= GEAR_HIT
 
     # ----- geometry --------------------------------------------------------
     @property
@@ -353,6 +367,13 @@ class Scene:
         self.last, self.time = now, self.time + dt
         events: list[tuple] = []
         under = self.body_at(*pointer) if pointer else None
+        gear = not under and self.over_gear(pointer)
+        if left and not self.left and gear:
+            self.gear_press = True
+        if not left and self.left and self.gear_press:
+            if gear and not self.dragging:
+                events.append(("settings",))
+            self.gear_press = False
         if left and not self.left and under:
             body = self.bodies[under]
             self.press = (under, pointer[0] - body.x, pointer[1] - body.y, *pointer)
@@ -383,9 +404,14 @@ class Scene:
             self.dragging = self.target = self.press = None
         if right and not self.right and under and len(self.bodies[under].model.members) > 1:
             events.append(("split", under))
+        elif right and not self.right and pointer is not None and not self.dragging:
+            events.append(("settings",))      # right-click anywhere else on the panel: settings
         self.left, self.right = left, right
         self.hovered = None if self.dragging else under
 
+        self.gear.target = 1.0 if gear and not self.dragging else 0.0
+        self.gear.step(dt)
+        self.gear_angle = (self.gear_angle + dt * 120 * self.gear.value) % 360
         self.field.step(dt)
         if now - self.opened > 0.08:            # let the window fade in before the bars run
             for spring in self.meters:
@@ -442,6 +468,7 @@ class Scene:
     @property
     def animating(self) -> bool:
         return bool(self.dragging or self.ghosts or self.ripples or not self.field.settled or not self.rate.settled
+                    or not self.gear.settled or self.gear.value > 0.01
                     or any(not spring.settled for spring in self.meters) or any(
             not (b.scale.settled and b.radius.settled and b.hover.settled and b.glow.settled) for b in self.bodies.values()))
 
@@ -461,10 +488,14 @@ class Scene:
             return origin + value * scale
 
         self._header(frame, model, field_h, scale, at)
-        for chip, (x0, y0, x1, y1) in chip_layout(model, field_h):
-            if chip is not None and chip.running:      # a breathing dot marks the run in progress
-                level = 0.55 + 0.45 * math.sin(self.time * 3.2)
-                blit(frame, faded(dot(round(3.2 * scale), chip.letter or model.letter), level), at(x1 - 9), at((y0 + y1) / 2))
+        cx, cy = gear_center(model, field_h)
+        level = self.gear.value
+        tint = tuple(round(a + (b - a) * level) for a, b in zip(MUTED_TEXT[:3], accent(model.letter)[:3])) + (255,)
+        sprite = gear(round(GEAR_RADIUS * (1 + 0.12 * level) * scale), tint)
+        if level > 0.02:
+            blit(frame, faded(halo(round((GEAR_RADIUS + 3) * scale), model.letter), 0.35 * level), at(cx), at(cy))
+            sprite = sprite.rotate(-self.gear_angle, resample=Image.BICUBIC)
+        blit(frame, sprite, at(cx), at(cy))
 
         for ripple in self.ripples:
             p = (self.time_since(ripple.start)) / ripple.duration
@@ -738,40 +769,44 @@ def arc(radius: int, letter: str) -> Image.Image:
     return image.resize((big // SUPERSAMPLE, big // SUPERSAMPLE), Image.LANCZOS)
 
 
-def chip_layout(model: PanelModel, field_h: float, scale: float = 1.0) -> list[tuple[ScheduleChip | None, tuple]]:
-    """Scheduled task chips in up to two rows under the field; None marks "+N"."""
-    placed: list = []
-    if not model.schedules:
-        return placed
-    start, limit = PAD + text_units("定时任务") * 10.5 + 8, WIDTH - PAD
-    x, y, row = start, field_top(model) + field_h + 12, 0
-    for index, chip in enumerate(model.schedules):
-        width = text_units(chip_text(chip)) * 10.5 + 26 + (10 if chip.running else 0)
-        rest = len(model.schedules) - index - 1
-        if x + width > limit - (34 if rest and row == 1 else 0) and x > start:
-            if row == 1:
-                placed.append((None, (x, y, x + 30, y + 20)))
-                break
-            x, y, row = start, y + 26, 1
-        placed.append((chip, (x, y, min(limit, x + width), y + 20)))
-        x += width + 6
-    return placed
+@lru_cache(maxsize=48)
+def gear(radius: int, color: tuple) -> Image.Image:
+    """Eight-tooth settings gear with a hollow hub."""
+    size = (radius + 2) * 2
+    big = size * SUPERSAMPLE
+    r = radius * SUPERSAMPLE
+    c = big / 2
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    body, tooth_out, half = r * 0.74, r * 1.0, math.radians(13)
+    for index in range(8):
+        angle = index * math.tau / 8
+        points = [(c + math.cos(angle + s * half * k) * radius_, c + math.sin(angle + s * half * k) * radius_)
+                  for s, k, radius_ in ((-1, 1.25, body * 0.95), (-1, 0.9, tooth_out), (1, 0.9, tooth_out), (1, 1.25, body * 0.95))]
+        draw.polygon(points, fill=color)
+    draw.ellipse((c - body, c - body, c + body, c + body), fill=color)
+    hole = r * 0.34
+    draw.ellipse((c - hole, c - hole, c + hole, c + hole), fill=(0, 0, 0, 0))
+    return image.resize((size, size), Image.LANCZOS)
 
 
-def chip_rows(model: PanelModel) -> int:
-    rows = {round(box[1]) for _, box in chip_layout(model, 0)}
-    return len(rows)
+FORECAST_TONES = {"danger": CLAY, "warn": AMBER, "ok": SECONDARY_TEXT}
 
 
-def chip_text(chip: ScheduleChip) -> str:
-    from agent_tasks import shorten
-    return shorten(chip.title, 9) + " · " + ("运行中" if chip.running else chip.when or "待运行")
+def forecast_text(text: str, limit: float, face, probe) -> str:
+    """Fit the forecast line before the gear, ending with an ellipsis if cut."""
+    if probe.textlength(text, font=face) <= limit:
+        return text
+    while text and probe.textlength(text + "…", font=face) > limit:
+        text = text[:-1]
+    return text + "…"
 
 
-def _clock(draw, cx, cy, r, color, stroke):
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=stroke)
-    draw.line((cx, cy, cx, cy - r * 0.55), fill=color, width=stroke)
-    draw.line((cx, cy, cx + r * 0.45, cy), fill=color, width=stroke)
+def _trend(draw, x, cy, s, color, stroke):
+    """Small rising-line glyph in front of the forecast."""
+    points = [(x, cy + 4 * s), (x + 4 * s, cy), (x + 7 * s, cy + 2.5 * s), (x + 11 * s, cy - 3 * s)]
+    draw.line(points, fill=color, width=stroke, joint="curve")
+    draw.polygon([(x + 11 * s, cy - 5 * s), (x + 12.5 * s, cy - 1.2 * s), (x + 8.6 * s, cy - 2.6 * s)], fill=color)
 
 
 PILL_TONES = {"stale": ((229, 168, 75, 46), (229, 168, 75, 255)), "error": ((226, 92, 92, 46), (226, 92, 92, 255)),
@@ -780,11 +815,11 @@ PILL_TONES = {"stale": ((229, 168, 75, 46), (229, 168, 75, 255)), "error": ((226
 
 @lru_cache(maxsize=24)
 def background(header: tuple, field_h: int, scale: float) -> Image.Image:
-    letter, title, status, tone, meters, banner, chips, empty = header
+    letter, title, status, tone, meters, banner, forecast, empty = header
     model = PanelModel("", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (), tone, banner,
-                       tuple(ScheduleChip(*chip) for chip in chips))
+                       forecast[0], forecast[1])
     top = field_top(model)
-    height = top + field_h + chip_height(model) + 12
+    height = panel_height(model, field_h)
     s = scale
     px = lambda value: round(value * s)  # noqa: E731
     content = Image.new("RGBA", (px(WIDTH), px(height)), (0, 0, 0, 0))
@@ -818,20 +853,10 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     if empty:
         draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
-    placed = chip_layout(model, field_h)
-    if placed:
-        row = placed[0][1]
-        draw.text((px(PAD), px((row[1] + row[3]) / 2)), "定时任务", font=small, fill=MUTED_TEXT, anchor="lm")
-        face = ui_font(px(10.5))
-        for chip, (x0, y0, x1, y1) in placed:
-            middle = (y0 + y1) / 2
-            tint = accent(chip.letter or letter) if chip is not None and chip.running else (240, 238, 230, 255)
-            draw.rounded_rectangle((px(x0), px(y0), px(x1), px(y1)), radius=px(10),
-                                   fill=_with_alpha(tint, 34 if chip is not None and chip.running else 14),
-                                   outline=_with_alpha(tint, 120 if chip is not None and chip.running else 30), width=max(1, round(s)))
-            if chip is None:
-                draw.text((px((x0 + x1) / 2), px(middle)), f"+{len(chips) - len(placed) + 1}", font=face, fill=SECONDARY_TEXT, anchor="mm")
-                continue
-            _clock(draw, px(x0 + 11), px(middle), px(4.2), _with_alpha(tint, 230), max(1, round(s)))
-            draw.text((px(x0 + 19), px(middle)), chip_text(chip), font=face, fill=TEXT if chip.running else SECONDARY_TEXT, anchor="lm")
+    middle = footer_middle(model, field_h)
+    tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
+    _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))
+    face = ui_font(px(10.5))
+    line = forecast_text(model.forecast or "正在积累用量，稍后给出预测", px(WIDTH - 2 * PAD - 52), face, draw)
+    draw.text((px(PAD + 18), px(middle)), line, font=face, fill=tint, anchor="lm")
     return _compose(content, scale)

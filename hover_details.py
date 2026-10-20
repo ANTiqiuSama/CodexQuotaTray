@@ -52,6 +52,13 @@ class HoverIcon(pystray.Icon):
         self._version4 = bool(self._message(4, 0, uVersion=4))
 
     def _on_notify(self, wparam, lparam):
+        event = lparam & 0xFFFF if getattr(self, "_version4", False) else lparam
+        action = getattr(self, "settings_action", None)
+        if action and event in (0x007B, win32.WM_RBUTTONUP):
+            self.hover_open = False
+            self.suppress_hover = True
+            action()
+            return
         if not getattr(self, "_version4", False):
             return super()._on_notify(wparam, lparam)
         # In v4 the upper word is the icon ID; only the lower word is an event.
@@ -481,12 +488,16 @@ class HoverDetails:
 
     def target_at(self, point):
         for key, icon in self.icons.items():
+            rect = icon_rect(icon)
+            if getattr(icon, "suppress_hover", False):
+                if not rect or not contains(rect, point.x, point.y):
+                    icon.suppress_hover = False
+                continue
             # A Shell refresh can send POPUPCLOSE while the mouse is still on
             # the icon. Once opened, keep our popup until the pointer leaves.
             if (getattr(icon, "_version4", False) and not icon.hover_open
                     and self.candidate != key):
                 continue
-            rect = icon_rect(icon)
             if rect and contains(rect, point.x, point.y):
                 return key, rect
         return None, None
@@ -513,7 +524,12 @@ class HoverDetails:
             panel.refresh(model, now)
             self.panel_built = now
         for event in panel.frame(point, left, right, now):
-            if event[0] == "merge":
+            if event[0] == "settings":
+                panel.hide()
+                self.candidate = None
+                self.agents.open_settings()
+                return
+            elif event[0] == "merge":
                 merged = self.agents.merge(event[1], event[2])
                 if merged:
                     panel.scene.absorb(event[1], event[2], merged, now)
@@ -538,9 +554,23 @@ class HoverDetails:
                 tooltip = TrackingTooltip()
             while not self.stop_event.wait(0.016 if panel and panel.active else 0.1):
                 TrackingTooltip.pump()
+                requested = getattr(self.agents, "settings_requested", None)
+                if requested is not None and requested.is_set():
+                    requested.clear()
+                    self.candidate = None
+                    if panel:
+                        panel.hide()
+                    if tooltip:
+                        tooltip.hide()
                 point = wintypes.POINT()
                 provider, anchor = None, None
                 have_point = user.GetCursorPos(ctypes.byref(point))
+                if have_point:
+                    for icon in self.icons.values():
+                        if getattr(icon, "suppress_hover", False):
+                            rect = icon_rect(icon)
+                            if not rect or not contains(rect, point.x, point.y):
+                                icon.suppress_hover = False
                 left, right = (bool(user.GetAsyncKeyState(key) & 0x8000) for key in (1, 2))
                 if have_point and notification_area_at(point) and not (left or right):
                     provider, anchor = self.target_at(point)
