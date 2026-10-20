@@ -11,6 +11,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 - **独立来源图标**：默认显示 Codex、Grok、Gemini，Claude Code 为可选来源。
 - **额度圆环**：外圈表示剩余百分比。存在两个额度窗口时，按剩余更少的窗口绘制图标，卡片分别展示各窗口。
 - **生成速率显示**：取得可核验样本且来源处于活动状态时，圆盘点亮并显示最近样本；缺少样本时继续显示额度。
+- **Agent 任务气泡**：有 agent 在工作时，悬停图标改为打开任务面板：顶部保留 5 小时、每周额度与 TPS，下方每个气泡是一项任务及其当前动作；把气泡拖到一起即告诉程序它们是同一任务的并行部分，合并为大气泡并重新识别。
 - **自绘详情卡片**：展示额度、TPS、60 秒输出速率、活动会话、重置倒计时、预测与刷新计划。窗口置顶、鼠标穿透，并保持键盘焦点。
 - **按需刷新**：根据空闲、活动、生成结束、读取失败和重置时间调度额度查询。
 - **额度耗尽预测**：从本程序积累的数值历史估计消耗趋势，样本不足时明确提示。
@@ -85,7 +86,9 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 
 | 操作或状态 | 行为 |
 | --- | --- |
-| 鼠标在图标上短暂停留 | 展开该来源的详情卡片 |
+| 鼠标在图标上短暂停留 | 展开该来源的详情卡片；该来源有 agent 在工作时改为任务气泡面板 |
+| 拖动气泡叠到另一个气泡上松开 | 标记为同一任务，合并为大气泡并重新识别 |
+| 右键合并后的大气泡 | 拆回独立气泡 |
 | 移开鼠标 | 关闭详情，图标恢复最新数值 |
 | 左键点击图标 | 打开对应桌面程序或 CLI |
 | 右键 → 立即刷新 | 请求所有已显示来源刷新额度 |
@@ -211,6 +214,35 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 
 这些是社区估计，不是 OpenAI 的官方时间表。请求只发送普通 HTTP GET，不包含任何账户信息。
 
+## Agent 任务气泡
+
+来源图标处于生成状态时，悬停打开任务面板（替代详情卡片）。指针可以移入面板操作，移出约半秒后收起；面板不抢键盘焦点。
+
+| 区域 | 内容 |
+| --- | --- |
+| 顶部 | 该来源的 5 小时、每周剩余额度与最近 TPS；MiMo 显示套餐剩余额度 |
+| 气泡内 | 任务名：最近一次实质请求（“继续”“好的”之类不覆盖任务），缺失时用客户端线程标题或项目文件夹 |
+| 气泡下 | 当前动作：运行测试、编辑某文件、检索代码、查资料、派发子任务、思考中等；悬停气泡时展开完整任务描述 |
+| 外圈 | 颜色对应模型来源；呼吸波纹表示正在生成，暗淡表示 3 分钟内刚完成；大气泡上的小圆点是各并行成员 |
+
+所有来源的 agent 都会出现在同一面板，被悬停来源的气泡排在前面并高亮。气泡分组规则：
+
+- **自动**：客户端自己派生的子 agent 归入父任务——Codex `spawn_agent` 子线程（`parent_thread_id`）、Claude Code `subagents/`、MiMo Code 子会话（`parent_id`）。
+- **手动**：拖动一个气泡叠到另一个上，目标出现光环与“松开合并为同一任务”后松开即合并；分组按会话 ID 保存，重启后仍生效。右键大气泡拆开，拆开后也不再自动归组。
+- **重新识别**：合并后先按本地规则命名（有父任务时用父任务的请求，否则选与其他成员最相近的请求），气泡下显示“N 路并行 · 各自分工”。
+
+### 可选：轻量模型命名
+
+默认完全本地，不发送任何内容。若希望标题更精炼，可配置任意 OpenAI 兼容的 Chat Completions 接口（如 MiMo、DeepSeek、本地 Ollama 等的小模型）：
+
+```powershell
+$env:CODEX_QUOTA_SUMMARY_URL = 'https://api.example.com/v1'   # 或完整的 /chat/completions 地址
+$env:CODEX_QUOTA_SUMMARY_KEY = 'sk-...'
+$env:CODEX_QUOTA_SUMMARY_MODEL = 'small-model-name'
+```
+
+也可以写入 `%LOCALAPPDATA%\CodexQuotaTray\agent_summary.json`：`{"url": "...", "key": "...", "model": "..."}`。启用后，每个气泡在其请求变化时才发起一次后台请求（结果按输入缓存，失败后 5 分钟内不再请求），合并的大气泡会请求一个总任务名和每个成员的分工；识别期间气泡外圈显示旋转弧线。发送的内容仅为每个成员最近一次请求的前 400 字、项目文件夹名和当前动作。
+
 ## 配置
 
 ### 选择来源
@@ -253,6 +285,7 @@ Windows 没有移动通知区域图标的接口，而且删除后重新添加的
 | `CODEX_QUOTA_TRAY_ORDER` | 图标排序：`auto`（默认，恢复时间近的在左，用完的在最后）、`fixed`（固定顺序） |
 | `CODEX_QUOTA_MIMO_BROWSER` | MiMo 登录窗口使用的 Edge/Chrome 路径 |
 | `CODEX_QUOTA_MIMO_PLATFORM` | MiMo 控制台地址，默认 `https://platform.xiaomimimo.com`（测试用） |
+| `CODEX_QUOTA_SUMMARY_URL` / `_KEY` / `_MODEL` | 可选的 OpenAI 兼容接口，用于把 agent 请求归纳为气泡标题；未设置时只用本地规则 |
 | `CODEX_QUOTA_LEGACY_DPI=1` | 关闭悬停线程的 Per-Monitor V2 模式，供旧显示环境排错 |
 
 路径应指向实际安装位置，例如：
@@ -283,9 +316,11 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `mimo-edge-profile/` | MiMo 登录用的应用自有浏览器配置 |
 | `mimo-ledger.json`、`mimo-days.json` | 本机 MiMo Credits 账本（40 天）与每日首次控制台读数 |
 | `mimo.json` | 可选的 MiMo 手动套餐配置 |
+| `agent_groups.json` | 手动合并的任务分组与拆开记录（仅会话 ID，7 天未用自动清理） |
+| `agent_summary.json` | 可选的气泡命名接口配置 |
 | `mimo-login.log` | MiMo 登录/续期诊断：步骤、HTTP 状态码、cookie 与请求头的**名称**（不含值） |
 
-TPS 读取器会在内存解析本地会话记录。`performance.json` 保存数值投影、模型名等统计字段，不包含已解析的消息正文。程序不直接打开客户端的 `auth.json` 或提取 token、cookie；登录由已有客户端处理。唯一例外是 MiMo：控制台会话 cookie 由程序自己的登录窗口取得，并加密保存在上表位置。
+TPS 读取器会在内存解析本地会话记录。任务气泡所需的请求摘要、工具名和线程标题同样只在内存中，不写入任何文件；只有配置了命名接口时，才会把上节所述的截断请求发往该接口。`performance.json` 保存数值投影、模型名等统计字段，不包含已解析的消息正文。程序不直接打开客户端的 `auth.json` 或提取 token、cookie；登录由已有客户端处理。唯一例外是 MiMo：控制台会话 cookie 由程序自己的登录窗口取得，并加密保存在上表位置。
 
 日志与诊断可能包含本地路径、错误文本、账户用量和软件状态。`--check-claude --raw` 额外保存终端文本，仅自动遮盖邮箱，其他内容仍需在共享前检查。仓库的 `.gitignore` 排除了运行缓存、日志、构建输出和常见本地凭据文件。
 
@@ -326,6 +361,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 .\outputs\CodexQuotaTray.exe --check-claude work/checks/claude.json
 .\outputs\CodexQuotaTray.exe --check-mimo work/checks/mimo.json
 .\outputs\CodexQuotaTray.exe --check-hover work/checks/hover.json
+.\outputs\CodexQuotaTray.exe --check-agents work/checks/agents.json   # 另存 agents.png 面板预览
 ```
 
 `--check-tps` 读取两次本地统计；`--check-reset` 读取全局重置预测，并列出各来源的错误；`--check-gemini-tps` 输出最新几个 Antigravity 数据库的结构（字段编号、数值、时间，不含提示词和回复文本）以及当前 Gemini TPS；`--check-codex` 读取 App Server 额度，加 `--raw` 时另存 `codex.raw.json`，包含 App Server 原始响应、最近一条会话记录中的 `rate_limits` 和额度用尽错误时间；`--check-grok`、`--check-claude`、`--check-mimo` 检查对应真实额度链路。每次定时刷新的结果（剩余、重置时间、是否旧数据、错误）都会写入 `app.log`，便于排查图标未更新。额度读取失败时返回非零退出码，并保留结果中的错误说明。
@@ -365,7 +401,9 @@ forecast.py           数值历史与额度耗尽估计
 reset_watch.py        Codex 全局重置的社区预测读取与提示文案
 icon_art.py           额度与 TPS 圆盘绘制、字体缓存
 detail_card.py        卡片数据模型与 Pillow 渲染
-hover_details.py      Win32 分层窗口、DPI、悬停及文字提示回退
+hover_details.py      Win32 分层窗口、DPI、悬停、任务面板窗口及文字提示回退
+agent_tasks.py        各 agent 在做什么：请求/动作提取、自动与手动分组、可选模型命名
+agent_panel.py        任务气泡面板：布局、弹簧动画、拖动合并与拆分、Pillow 渲染
 hover_check.py        原生卡片显示自检
 mimo_usage.py         MiMo 控制台读取、登录、Credits 账本与年度节奏
 tray_app.py           程序入口、菜单、线程协调与登录启动项

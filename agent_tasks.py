@@ -1,0 +1,632 @@
+"""What each local agent is working on, and which agents share one task.
+
+Requests, tool steps and thread titles come from the same local records that
+tps_sources already reads; they stay in memory. Only the user's grouping
+(session ids) is written to disk. Titles come from a local heuristic, or from
+an optional OpenAI-compatible endpoint when one is configured.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import queue
+import re
+import threading
+import time
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray"
+GROUPS_PATH = DATA_DIR / "agent_groups.json"
+SUMMARY_CONFIG = DATA_DIR / "agent_summary.json"
+LIVE_SECONDS = 45          # A sub-agent without its own activity flag counts as working this long.
+RECENT_SECONDS = 180       # Finished agents linger as dim bubbles so the field does not flicker.
+GROUP_KEEP_SECONDS = 7 * 86400
+log = logging.getLogger(__name__)
+
+TRIVIAL = {"继续", "继续吧", "接着", "接着来", "好", "好的", "可以", "行", "嗯", "是", "对", "开始", "确认", "ok", "okay",
+           "yes", "y", "go", "go on", "continue", "proceed", "next", "sure", "thanks", "谢谢", "完成了吗", "然后呢"}
+FILLER = re.compile(r"^(?:请你?|麻烦你?|帮我|帮忙|给我|你好|你能|你可以|能不能|可不可以|我想要?|我需要|我要|现在|然后|接下来|另外|那就|那么|"
+                    r"please|pls|can you|could you|would you|help me|i want to|i need to|now|then|also|hey|hi)[\s,，:：、]*", re.I)
+CLAUSE = re.compile(r"[。！？!?\n；;，]+|(?<=[\u4e00-\u9fff]),")
+
+
+def width(text: str) -> float:
+    """Display units: CJK and full-width count 1, Latin roughly half."""
+    return sum(1.0 if ord(char) > 0x2E80 else 0.55 for char in text)
+
+
+def shorten(text: str, units: float) -> str:
+    if width(text) <= units:
+        return text
+    out = ""
+    for char in text:
+        if width(out + char) > units - 0.6:
+            break
+        out += char
+    return out.rstrip(" ,，、:：-") + "…"
+
+
+def clean(text: str) -> str:
+    """Turn a raw request into a readable one-line task phrase."""
+    text = str(text or "")
+    text = re.sub(r"```.*?(?:```|$)", " ", text, flags=re.S)
+    text = re.sub(r"<([A-Za-z][\w-]*)[^>]*>.*?</\1>", " ", text, flags=re.S)
+    text = re.sub(r"</?[A-Za-z][\w-]*[^>]*>", " ", text)
+    text = re.sub(r"\[(?:Request interrupted|Image)[^\]]*\]", " ", text, flags=re.I)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"(?:[A-Za-z]:)?(?:[\\/][\w.\-~ ]+)+[\\/]([\w.\-]+)", r"\1", text)
+    text = re.sub(r"[`*#>|]+|(?<!\w)_+|_+(?!\w)", " ", text)
+    best = ""
+    for clause in CLAUSE.split(text):
+        clause = re.sub(r"\s+", " ", clause).strip(" -—:：,，、")
+        while True:
+            stripped = FILLER.sub("", clause, count=1).strip()
+            if stripped == clause:
+                break
+            clause = stripped
+        if not trivial(clause):
+            best = clause
+            break
+    return best
+
+
+def trivial(text: str) -> bool:
+    text = (text or "").strip().lower().rstrip("。.!！?？~")
+    return len(text) < 2 or text in TRIVIAL
+
+
+def _basename(value: str) -> str:
+    return re.split(r"[\\/]", str(value).rstrip("\\/"))[-1]
+
+
+def _command_action(command: str) -> str:
+    command = re.sub(r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)+", "", command or "").strip()
+    lower = command.lower()
+    if re.search(r"\b(pytest|unittest|jest|vitest|mocha|go test|cargo test|npm (?:run )?test|test_\w+)\b", lower):
+        return "运行测试"
+    if re.search(r"\b(pip3? install|npm (?:i|install)|pnpm (?:i|add|install)|yarn add|uv (?:pip|add))\b", lower):
+        return "安装依赖"
+    if re.search(r"\b(build|pyinstaller|tsc|webpack|vite build|cargo build|make)\b", lower):
+        return "构建"
+    words = re.findall(r"[^\s\"']+", command)
+    if not words:
+        return "运行命令"
+    tool = _basename(words[0]).lower().removesuffix(".exe")
+    if tool == "git" and len(words) > 1:
+        return f"git {words[1]}"
+    if tool in ("rg", "grep", "findstr", "find", "ls", "dir", "cat", "type", "sed", "head", "tail", "get-content", "select-string", "wc", "tree"):
+        return "查看代码"
+    if tool in ("curl", "wget", "invoke-webrequest"):
+        return "请求网络"
+    return f"运行 {shorten(tool, 10)}"
+
+
+def tool_action(name: str, arguments: Any = None) -> str:
+    """Short verb phrase for a tool call."""
+    name = str(name or "")
+    lower = name.lower()
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+            arguments = parsed if isinstance(parsed, dict) else {"input": arguments}
+        except ValueError:
+            arguments = {"input": arguments}
+    arguments = arguments if isinstance(arguments, dict) else {}
+    path = arguments.get("file_path") or arguments.get("path") or arguments.get("filePath") or ""
+    if lower.startswith("mcp__"):
+        return f"调用 {shorten(lower.split('__')[1], 10)}"
+    if "patch" in lower or lower in ("edit", "multiedit", "write", "str_replace", "str_replace_editor", "notebookedit", "create_file", "write_file"):
+        match = re.search(r"\*\*\* (?:Update|Add) File: (.+)", str(arguments.get("input") or ""))
+        target = _basename(match.group(1).strip()) if match else _basename(path) if path else ""
+        return f"编辑 {shorten(target, 14)}" if target else "编辑代码"
+    if lower in ("read", "view", "read_file", "open_file", "view_image"):
+        return f"阅读 {shorten(_basename(path), 14)}" if path else "阅读文件"
+    if lower in ("grep", "glob", "search", "codebase_search", "find", "list_dir", "ls"):
+        return "检索代码"
+    if lower in ("task", "agent", "spawn_agent", "subagent", "delegate", "send_input"):
+        return "派发子任务"
+    if "todo" in lower or "plan" in lower:
+        return "规划步骤"
+    if "web" in lower or "fetch" in lower or "browser" in lower:
+        return "查资料"
+    if lower in ("shell", "bash", "exec_command", "local_shell", "local_shell_call", "shell_command", "run_command", "powershell", "execute"):
+        command = arguments.get("cmd") or arguments.get("command") or arguments.get("input") or ""
+        if isinstance(command, list):
+            command = " ".join(str(part) for part in command if part not in ("bash", "-lc", "sh", "-c", "powershell", "-Command"))
+        return _command_action(str(command))
+    return f"调用 {shorten(name, 12)}" if name else ""
+
+
+GROK_KINDS = {"read": "阅读文件", "edit": "编辑代码", "delete": "编辑代码", "move": "编辑代码", "search": "检索代码",
+              "execute": "运行命令", "think": "思考中", "fetch": "查资料"}
+
+
+def _find(value: Any, wanted: str, depth: int = 0):
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        if value.get(wanted):
+            return value[wanted]
+        for item in value.values():
+            found = _find(item, wanted, depth + 1)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value[:20]:
+            found = _find(item, wanted, depth + 1)
+            if found:
+                return found
+    elif isinstance(value, str) and value.startswith("{") and depth == 0:
+        try:
+            return _find(json.loads(value), wanted, depth + 1)
+        except ValueError:
+            return None
+    return None
+
+
+def _moment(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return value / 1000 if value > 1e11 else float(value)
+    if isinstance(value, str) and value:
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+@dataclass
+class Note:
+    key: str
+    title: str = ""          # client-generated thread title
+    prompt: str = ""         # latest substantive request, cleaned
+    request: str = ""        # same request, lightly trimmed for an optional summarizer
+    action: str = ""
+    action_at: float = 0.0
+    cwd: str = ""
+    parent: str = ""
+    role: str = ""
+    active_at: float = 0.0
+    buffer: str = ""
+
+
+class AgentNotes:
+    """Fed record by record from tps_sources on its own thread."""
+
+    def __init__(self):
+        self.notes: dict[str, Note] = {}
+
+    def note(self, key: str) -> Note:
+        return self.notes.setdefault(key, Note(key))
+
+    def ask(self, key: str, text: str, moment: float | None = None):
+        cleaned = clean(text)
+        if cleaned:
+            note = self.note(key)
+            note.prompt, note.request = cleaned, re.sub(r"\s+", " ", str(text)).strip()[:600]
+            note.action, note.action_at = "", moment or note.action_at
+        if moment:
+            self.touch(key, moment)
+
+    def act(self, key: str, action: str, moment: float | None):
+        note = self.note(key)
+        if action and (moment or 0) >= note.action_at:
+            note.action, note.action_at = action, moment or note.action_at
+        if moment:
+            self.touch(key, moment)
+
+    def touch(self, key: str, moment: float):
+        note = self.note(key)
+        note.active_at = max(note.active_at, moment)
+
+    def describe(self, key: str, *, title: str = "", cwd: str = "", parent: str = "", role: str = ""):
+        note = self.note(key)
+        cleaned = clean(title) if title else ""
+        note.title = cleaned or note.title
+        note.cwd = cwd or note.cwd
+        note.parent = parent if parent and parent != key else note.parent
+        note.role = role or note.role
+
+    def codex(self, key: str, record: dict):
+        payload = record.get("payload") or {}
+        moment = _moment(record.get("timestamp"))
+        kind = record.get("type")
+        if kind == "session_meta":
+            self.describe(key, cwd=str(payload.get("cwd") or ""), parent=str(_find(payload.get("source"), "parent_thread_id") or ""),
+                          role=str(_find(payload, "agent_nickname") or _find(payload, "agent_role") or ""))
+        elif kind == "turn_context":
+            self.describe(key, cwd=str(payload.get("cwd") or ""))
+        elif kind == "event_msg" and payload.get("type") == "user_message":
+            self.ask(key, payload.get("message") or "", moment)
+        elif kind == "event_msg" and payload.get("type") in ("agent_reasoning", "agent_reasoning_raw_content"):
+            self.act(key, "思考中", moment)
+        elif kind == "response_item":
+            item = payload.get("type")
+            if item in ("function_call", "custom_tool_call"):
+                self.act(key, tool_action(payload.get("name"), payload.get("arguments") or payload.get("input")), moment)
+            elif item == "local_shell_call":
+                self.act(key, tool_action("local_shell", (payload.get("action") or {})), moment)
+            elif item == "web_search_call":
+                self.act(key, "查资料", moment)
+            elif item == "message" and payload.get("role") == "assistant" and moment:
+                self.touch(key, moment)
+
+    def claude(self, key: str, record: dict, parent: str = ""):
+        moment = _moment(record.get("timestamp"))
+        if record.get("type") == "summary" and record.get("summary"):
+            self.describe(key, title=str(record["summary"]))
+            return
+        if record.get("type") not in ("user", "assistant"):
+            return
+        self.describe(key, cwd=str(record.get("cwd") or ""), parent=parent)
+        content = (record.get("message") or {}).get("content")
+        if record.get("type") == "user":
+            if record.get("isMeta"):
+                return
+            if isinstance(content, str):
+                self.ask(key, content, moment)
+            elif isinstance(content, list):
+                text = " ".join(str(block.get("text") or "") for block in content
+                                if isinstance(block, dict) and block.get("type") == "text")
+                if text.strip():
+                    self.ask(key, text, moment)
+                elif moment:
+                    self.touch(key, moment)
+            return
+        steps = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+        tools = [block for block in steps if block.get("type") == "tool_use"]
+        if tools:
+            self.act(key, tool_action(tools[-1].get("name"), tools[-1].get("input")), moment)
+        elif any(block.get("type") == "thinking" for block in steps):
+            self.act(key, "思考中", moment)
+        elif moment:
+            self.touch(key, moment)
+
+    def grok(self, key: str, record: dict):
+        update = (record.get("params") or {}).get("update") or {}
+        moment = _moment(record.get("timestamp"))
+        kind = update.get("sessionUpdate")
+        note = self.note(key)
+        if kind == "user_message_chunk":
+            content = update.get("content") or {}
+            note.buffer += str(content.get("text") or "") if isinstance(content, dict) else ""
+            return
+        if note.buffer:
+            self.ask(key, note.buffer, moment)
+            note.buffer = ""
+        if kind in ("tool_call", "tool_call_update") and (update.get("title") or update.get("kind")):
+            action = GROK_KINDS.get(str(update.get("kind") or ""), "") or tool_action(str(update.get("title") or ""))
+            self.act(key, action, moment)
+        elif kind == "agent_thought_chunk":
+            self.act(key, "思考中", moment)
+        elif moment:
+            self.touch(key, moment)
+
+    def prune(self, keep: set, now: float):
+        for key, note in list(self.notes.items()):
+            if key not in keep and note.active_at < now - 2 * 86400:
+                self.notes.pop(key, None)
+
+    def export(self, activity: dict, context: dict, rates: dict, now: float, provider_of=lambda model: "other") -> list[dict]:
+        """Agents that are working or finished within RECENT_SECONDS."""
+        result = []
+        keys = set(activity) | {key for key, note in self.notes.items() if note.active_at > now - RECENT_SECONDS}
+        for key in keys:
+            note = self.notes.get(key) or Note(key)
+            act = activity.get(key)
+            if act:
+                note.active_at = max(note.active_at, act[1])
+                self.notes.setdefault(key, note)
+            info = context.get(key) or context.get(note.parent) or {}
+            if not (act or info or note.parent):
+                continue
+            live = bool(act and act[2] != "刚完成生成") or (not act and bool(note.parent) and now - note.active_at < LIVE_SECONDS)
+            source = str(info.get("source") or "")
+            if act:
+                provider = act[0]
+            elif note.parent in activity:
+                provider = activity[note.parent][0]
+            else:
+                provider = provider_of(str(info.get("model") or ""))
+            if provider == "other" and source == "Claude Code":
+                provider = "claude"
+            action = note.action if note.action and note.action_at >= note.active_at - 120 else ""
+            result.append({
+                "key": key, "provider": provider, "source": source, "model": str(info.get("model") or ""),
+                "title": note.prompt or note.title or "", "thread_title": note.title, "request": note.request or note.title,
+                "doing": action if live else "刚完成", "live": live, "at": note.active_at,
+                "parent": note.parent, "role": note.role, "folder": _basename(note.cwd) if note.cwd else "",
+                "tps": rates.get(key),
+            })
+        result.sort(key=lambda item: (not item["live"], -item["at"]))
+        return result
+
+
+# ----- grouping ------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Cluster:
+    key: str
+    members: tuple[dict, ...]
+    manual: bool = False
+
+    @property
+    def live(self) -> bool:
+        return any(member["live"] for member in self.members)
+
+
+def _bigrams(text: str) -> set:
+    text = re.sub(r"\s+", "", text.lower())
+    return {text[index:index + 2] for index in range(max(0, len(text) - 1))}
+
+
+def agent_title(agent: dict) -> str:
+    title = agent.get("title") or ""
+    if title:
+        return title
+    if agent.get("role"):
+        return str(agent["role"])
+    if agent.get("folder"):
+        return f"{agent['folder']} 项目"
+    model = str(agent.get("model") or "").split("/")[-1]
+    return f"{agent.get('source') or '会话'}" + (f" · {model}" if model else "")
+
+
+def group_title(members: tuple[dict, ...]) -> str:
+    """The orchestrator's request when known, else the member most similar to the rest."""
+    keys = {member["key"] for member in members}
+    for member in members:
+        if not member.get("parent") or member["parent"] not in keys:
+            if any(other.get("parent") == member["key"] for other in members) and member.get("title"):
+                return member["title"]
+    titled = [member for member in members if member.get("title")]
+    if not titled:
+        return agent_title(members[0])
+    grams = [_bigrams(member["title"]) for member in titled]
+    def score(index):
+        return sum(len(grams[index] & other) / (len(grams[index] | other) or 1) for other in grams)
+    return titled[max(range(len(titled)), key=lambda index: (score(index), -len(titled[index]["title"])))]["title"]
+
+
+class AgentGroups:
+    """User-made groups plus automatic parent/sub-agent links."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or GROUPS_PATH
+        self.lock = threading.Lock()
+        self.groups: dict[str, dict] = {}
+        self.detached: dict[str, float] = {}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            self.groups = {str(key): {"members": list(value.get("members") or []), "used": float(value.get("used") or 0)}
+                           for key, value in (data.get("groups") or {}).items()}
+            self.detached = {str(key): float(value) for key, value in (data.get("detached") or {}).items()}
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+
+    def _save(self):
+        now = time.time()
+        self.groups = {key: value for key, value in self.groups.items() if value["used"] > now - GROUP_KEEP_SECONDS and len(value["members"]) > 1}
+        self.detached = {key: value for key, value in self.detached.items() if value > now - GROUP_KEEP_SECONDS}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"groups": self.groups, "detached": self.detached}, ensure_ascii=False, indent=1), encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError:
+            log.warning("could not save agent groups", exc_info=True)
+
+    def compose(self, agents: list[dict]) -> list[Cluster]:
+        with self.lock:
+            parent = {agent["key"]: agent["key"] for agent in agents}
+
+            def root(key):
+                parent.setdefault(key, key)
+                while parent[key] != key:
+                    parent[key] = parent[parent[key]]
+                    key = parent[key]
+                return key
+
+            def join(a, b):
+                parent[root(a)] = root(b)
+
+            owner = {}
+            for gid, group in self.groups.items():
+                for member in group["members"]:
+                    owner[member] = gid
+                    join(member, "group:" + gid)
+            for agent in agents:
+                if agent.get("parent") and agent["key"] not in self.detached and agent["key"] not in owner:
+                    join(agent["key"], agent["parent"] if agent["parent"] not in owner else "group:" + owner[agent["parent"]])
+            buckets: dict[str, list[dict]] = {}
+            for agent in agents:
+                buckets.setdefault(root(agent["key"]), []).append(agent)
+            clusters = []
+            for members in buckets.values():
+                gid = next((owner[m["key"]] for m in members if m["key"] in owner), None)
+                if gid:
+                    key = "group:" + gid
+                elif len(members) > 1:
+                    key = "auto:" + min(m.get("parent") or m["key"] for m in members)
+                else:
+                    key = members[0]["key"]
+                clusters.append(Cluster(key, tuple(members), bool(gid)))
+            clusters.sort(key=lambda c: (not c.live, -max(m["at"] for m in c.members)))
+            return clusters
+
+    def merge(self, first: Cluster, second: Cluster) -> str:
+        members = sorted({m["key"] for m in first.members + second.members})
+        with self.lock:
+            for gid in [key for key, group in self.groups.items() if set(group["members"]) & set(members)]:
+                old = self.groups.pop(gid)
+                members = sorted(set(members) | set(old["members"]))
+            gid = hashlib.sha1("|".join(members).encode()).hexdigest()[:10]
+            self.groups[gid] = {"members": members, "used": time.time()}
+            for member in members:
+                self.detached.pop(member, None)
+            self._save()
+        return "group:" + gid
+
+    def split(self, cluster: Cluster) -> list[str]:
+        with self.lock:
+            if cluster.key.startswith("group:"):
+                self.groups.pop(cluster.key[6:], None)
+            now = time.time()
+            for member in cluster.members:
+                if member.get("parent"):
+                    self.detached[member["key"]] = now
+            self._save()
+        return [member["key"] for member in cluster.members]
+
+
+# ----- optional summarizer ----------------------------------------------------------
+
+def summary_config() -> dict | None:
+    """OpenAI-compatible chat completions endpoint, opt-in only."""
+    config = {"url": os.environ.get("CODEX_QUOTA_SUMMARY_URL", ""), "key": os.environ.get("CODEX_QUOTA_SUMMARY_KEY", ""),
+              "model": os.environ.get("CODEX_QUOTA_SUMMARY_MODEL", "")}
+    if not config["url"]:
+        try:
+            stored = json.loads(SUMMARY_CONFIG.read_text(encoding="utf-8"))
+            config.update({key: str(stored.get(key) or "") for key in config})
+        except (OSError, ValueError, AttributeError):
+            return None
+    if not config["url"] or not config["model"]:
+        return None
+    url = config["url"].rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url += "/chat/completions"
+    return {**config, "url": url}
+
+
+SINGLE_PROMPT = ("你为本地编程 agent 的状态气泡写标签。根据请求和最近动作，只输出 JSON："
+                 '{"title":"不超过10个字的任务名","doing":"不超过10个字的当前动作"}。中文名词短语，不要标点。')
+GROUP_PROMPT = ("这些编程 agent 正在并行完成同一个任务的不同部分。只输出 JSON："
+                '{"title":"不超过10个字的总任务名","doing":"不超过12个字的整体进展","parts":{"<id>":"不超过6个字的分工"}}。中文，不要标点。')
+
+
+def _parse_reply(text: str) -> dict:
+    match = re.search(r"\{.*\}", text or "", flags=re.S)
+    if not match:
+        return {}
+    try:
+        value = json.loads(match.group(0))
+    except ValueError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    result = {key: shorten(clean(str(value[key])) or str(value[key]).strip(), 14) for key in ("title", "doing") if value.get(key)}
+    if isinstance(value.get("parts"), dict):
+        result["parts"] = {str(k): shorten(str(v).strip(), 8) for k, v in value["parts"].items() if v}
+    return result
+
+
+class Summarizer:
+    """One background request at a time; results cached by their exact input."""
+
+    def __init__(self, config: dict | None = None, opener=None):
+        self.config = config
+        self.opener = opener or urllib.request.urlopen
+        self.results: dict[str, dict] = {}
+        self.pending: set[str] = set()
+        self.queue: queue.Queue = queue.Queue()
+        self.failed_until = 0.0
+        self.thread: threading.Thread | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.config)
+
+    @staticmethod
+    def signature(cluster: Cluster) -> str:
+        parts = [f"{m['key']}:{m.get('request') or m.get('title')}" for m in cluster.members]
+        return hashlib.sha1(("|".join(sorted(parts)) + str(len(cluster.members) > 1)).encode()).hexdigest()
+
+    def lookup(self, cluster: Cluster) -> tuple[dict, bool]:
+        """(result so far, recognising). Queues work for unseen inputs."""
+        if not self.enabled:
+            return {}, False
+        signature = self.signature(cluster)
+        if signature in self.results:
+            return self.results[signature], False
+        if signature not in self.pending and time.time() >= self.failed_until:
+            if not any(m.get("request") or m.get("title") for m in cluster.members):
+                return {}, False
+            self.pending.add(signature)
+            self.queue.put((signature, cluster))
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._work, name="agent-summary", daemon=True)
+                self.thread.start()
+            return self.results.get(signature, {}), signature not in self.results
+        return {}, signature in self.pending
+
+    def _payload(self, cluster: Cluster) -> dict:
+        items = [{"id": m["key"][-6:], "request": (m.get("request") or m.get("title") or "")[:400],
+                  "folder": m.get("folder") or "", "doing": m.get("doing") or "", "role": m.get("role") or ""}
+                 for m in cluster.members[:6]]
+        grouped = len(cluster.members) > 1
+        return {"model": self.config["model"], "temperature": 0.2, "max_tokens": 160, "stream": False,
+                "messages": [{"role": "system", "content": GROUP_PROMPT if grouped else SINGLE_PROMPT},
+                             {"role": "user", "content": json.dumps(items if grouped else items[0], ensure_ascii=False)}]}
+
+    def request(self, cluster: Cluster) -> dict:
+        body = json.dumps(self._payload(cluster), ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.config.get("key"):
+            headers["Authorization"] = f"Bearer {self.config['key']}"
+        request = urllib.request.Request(self.config["url"], data=body, headers=headers, method="POST")
+        with self.opener(request, timeout=12) as response:
+            reply = json.loads(response.read().decode("utf-8"))
+        text = ((reply.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        result = _parse_reply(text)
+        if "parts" in result:
+            short = {m["key"][-6:]: m["key"] for m in cluster.members}
+            result["parts"] = {short.get(k, k): v for k, v in result["parts"].items()}
+        return result
+
+    def _work(self):
+        while True:
+            try:
+                signature, cluster = self.queue.get(timeout=30)
+            except queue.Empty:
+                return
+            try:
+                self.results[signature] = self.request(cluster)
+            except Exception as error:
+                log.info("agent summary unavailable: %s", type(error).__name__)
+                self.failed_until = time.time() + 300
+                self.results[signature] = {}
+            finally:
+                self.pending.discard(signature)
+            if len(self.results) > 400:
+                for stale in list(self.results)[:200]:
+                    self.results.pop(stale, None)
+
+
+def describe(cluster: Cluster, summary: dict | None = None) -> tuple[str, str, str]:
+    """(bubble title, line under the bubble, longer hover detail)."""
+    summary = summary or {}
+    members = cluster.members
+    if len(members) == 1:
+        agent = members[0]
+        title = summary.get("title") or agent_title(agent)
+        doing = (summary.get("doing") if agent["live"] else "") or agent.get("doing") or ("生成中" if agent["live"] else "刚完成")
+        detail = agent.get("title") or agent.get("thread_title") or title
+        return title, doing, detail
+    title = summary.get("title") or group_title(members)
+    live = [m for m in members if m["live"]]
+    parts = summary.get("parts") or {}
+    roles = []
+    for member in live or members:
+        role = parts.get(member["key"]) or member.get("role") or member.get("doing") or ""
+        if role and role not in roles and role != "刚完成":
+            roles.append(role)
+    doing = summary.get("doing") or f"{len(live) or len(members)} 路并行" + (f" · {'、'.join(roles[:2])}" if roles else "")
+    detail = " / ".join(shorten(agent_title(m), 12) for m in members[:4])
+    return title, doing, detail

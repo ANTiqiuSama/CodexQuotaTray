@@ -15,6 +15,8 @@ from pathlib import Path
 import pystray
 from PIL import Image
 
+import agent_panel
+import agent_tasks
 from detail_card import CardModel
 from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
@@ -80,6 +82,13 @@ def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, r
     if performance.get("active_sessions", 0) and performance.get("display_tps") is not None:
         return make_tps_icon(performance, letter, reset_hint)
     return make_provider_icon(snapshot, letter, reset_hint)
+
+
+def provider_letter(provider: str) -> str:
+    try:
+        return provider_registry.get(provider).letter
+    except KeyError:
+        return "?"
 
 
 def window_label(minutes: int | None) -> str:
@@ -206,6 +215,10 @@ class QuotaTray:
         self.scheduler = RefreshScheduler(PROVIDERS, time.time())
         self.tps_monitor = TpsMonitor()
         self.performance = self.tps_monitor.snapshot(time.time())
+        self.agents: list[dict] = []
+        self.agent_groups = agent_tasks.AgentGroups()
+        self.summarizer = agent_tasks.Summarizer(agent_tasks.summary_config())
+        self.clusters: dict[str, agent_tasks.Cluster] = {}
         self.last_samples: dict[str, float | None] = {}
         self.saved_signature: str | None = None
         self.saved_at = 0.0
@@ -392,6 +405,51 @@ class QuotaTray:
         return CardModel(letter, data["label"], status, tone, snapshot.display_remaining, used, binding,
             tuple(bars), forecast_text, forecast_tone, metrics, tuple(footer), tuple(notes),
             snapshot.error, banner, text=self.hover_text(provider))
+
+    # ----- agent panel (hover thread) ---------------------------------------------
+
+    def panel(self, provider: str, keep: bool = False) -> agent_panel.PanelModel | None:
+        """Bubble panel for a working provider; None keeps the ordinary card."""
+        clusters = self.agent_groups.compose(list(self.agents))
+        working = sum(1 for c in clusters for m in c.members if m["live"] and m["provider"] == provider)
+        if not working and not keep:
+            return None
+        self.clusters = {cluster.key: cluster for cluster in clusters}
+        bubbles = []
+        for cluster in clusters:
+            summary, busy = self.summarizer.lookup(cluster)
+            title, doing, detail = agent_tasks.describe(cluster, summary)
+            kinds = [m["provider"] for m in cluster.members]
+            lead = provider if provider in kinds else next((m["provider"] for m in cluster.members if m["live"]), kinds[0])
+            members = tuple((provider_letter(m["provider"]), m["live"]) for m in cluster.members) if len(cluster.members) > 1 else ()
+            bubbles.append(agent_panel.BubbleModel(cluster.key, agent_tasks.shorten(title, 16), doing, provider_letter(lead),
+                                                   cluster.live, detail, members, busy, provider in kinds,
+                                                   tuple(m["key"] for m in cluster.members)))
+        bubbles.sort(key=lambda bubble: not bubble.focus)
+        snapshot = self.snapshots.get(provider)
+        quota: list[tuple[str, float | None]] = []
+        if snapshot is not None and provider == "mimo":
+            quota.append(("套餐额度", snapshot.display_remaining))
+        elif snapshot is not None:
+            quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent))
+            if snapshot.secondary_window_minutes or snapshot.secondary_remaining_percent is not None:
+                quota.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent))
+        data = self.performance["providers"].get(provider, {})
+        status = f"{working} 个在工作" if working else "空闲"
+        return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
+                                      status, tuple(quota), data.get("display_tps"), tuple(bubbles[:agent_panel.MAX_BUBBLES]))
+
+    def merge(self, first: str, second: str) -> str | None:
+        a, b = self.clusters.get(first), self.clusters.get(second)
+        if a is None or b is None or a.key == b.key:
+            return None
+        return self.agent_groups.merge(a, b)
+
+    def split(self, key: str) -> list[str] | None:
+        cluster = self.clusters.get(key)
+        if cluster is None or len(cluster.members) < 2:
+            return None
+        return self.agent_groups.split(cluster)
 
     @staticmethod
     def reset_summary(label: str, timestamp: int | None, now: float) -> str:
@@ -661,6 +719,7 @@ class QuotaTray:
                     self.wake.set()
                 last_wall = now
                 self.performance = self.tps_monitor.poll(now)
+                self.agents = self.tps_monitor.agents(now)
                 self.save_performance_if_changed(self.performance, now)
                 self.feed_scheduler(self.performance, now)
                 if "mimo" in PROVIDERS:
@@ -916,7 +975,7 @@ class QuotaTray:
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
         if reset_watch.ENABLED and "codex" in PROVIDERS:
             threading.Thread(target=self.reset_loop, name="codex-reset-watch", daemon=True).start()
-        hover = HoverDetails(self.icons, self.hover_card, self.stop_event)
+        hover = HoverDetails(self.icons, self.hover_card, self.stop_event, agents=self)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
         ready = [threading.Event() for _ in self.slots]
 
@@ -996,6 +1055,43 @@ def check_claude(destination: Path, raw: bool = False) -> int:
     return 1 if snapshot.error else 0
 
 
+def check_agents(destination: Path) -> int:
+    """What the bubble panel would show now: JSON report plus a PNG preview."""
+    tray = QuotaTray.__new__(QuotaTray)
+    cached = load_cached_snapshots()
+    tray.snapshots = {provider: cached.get(provider) or placeholder(provider) for provider in PROVIDERS}
+    monitor = TpsMonitor()
+    monitor.poll()
+    time.sleep(1)
+    tray.performance = monitor.poll()
+    tray.agents = monitor.agents(time.time())
+    tray.agent_groups = agent_tasks.AgentGroups()
+    tray.summarizer = agent_tasks.Summarizer(agent_tasks.summary_config())
+    tray.clusters = {}
+    clusters = tray.agent_groups.compose(tray.agents)
+    for cluster in clusters:
+        tray.summarizer.lookup(cluster)
+    deadline = time.time() + 15
+    while tray.summarizer.pending and time.time() < deadline:
+        time.sleep(0.2)
+    report = {"summarizer": bool(tray.summarizer.enabled), "agents": [
+        {key: value for key, value in agent.items() if key != "request"} for agent in tray.agents], "bubbles": []}
+    for cluster in clusters:
+        title, doing, detail = agent_tasks.describe(cluster, tray.summarizer.lookup(cluster)[0])
+        report["bubbles"].append({"key": cluster.key, "title": title, "doing": doing, "detail": detail,
+                                  "members": [m["key"] for m in cluster.members], "manual": cluster.manual})
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    provider = next((m["provider"] for m in tray.agents if m["live"] and m["provider"] in PROVIDERS), next(iter(PROVIDERS)))
+    model = tray.panel(provider, keep=True)
+    scene = agent_panel.Scene()
+    scene.set_model(model, 0.0)
+    for index in range(120):
+        scene.step(index / 60, None, False, False)
+    scene.render(1.5).save(destination.with_suffix(".png"))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) == 4 and sys.argv[1] in ("--claude-quota-worker", "--grok-quota-worker"):
         import cli_quota
@@ -1009,6 +1105,8 @@ def main() -> int:
         tray.performance = json.loads(PERFORMANCE_PATH.read_text(encoding="utf-8"))
         tray.history = QuotaHistory()
         return check_hover_runtime(tray.hover_card("codex"), Path(sys.argv[2]).resolve())
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-agents":
+        return check_agents(Path(sys.argv[2]).resolve())
     if len(sys.argv) == 3 and sys.argv[1] == "--check-tps":
         monitor = TpsMonitor()
         snapshot = monitor.poll()

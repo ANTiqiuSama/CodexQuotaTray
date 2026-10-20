@@ -404,3 +404,69 @@ class CodexLocalLimitTests(unittest.TestCase):
         self.assertTrue(tray.wake.is_set())
         tray.update_codex_locally(207.0)
         tray.scheduler.request.assert_called_once()
+
+
+class AgentPanelTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        import agent_tasks
+        self.folder = tempfile.TemporaryDirectory()
+        tray = QuotaTray.__new__(QuotaTray)
+        tray.snapshots = {provider: tray_app.placeholder(provider) for provider in PROVIDERS}
+        tray.performance = {"providers": {provider: {"label": provider, "display_tps": 42.0} for provider in PROVIDERS}}
+        tray.agent_groups = agent_tasks.AgentGroups(Path(self.folder.name) / "groups.json")
+        tray.summarizer = agent_tasks.Summarizer(None)
+        tray.clusters = {}
+
+        def agent(key, provider, live=True, parent=""):
+            return {"key": key, "provider": provider, "source": "", "model": "", "title": f"任务{key}", "thread_title": "",
+                    "request": "", "doing": "运行测试", "live": live, "at": 1.0, "parent": parent, "role": "", "folder": "", "tps": None}
+        tray.agents = [agent("g1", "grok"), agent("c1", "codex"), agent("c2", "codex", parent="c1"), agent("c3", "codex", live=False)]
+        self.tray = tray
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def test_panel_only_for_working_provider_and_focus_first(self):
+        self.assertIsNone(self.tray.panel("gemini"))
+        self.assertIsNotNone(self.tray.panel("gemini", keep=True))
+        model = self.tray.panel("codex")
+        self.assertEqual(model.status, "2 个在工作")
+        self.assertEqual(model.tps, 42.0)
+        self.assertEqual([bubble.focus for bubble in model.bubbles], [True, True, False])
+        group = next(bubble for bubble in model.bubbles if bubble.members)
+        self.assertEqual(len(group.members), 2)
+        self.assertTrue(model.quota)
+
+    def test_merge_and_split_through_clusters(self):
+        model = self.tray.panel("codex")
+        solo = next(b.key for b in model.bubbles if b.key == "c3")
+        merged = self.tray.merge(solo, "g1")
+        self.assertTrue(merged.startswith("group:"))
+        self.assertIsNone(self.tray.merge("missing", "g1"))
+        model = self.tray.panel("codex")
+        self.assertIn(merged, [b.key for b in model.bubbles])
+        self.assertEqual(sorted(self.tray.split(merged)), ["c3", "g1"])
+        self.assertIsNone(self.tray.split("c3"))
+
+    def test_open_panel_hands_drops_to_the_tray_and_closes_after_grace(self):
+        panel = Mock()
+        panel.provider = "codex"
+        panel.closing_at = None
+        panel.scene.dragging = None
+        panel.contains.return_value = True
+        panel.frame.return_value = [("merge", "a", "b")]
+        agents = Mock()
+        agents.merge.return_value = "group:ab"
+        hover = HoverDetails({}, Mock(), threading.Event(), agents=agents)
+        point = wintypes.POINT(5, 5)
+        hover.drive_panel(panel, point, None, None, False, False, 10.0)
+        agents.merge.assert_called_once_with("a", "b")
+        panel.scene.absorb.assert_called_once_with("a", "b", "group:ab", 10.0)
+        panel.frame.return_value = []
+        panel.contains.return_value = False
+        hover.drive_panel(panel, point, None, None, False, False, 10.2)
+        panel.close.assert_not_called()
+        hover.drive_panel(panel, point, None, None, False, False, 10.0 + hover.PANEL_GRACE + 0.1)
+        panel.close.assert_called_once()
