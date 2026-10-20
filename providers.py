@@ -102,8 +102,8 @@ class ProviderSpec:
     source_note: str = ""
     # Used up: check rarely, then often shortly before the reset.
     exhausted_seconds: int | None = None
-    near_reset_seconds: int = 15 * 60
-    near_reset_poll: int = 2 * 60
+    near_reset_seconds: int = 30 * 60   # start checking more often this long before the reset
+    near_reset_poll: int = 3 * 60       # ... at this interval (every minute in the last 5 min)
     # Repeated failures, or an account without this quota: check rarely.
     give_up_seconds: int | None = None
 

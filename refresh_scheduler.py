@@ -50,6 +50,37 @@ def exhausted_reset(snapshot: Any) -> tuple[bool, float | None]:
         return False, None
     known = [reset for reset in empty if reset]
     return True, (max(known) if len(known) == len(empty) else None)
+
+
+FINAL_LEAD = 5 * 60          # last minutes before a reset: check every FINAL_POLL
+FINAL_POLL = 60
+CONFIRM_FAST = 10 * 60       # after the reset time, until the numbers come back
+CONFIRM_SLOW = 60 * 60
+
+
+def exhausted_schedule(now: float, reset: float | None, window_minutes: int | None, idle: int,
+                       exhausted: int | None, lead: int, poll: int) -> tuple[float, str] | None:
+    """When to read a used-up quota next.  Far from the reset: rarely
+    (`exhausted`, only for providers that opt in).  Closer: every `poll`
+    seconds, every minute in the final minutes, and every minute right after
+    the reset time until the server shows the quota back (it may lag)."""
+    if reset is None or (window_minutes and reset > now + window_minutes * 60 + 86400):
+        # No usable reset time (or an implausible one): never wait long.
+        return (now + idle, "额度用尽（重置时间未知）") if exhausted else None
+    left = reset - now
+    if left <= -CONFIRM_SLOW:
+        return now + idle, "等待重置生效"
+    if left <= -CONFIRM_FAST:
+        return now + min(poll, idle), "等待重置生效"
+    if left <= FINAL_LEAD:
+        return now + min(FINAL_POLL, idle), "临近重置" if left > 0 else "等待重置生效"
+    if left <= lead:
+        return min(now + min(poll, idle), reset - FINAL_LEAD), "临近重置"
+    if exhausted:
+        return min(now + exhausted, reset - lead), "额度用尽"
+    return None
+
+
 RESET_DELAY = 5
 MAX_SLEEP = 30.0
 
@@ -110,14 +141,13 @@ class RefreshScheduler:
                 self.due[provider] = now + interval
                 self.reason[provider] = "使用中" if self.active[provider] else "空闲"
                 used_up, reset = exhausted_reset(snapshot)
-                if used_up and EXHAUSTED[provider]:
+                if used_up:
                     lead, poll = NEAR_RESET[provider]
-                    if reset and reset - lead <= now:
-                        self.due[provider], self.reason[provider] = now + poll, "临近重置"
-                    elif reset:
-                        self.due[provider], self.reason[provider] = min(now + EXHAUSTED[provider], reset - lead), "额度用尽"
-                    else:
-                        self.due[provider], self.reason[provider] = now + EXHAUSTED[provider], "额度用尽"
+                    windows = [getattr(snapshot, "window_minutes", None), getattr(snapshot, "secondary_window_minutes", None)]
+                    longest = max([w for w in windows if w] or [0]) or None
+                    plan = exhausted_schedule(now, reset, longest, IDLE[provider], EXHAUSTED[provider], lead, poll)
+                    if plan is not None:
+                        self.due[provider], self.reason[provider] = plan
             for reset in (getattr(snapshot, "resets_at", None), getattr(snapshot, "secondary_resets_at", None)):
                 if reset and reset > now:
                     self._forward(provider, reset + RESET_DELAY, "额度重置")

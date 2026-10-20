@@ -139,22 +139,54 @@ class SchedulerTests(unittest.TestCase):
     def test_exhausted_grok_waits_then_polls_near_reset(self):
         from refresh_scheduler import EXHAUSTED, NEAR_RESET
         scheduler = RefreshScheduler(("grok",), 0)
-        scheduler.take_due(0)
-        empty = self.snapshot(resets_at=100_000)
-        empty.remaining_percent = 0.0
-        scheduler.completed("grok", empty, 0)
-        self.assertEqual(scheduler.due["grok"], EXHAUSTED["grok"])
-        self.assertIn("额度用尽", scheduler.describe("grok", 0))
         lead, poll = NEAR_RESET["grok"]
-        scheduler.take_due(100_000 - lead + 10)
-        scheduler.completed("grok", empty, 100_000 - lead + 10)
-        self.assertEqual(scheduler.due["grok"], 100_000 - lead + 10 + poll)
-        self.assertIn("临近重置", scheduler.describe("grok", 100_000 - lead + 10))
-        # Codex keeps its normal cadence when used up (early resets happen).
-        codex = RefreshScheduler(("codex",), 0)
-        codex.take_due(0)
-        codex.completed("codex", empty, 0)
-        self.assertEqual(codex.due["codex"], IDLE["codex"])
+        reset = 400_000
+        empty = self.snapshot(resets_at=reset)
+        empty.remaining_percent, empty.window_minutes = 0.0, 10080
+
+        def read(now):
+            scheduler.take_due(now)
+            scheduler.completed("grok", empty, now)
+            return scheduler.due["grok"] - now, scheduler.reason["grok"]
+
+        self.assertEqual(read(0), (EXHAUSTED["grok"], "额度用尽"))
+        self.assertEqual(read(reset - lead - 600), (600, "额度用尽"))           # wakes exactly at the lead
+        self.assertEqual(read(reset - lead), (poll, "临近重置"))
+        self.assertEqual(read(reset - 400), (100, "临近重置"))                  # lands on the final 5 minutes
+        self.assertEqual(read(reset - 200), (60, "临近重置"))
+        # The reset time passed but the CLI still says used up: keep checking.
+        self.assertEqual(read(reset + 30), (60, "等待重置生效"))
+        self.assertEqual(read(reset + 1200), (poll, "等待重置生效"))
+        self.assertEqual(read(reset + 7200), (IDLE["grok"], "等待重置生效"))
+
+    def test_exhausted_with_unknown_or_implausible_reset_is_not_parked_for_hours(self):
+        scheduler = RefreshScheduler(("grok",), 0)
+        for reset in (None, 400 * 86400):
+            empty = self.snapshot(resets_at=reset)
+            empty.remaining_percent, empty.window_minutes = 0.0, 10080
+            scheduler.take_due(0)
+            scheduler.completed("grok", empty, 0)
+            self.assertEqual(scheduler.due["grok"], IDLE["grok"])
+
+    def test_reset_date_that_just_passed_is_not_moved_to_next_year(self):
+        from datetime import datetime, timedelta
+        from cli_usage import parse_reset
+        for offset, expect_shift in ((timedelta(hours=-2), 0), (timedelta(days=2), 0), (timedelta(days=-10), 1)):
+            moment = (datetime.now() + offset).replace(second=0, microsecond=0)
+            text = f"Weekly limit: 100%\nNext reset: {moment.strftime('%B')} {moment.day}, {moment.strftime('%H:%M')}"
+            expected = moment.replace(year=moment.year + expect_shift)
+            self.assertEqual(parse_reset(text), int(expected.timestamp()), text)
+
+    def test_codex_used_up_keeps_normal_cadence_then_fast_after_reset(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        empty = self.snapshot(resets_at=10_000)
+        empty.remaining_percent, empty.window_minutes = 0.0, 300
+        scheduler.take_due(0)
+        scheduler.completed("codex", empty, 0)
+        self.assertEqual(scheduler.due["codex"], IDLE["codex"])
+        scheduler.take_due(10_010)
+        scheduler.completed("codex", empty, 10_010)
+        self.assertEqual(scheduler.due["codex"], 10_070)
 
     def test_claude_without_subscription_is_checked_rarely_and_ignores_activity(self):
         from refresh_scheduler import GIVE_UP
