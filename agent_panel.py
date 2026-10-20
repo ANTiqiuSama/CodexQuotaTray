@@ -107,8 +107,8 @@ def chip_height(model) -> float:
 def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
-    top = FIELD_TOP + (14 if any(len(item) > 2 and item[2] for item in model.quota) else 0)
-    return top + (26 if model.banner else 0)
+    # The reset-text row is always reserved so every source's panel is the same height.
+    return FIELD_TOP + 14 + (26 if model.banner else 0)
 
 
 def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
@@ -530,10 +530,9 @@ class Scene:
                                        radius=max(1, round(2 * scale)), fill=fill)
         x = columns[-1][0]
         color = accent(model.letter)
-        if model.tps is None:
-            blit_at(frame, figure("—", "", TEXT, TEXT, scale), at(x), at(METER_TOP + 38))
-        else:
-            blit_at(frame, figure(f"{max(0.0, self.rate.value):.0f}", "tok/s", color, SECONDARY_TEXT, scale), at(x), at(METER_TOP + 38))
+        rate = max(0.0, self.rate.value)
+        blit_at(frame, figure(f"{rate:.0f}", "tok/s", color if model.tps and rate >= 0.5 else TEXT, SECONDARY_TEXT, scale),
+                at(x), at(METER_TOP + 38))
         if model.status_tone == "live":
             p = (self.time % 1.8) / 1.8
             blit(frame, faded(ring(round((4 + 7 * ease_out_cubic(p)) * scale), max(1, round(1.2 * scale)), model.letter),

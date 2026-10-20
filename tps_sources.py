@@ -338,14 +338,15 @@ class TpsMonitor:
     def _refresh_schedules(self, state: Path, now: float):
         if state.is_file():
             try:
-                with readonly_db(state) as db:
+                with closing(readonly_db(state)) as db:
                     columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
                     text = [name for name in ("first_user_message", "title") if name in columns]
                     if text and "created_at" in columns:
                         rows = db.execute(f"SELECT {','.join(text)},created_at FROM threads ORDER BY created_at DESC LIMIT 2000").fetchall()
                         runs: dict[str, list[float]] = {}
                         for row in rows:
-                            prompt = clean_request(next((str(value) for value in row[:-1] if value), ""))
+                            prompt = next((cleaned for value in row[:-1] if value
+                                           and (cleaned := clean_request(str(value)))), "")
                             started = timestamp(row[-1])
                             if prompt and started and started > now - 7 * 86400:
                                 runs.setdefault(prompt, []).append(started)

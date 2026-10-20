@@ -2,6 +2,8 @@ import threading
 from types import SimpleNamespace
 import time
 import unittest
+
+import agent_panel
 from unittest.mock import Mock, call, patch
 
 import pystray
@@ -404,7 +406,7 @@ class AgentPanelTests(unittest.TestCase):
     def tearDown(self):
         self.folder.cleanup()
 
-    def test_panel_for_every_provider_with_focus_first_and_schedules_apart(self):
+    def test_panel_for_every_provider_same_layout_and_schedules_apart(self):
         idle = self.tray.panel("gemini")
         self.assertNotEqual(idle.status_tone, "live")
         self.assertEqual(len(idle.bubbles), 3)
@@ -414,7 +416,12 @@ class AgentPanelTests(unittest.TestCase):
         self.assertEqual([(chip.title, chip.running) for chip in model.schedules], [("任务s1", True), ("日报", False)])
         self.assertEqual(model.schedules[1].when, "待运行")
         self.assertEqual(model.tps, 42.0)
-        self.assertEqual([bubble.focus for bubble in model.bubbles], [True, True, False])
+        self.assertEqual(sorted(bubble.focus for bubble in model.bubbles), [False, True, True])
+        # Same bubbles, order and header height on every icon: the panel never changes size when switching.
+        other = self.tray.panel("grok")
+        self.assertEqual([b.key for b in other.bubbles], [b.key for b in model.bubbles])
+        self.assertEqual(agent_panel.field_top(other), agent_panel.field_top(model))
+        self.assertEqual(other.tps, 42.0)
         group = next(bubble for bubble in model.bubbles if bubble.members)
         self.assertEqual(len(group.members), 2)
         self.assertTrue(model.quota)

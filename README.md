@@ -229,7 +229,7 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 | 定时任务行 | 见下文“定时任务”，不生成气泡 |
 | 外圈 | 颜色对应模型来源；呼吸波纹表示正在生成，暗淡表示 3 分钟内刚完成；大气泡上的小圆点是各并行成员 |
 
-所有来源的 agent 都会出现在同一面板，被悬停来源的气泡排在前面并高亮。气泡分组规则：
+所有来源的 agent 都会出现在同一面板，被悬停来源的气泡高亮；各图标的面板大小与气泡排列一致，切换图标时不跳动（无 TPS 时显示 0 tok/s，Codex 全局重置提示条在所有面板显示）。气泡分组规则：
 
 - **自动**：客户端自己派生的子 agent 归入父任务——Codex `spawn_agent` 子线程（`parent_thread_id`）、Claude Code `subagents/`、MiMo Code 子会话（`parent_id`）。
 - **手动**：拖动气泡叠到另一个上，目标亮起光环、被拖的气泡被轻轻吸过去，松开即合并（面板上不再显示操作说明）；分组按会话 ID 保存，重启后仍生效。右键大气泡拆开，拆开后也不再自动归组。
@@ -242,7 +242,7 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 - **运行中**：来源主色标签、呼吸圆点；该次运行结束后立即消失，不作为“刚完成”的气泡停留。
 - **未运行**：灰色标签，显示“下次 HH:MM”或“上次 HH:MM”，都没有时为“待运行”。
 
-识别依据（尽力而为，客户端版本不同可能需要校准）：Codex 状态库中名称含 `automation` 的表与 `~/.codex/automations/` 下的定义、Claude `~/.claude/scheduled-tasks/*/SKILL.md`；会话元数据（originator、source、entrypoint）中的 automation / schedule / cron / heartbeat / 定时 标记；7 天内同一请求以 30 分钟以上间隔重复出现。`--check-agents` 输出中的 `schedules`、`schedule_chips` 与各 agent 的 `origin`、`schedule` 字段可用于核对。
+识别依据（尽力而为，客户端版本不同可能需要校准）：Codex 的 `~/.codex/sqlite/codex-dev.db`、状态库中的自动化表与 `automations/*/automation.toml` 定义（不把 `memory.md` 当作任务），以及 Claude `~/.claude/scheduled-tasks/*/SKILL.md`；会话元数据中的 automation / schedule / cron / heartbeat / 定时 标记，以及用户消息中的 `<heartbeat><automation_id>…` 信封。heartbeat 只标记该次运行，不会把同一聊天后来手动发起的任务永久归为定时任务。7 天内间隔超过 30 分钟的重复请求也会归入此行；通用占位标题不计入。`--check-agents` 输出中的 `schedules`、`schedule_chips` 与各 agent 的 `origin`、`schedule` 字段可用于核对。
 
 ### 可选：轻量模型命名
 

@@ -383,7 +383,7 @@ class QuotaTray:
             bubbles.append(agent_panel.BubbleModel(cluster.key, agent_tasks.shorten(title, 16), doing, provider_letter(lead),
                                                    cluster.live, detail, members, busy, provider in kinds,
                                                    tuple(m["key"] for m in cluster.members)))
-        bubbles.sort(key=lambda bubble: not bubble.focus)
+        # Same order for every icon so the panel keeps its size and layout when switching.
         snapshot = self.snapshots.get(provider)
         quota: list[tuple] = []
         if snapshot is not None and provider == "mimo":
@@ -407,14 +407,17 @@ class QuotaTray:
             status, tone = "读取失败", "error"
         else:
             status, tone = "空闲", "idle"
-        banner = ""
-        if provider == "codex" and reset_watch.ENABLED and snapshot is not None:
-            banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), snapshot.display_remaining, now)[0]
+        # The Codex reset notice is shown on every panel (same size everywhere).
+        banner, codex = "", self.snapshots.get("codex")
+        if reset_watch.ENABLED and codex is not None and "codex" in self.snapshots:
+            banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), codex.display_remaining, now)[0]
+            if banner and provider != "codex":
+                banner = "Codex · " + banner
         chips = tuple(agent_panel.ScheduleChip(chip["key"], chip["title"], chip["running"],
                                                provider_letter(chip["provider"]) if chip["provider"] else "", schedule_when(chip, now))
                       for chip in agent_tasks.schedule_chips(getattr(self.tps_monitor, "schedules", []), self.agents, now))
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
-                                      status, tuple(quota), data.get("display_tps"), tuple(bubbles[:agent_panel.MAX_BUBBLES]),
+                                      status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, chips)
 
     def merge(self, first: str, second: str) -> str | None:
