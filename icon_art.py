@@ -105,9 +105,17 @@ def accent(letter: str) -> tuple[int, int, int, int]:
     return ACCENTS.get(letter, IVORY)
 
 
+# Sources drawn in their own TPS colour at every quota level, so the idle ring,
+# the panel bars and the lit TPS disc never disagree (Gemini's pools often sit
+# below 50 % and used to flip between lavender and amber).
+UNIFORM_LETTERS = {"G"}
+
+
 def ring_color(percent: float | None, letter: str) -> tuple[int, int, int, int]:
     if percent is None:
         return MUTED
+    if letter in UNIFORM_LETTERS:
+        return accent(letter)
     if percent >= 50:
         return accent(letter)
     if percent >= 20:

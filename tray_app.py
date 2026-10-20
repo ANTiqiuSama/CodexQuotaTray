@@ -199,6 +199,15 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
 # CODEX_QUOTA_TRAY_ORDER: "auto" (default) or "fixed" (registry order).
 TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
 REORDER_MIN_SECONDS = 60
+PREFERENCES_PATH = DATA_DIR / "settings.json"
+
+
+def load_preferences() -> dict:
+    try:
+        value = json.loads(PREFERENCES_PATH.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
 RESET_PATH = DATA_DIR / "codex_reset.json"
 # Providers whose quota resets raise a Windows notification.
 RESET_NOTIFY = {part.strip().lower() for part in (os.environ.get("CODEX_QUOTA_RESET_NOTIFY") or "codex,grok,claude").split(",") if part.strip()}
@@ -269,6 +278,7 @@ class QuotaTray:
         self.history = QuotaHistory()
         self.scheduler = RefreshScheduler(PROVIDERS, time.time())
         self.tps_monitor = TpsMonitor()
+        self.apply_preferences(load_preferences())
         self.performance = self.tps_monitor.snapshot(time.time())
         self.agents: list[dict] = []
         self.agent_groups = agent_tasks.AgentGroups()
@@ -1033,6 +1043,31 @@ class QuotaTray:
                 self.settings_ui = SettingsController(self)
             self.settings_ui.show()
         log.info("settings window requested")
+
+    def apply_preferences(self, prefs: dict) -> None:
+        """Settings-page choices; an explicitly set environment variable still wins."""
+        global TRAY_ORDER_MODE
+        if not os.environ.get("CODEX_QUOTA_TRAY_ORDER") and prefs.get("tray_order") in ("auto", "fixed"):
+            TRAY_ORDER_MODE = prefs["tray_order"]
+        if not os.environ.get("CODEX_QUOTA_HERDR") and "herdr" in prefs:
+            herdr = self.tps_monitor.herdr
+            herdr.enabled = bool(prefs["herdr"])
+            herdr.status = herdr.status if herdr.enabled else "未启用"
+            if not herdr.enabled:
+                herdr.rows = []
+
+    def save_preferences(self, prefs: dict) -> None:
+        merged = {**load_preferences(), **prefs}
+        PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PREFERENCES_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, PREFERENCES_PATH)
+        self.apply_preferences(merged)
+        if getattr(self, "icons", None):
+            try:
+                self.maybe_reorder(time.time(), force=True)
+            except Exception:
+                log.warning("reorder after preference change failed", exc_info=True)
 
     def apply_summary_settings(self, config: dict, enabled: bool) -> None:
         from settings_window import save_summary
