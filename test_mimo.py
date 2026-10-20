@@ -180,6 +180,23 @@ class StorageTests(unittest.TestCase):
 
 
 class TrackerTests(unittest.TestCase):
+    def test_daily_usage_cache_and_local_midnight_rollover(self):
+        now = mimo_usage._local_midnight(self.now) + 12 * 3600
+        self.tracker.refresh(lambda: self.plan(used=40e9, fetched=now - 60))
+        self.tracker.refresh(lambda: self.plan(used=41e9, fetched=now - 1))
+        view = self.tracker.view(now)
+        self.assertEqual(view.today_used, 1e9)
+        snapshot = quota_sources.mimo_snapshot(view)
+        self.assertEqual(snapshot.today_date, datetime.fromtimestamp(now).strftime("%Y-%m-%d"))
+        with patch.object(quota_sources, "CACHE_PATH", self.dir / "state.json"):
+            quota_sources.save_cached_snapshots({"mimo": snapshot})
+            restored = quota_sources.load_cached_snapshots()["mimo"]
+        self.assertEqual(restored.today_used, 1e9)
+        self.assertEqual(restored.today_date, snapshot.today_date)
+        tomorrow = self.tracker.view(now + DAY)
+        self.assertEqual(tomorrow.today_used, 0)
+        self.assertNotEqual(tomorrow.day, view.day)
+
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.ledger = LocalLedger(self.dir / "ledger.json")

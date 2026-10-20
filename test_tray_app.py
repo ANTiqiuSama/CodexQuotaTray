@@ -394,6 +394,20 @@ class CodexLocalLimitTests(unittest.TestCase):
 
 
 class AgentPanelTests(unittest.TestCase):
+    def test_mimo_today_stat_uses_current_cache_and_never_yesterdays_total(self):
+        from datetime import datetime
+        snapshot = tray_app.placeholder("mimo")
+        snapshot.today_used = 1.53e9
+        snapshot.today_date = datetime.now().strftime("%Y-%m-%d")
+        self.tray.snapshots["mimo"] = snapshot
+        self.tray.headline_forecast = Mock(return_value=("", "unknown"))
+        with patch("tray_app.mimo_tracker") as tracker:
+            self.assertEqual(self.tray.panel("mimo").today_used, 1.53e9)
+            tracker.assert_not_called()
+            snapshot.today_date = "2000-01-01"
+            tracker.return_value.view.return_value.today_used = 1234
+            self.assertEqual(self.tray.panel("mimo").today_used, 1234)
+
     def setUp(self):
         import tempfile
         from pathlib import Path

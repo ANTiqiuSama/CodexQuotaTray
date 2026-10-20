@@ -466,6 +466,7 @@ class MimoView:
     anchor_at: float | None
     error: str | None
     estimated: bool
+    day: str = ""                          # local calendar day of today_used
 
 
 class MimoTracker:
@@ -555,7 +556,7 @@ class MimoTracker:
         return MimoView(total, used, remaining, used_percent, start, end, time_percent, today_used, today_budget,
                         left_percent, day_marker, pace, exhausts, local_today, self.ledger.by_source(midnight),
                         plan.plan_name if plan else "", plan.source if plan else "", anchor, error,
-                        self.ledger.estimated(midnight))
+                        self.ledger.estimated(midnight), today_key)
 
 
 # ----- Edge login (Chrome DevTools Protocol over a tiny WebSocket client) -------

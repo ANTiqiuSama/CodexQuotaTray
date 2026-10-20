@@ -9,7 +9,7 @@ from PIL import Image
 import agent_panel as ap
 
 
-def demo_models() -> tuple[ap.PanelModel, ap.PanelModel]:
+def demo_models() -> tuple[ap.PanelModel, ...]:
     bubble = ap.BubbleModel
     busy = ap.PanelModel(
         "codex", "C", "GPT / Codex", "2 个在工作",
@@ -20,7 +20,9 @@ def demo_models() -> tuple[ap.PanelModel, ap.PanelModel]:
         "live", "GPT 社区重置预测 · 24h 22% · 48h 39%",
         "5 小时额度：按当前速度，预计 2 小时 40 分后用完，早于下次重置约 35 分钟", "warn")
     idle = ap.PanelModel("grok", "G", "Grok", "空闲", (("2 小时", 100.0, "已到重置时间"),), None, (), "idle")
-    return busy, idle
+    mimo = ap.PanelModel("mimo", "X", "Xiaomi MiMo", "空闲", (("套餐额度", 96.9, ""),), 0, (), "idle",
+                         forecast="按近期速度可用到到期，预计剩余 82%", forecast_tone="ok", today_used=1.53e9)
+    return busy, idle, mimo
 
 
 def render(destination: Path, scale: float = 1.5) -> Path:

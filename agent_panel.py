@@ -79,6 +79,7 @@ class PanelModel:
     banner: str = ""
     forecast: str = ""                          # pace forecast: will the quota last at the current rate
     forecast_tone: str = "unknown"              # danger | warn | ok | idle | unknown
+    today_used: float | None = None              # MiMo Credits used today
 
     @property
     def header(self) -> tuple:
@@ -86,7 +87,7 @@ class PanelModel:
         TPS are animated per frame, so only their labels and reset texts are here."""
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]), self.banner,
-                (self.forecast, self.forecast_tone), not self.bubbles)
+                (self.forecast, self.forecast_tone), not self.bubbles, self.provider == "mimo")
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
@@ -246,6 +247,7 @@ class Scene:
         self.homes: dict[str, tuple[float, float]] = {}
         self.meters: list[Spring] = []          # quota bars count up from zero when the panel opens
         self.rate = Spring(0.0, 120.0, 22.0)    # TPS figure eases between readings
+        self.today_usage = Spring(0.0, 90.0, 19.0)
         self.opened = 0.0
         self.gear = Spring(0.0, 260.0, 26.0)    # settings gear highlight under the pointer
         self.gear_angle = 0.0
@@ -302,6 +304,7 @@ class Scene:
         for spring, value in zip(self.meters, values):
             spring.target = 0.0 if value is None else float(value)
         self.rate.target = float(model.tps or 0.0)
+        self.today_usage.target = float(model.today_used or 0.0)
         bubbles = model.bubbles[:MAX_BUBBLES]
         self.homes, self.field.target = pack(bubbles, field_top(model))
         if first:
@@ -421,6 +424,7 @@ class Scene:
             for spring in self.meters:
                 spring.step(dt)
         self.rate.step(dt)
+        self.today_usage.step(dt)
         x0, y0, x1, y1 = self.bounds
         bodies = list(self.bodies.items())
         for key, body in bodies:
@@ -472,7 +476,7 @@ class Scene:
     @property
     def animating(self) -> bool:
         return bool(self.dragging or self.ghosts or self.ripples or not self.field.settled or not self.rate.settled
-                    or not self.gear.settled or self.gear.value > 0.01
+                    or not self.gear.settled or self.gear.value > 0.01 or not self.today_usage.settled
                     or any(not spring.settled for spring in self.meters) or any(
             not (b.scale.settled and b.radius.settled and b.hover.settled and b.glow.settled) for b in self.bodies.values()))
 
@@ -556,7 +560,7 @@ class Scene:
         ping on the title dot while agents work, drifting shells when idle."""
         draw = ImageDraw.Draw(frame)
         meter_top = METER_TOP + header_offset(model)
-        columns = meter_columns(len(self.meters))
+        columns = meter_columns(len(self.meters) + (model.provider == "mimo"))
         for (x, end), spring, item in zip(columns, self.meters, model.quota[:3]):
             value = item[1]
             shade = TEXT if value is None or value >= 50 else ring_color(value, model.letter)
@@ -568,6 +572,10 @@ class Scene:
                 draw.rounded_rectangle((round(at(x)), round(at(meter_top + 45)),
                                         round(at(x + max(4.0, (end - x) * min(100.0, shown) / 100))), round(at(meter_top + 49))),
                                        radius=max(1, round(2 * scale)), fill=fill)
+        if model.provider == "mimo":
+            number, unit = compact_usage(None if model.today_used is None else self.today_usage.value)
+            blit_at(frame, figure(number, unit, accent(model.letter), SECONDARY_TEXT, scale),
+                    at(columns[-2][0]), at(meter_top + 38))
         x = columns[-1][0]
         color = accent(model.letter)
         rate = max(0.0, self.rate.value)
@@ -830,10 +838,31 @@ PILL_TONES = {"stale": ((229, 168, 75, 46), (229, 168, 75, 255)), "error": ((226
               "idle": ((240, 238, 230, 20), SECONDARY_TEXT)}
 
 
+def compact_usage(value: float | None) -> tuple[str, str]:
+    """Three significant digits, with rounding promoted at K/M/B boundaries."""
+    if value is None or not math.isfinite(value):
+        return "—", ""
+    value = max(0.0, value)
+    units = ("", "K", "M", "B")
+    index = 0
+    while value >= 1000 and index < len(units) - 1:
+        value /= 1000
+        index += 1
+    places = 2 if index and value < 10 else 1 if index and value < 100 else 0
+    if round(value, places) >= 1000 and index < len(units) - 1:
+        value /= 1000
+        index += 1
+        places = 2
+    number = f"{value:.{places}f}"
+    if places:
+        number = number.rstrip("0").rstrip(".")
+    return number, units[index]
+
+
 @lru_cache(maxsize=24)
 def background(header: tuple, field_h: int, scale: float) -> Image.Image:
-    letter, title, status, tone, meters, banner, forecast, empty = header
-    model = PanelModel("", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (), tone, banner,
+    letter, title, status, tone, meters, banner, forecast, empty, daily = header
+    model = PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (), tone, banner,
                        forecast[0], forecast[1])
     top = field_top(model)
     height = panel_height(model, field_h)
@@ -854,9 +883,13 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
 
     y = METER_TOP + header_offset(model)
     label_font, small = ui_font(px(11)), ui_font(px(10))
-    columns = meter_columns(len(meters))
-    for (x, end), (label, reset) in zip(columns, tuple(meters) + (("TPS", ""),)):
+    columns = meter_columns(len(meters) + daily)
+    labels = tuple(meters) + ((("今日用量", "Credits"),) if daily else ()) + (("TPS", ""),)
+    for (x, end), (label, reset) in zip(columns, labels):
         draw.text((px(x), px(y)), label, font=label_font, fill=MUTED_TEXT, anchor="lt")
+        if daily and label == "今日用量":
+            draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
+            continue
         if label != "TPS":
             draw.rounded_rectangle((px(x), px(y + 45), px(end), px(y + 49)), radius=px(2), fill=TRACK)
             if reset:

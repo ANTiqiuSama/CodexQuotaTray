@@ -39,6 +39,8 @@ class QuotaSnapshot:
     # Separate model pools (Antigravity: Argon, Claude/GPT, Gemini). The
     # primary fields above mirror the first pool, which the ring shows.
     pools: list[dict[str, Any]] | None = None
+    today_used: float | None = None          # MiMo Credits, not a daily quota
+    today_date: str | None = None            # local date; do not reuse yesterday's total
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -288,6 +290,8 @@ def mimo_snapshot(view, label: str = "Xiaomi MiMo") -> QuotaSnapshot:
         # instead of being replaced by "unknown" while logged out.
         bool(view.error) and has_numbers,
         None if has_numbers else (view.error or "暂无 MiMo 套餐数据"),
+        today_used=view.today_used,
+        today_date=view.day,
     )
 
 
@@ -365,6 +369,8 @@ def load_cached_snapshots() -> dict[str, QuotaSnapshot]:
                 error=None,
                 **{name: item.get(name) for name in SECONDARY_FIELDS},
                 pools=item.get("pools") if isinstance(item.get("pools"), list) else None,
+                today_used=item.get("today_used"),
+                today_date=item.get("today_date"),
             )
             result[snapshot.provider] = snapshot
         return result

@@ -329,6 +329,28 @@ def panel(*bubbles):
 
 
 class SceneTests(unittest.TestCase):
+    def test_daily_usage_switches_units_and_promotes_rounded_boundaries(self):
+        cases = [(None, ("—", "")), (0, ("0", "")), (999, ("999", "")), (1000, ("1", "K")),
+                 (12500, ("12.5", "K")), (999500, ("1", "M")), (1250000, ("1.25", "M")),
+                 (999500000, ("1", "B")), (1530000000, ("1.53", "B"))]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(agent_panel.compact_usage(value), expected)
+
+    def test_mimo_daily_usage_is_animated_beside_quota_and_tps(self):
+        model = agent_panel.PanelModel("mimo", "X", "Xiaomi MiMo", "空闲", (("套餐额度", 97, ""),), 42, (), "idle", today_used=1.53e9)
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0)
+        self.settle(scene, frames=300)
+        self.assertAlmostEqual(scene.today_usage.value, model.today_used, delta=100)
+        for scale in (1, 1.25, 1.5):
+            self.assertIsNotNone(scene.render(scale))
+            image, _ = agent_panel.figure(*agent_panel.compact_usage(model.today_used), agent_panel.TEXT, agent_panel.SECONDARY_TEXT, scale)
+            columns = agent_panel.meter_columns(2)
+            self.assertLess(image.width, (columns[2][0] - columns[1][0]) * scale)
+        from dataclasses import replace
+        self.assertEqual(model.header, replace(model, today_used=2e9).header)
+
     def test_long_quota_forecast_wraps_without_losing_the_ending_at_each_dpi(self):
         from PIL import Image, ImageDraw
         text = "5 小时额度：按当前速度，预计 2 小时 40 分后用完，早于下次重置约 35 分钟"
