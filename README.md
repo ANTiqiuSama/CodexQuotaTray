@@ -18,7 +18,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 
 ### 图标与面板示例
 
-以下图片由项目自身的绘制代码生成，使用演示数据，不代表真实账号额度、实测速率或当前运行状态。图标依次展示 C、G、M、A；A 为可选的 Claude Code 来源。
+以下图片由项目自身的绘制代码生成，使用演示数据，不代表真实账号额度、实测速率或当前运行状态。图标依次展示 C、X、G、A、M（依次对应 Codex、Grok、Gemini、Claude、MiMo）；A 为可选的 Claude Code 来源。
 
 ![深浅背景下的图标演示，包含 16、24、64 像素尺寸](assets/icons-demo.png)
 
@@ -29,10 +29,10 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 | 图标 | 来源 | 额度读取方式 | 生成速率与输出计数 | 当前边界 |
 | --- | --- | --- | --- | --- |
 | C | GPT / Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
-| G | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
-| M | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），圆环优先显示 Argon，其次 Claude/GPT，最后 Gemini | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
+| X | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
+| G | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），圆环优先显示 Argon，其次 Claude/GPT，最后 Gemini | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
 | A | Claude Code，可选 | 临时 Claude Code 会话执行 `/usage`，解析当前会话与每周订阅窗口 | 读取本地会话的 `message.usage.output_tokens` | 解析、去重与错误路径已有测试；真实订阅账号额度尚缺端到端验收；免费桌面端额度未接入 |
-| X | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
+| M | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
 
 额度、输出计数和生成速率来自不同信号。能读到额度，不代表同一来源也提供生成 TPS；没有近期记录也不能证明没有使用。
 
@@ -46,13 +46,13 @@ Claude 默认关闭，不会因安装客户端而开始读取。开通订阅并�
 
 ### Xiaomi MiMo Token Plan
 
-Token Plan 按 Credits 计费，本程序统一按**年度**一个额度池计算（周期为套餐到期日前的一年；控制台若有按月的账期不单独显示），没有 5 小时/每周窗口。X 图标（小米橙）的外环显示**年度额度**剩余比例；环上的象牙色刻度是“按时间平均使用时应剩的位置”，外环短于刻度说明用得偏快。任务面板顶部显示套餐剩余；右键“额度详情”列出年度额度（附“时间已过 x%”）、剩余 Credits / 已用 Credits / 今日已用 / 日均消耗、到期日、本机今日各来源用量，并按“整期平均”和“最近 7 天本机日均”中较快者预测是否会提前用完。
+Token Plan 按 Credits 计费，本程序统一按**年度**一个额度池计算（周期为套餐到期日前的一年；控制台若有按月的账期不单独显示），没有 5 小时/每周窗口。M 图标（小米橙）的外环显示**年度额度**剩余比例；环上的象牙色刻度是“按时间平均使用时应剩的位置”，外环短于刻度说明用得偏快。任务面板顶部显示套餐剩余；右键“额度详情”列出年度额度（附“时间已过 x%”）、剩余 Credits / 已用 Credits / 今日已用 / 日均消耗、到期日、本机今日各来源用量，并按“整期平均”和“最近 7 天本机日均”中较快者预测是否会提前用完。
 
 MiMo 面板顶部将套餐额度、今日用量和 TPS 并排显示。今日用量以 Credits 计，按本地自然日统计，自动使用 K（千）、M（百万）、B（十亿）单位；数值取本机账本与控制台当天首次读取后增量的较大值，不重复相加。首次读取前的其他设备消耗无法追溯。换日后重新计数，缓存同时保存日期，避免把昨天的总量显示成今天。
 
 数据来源（按优先级）：
 
-1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。右键 X 图标选“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口；登录后程序在控制台页面内读取套餐（与网页本身的登录方式无关），成功后窗口自动关闭并弹出结果。程序只保留 `platform.xiaomimimo.com` 的 cookie 和控制台接口请求自带的令牌请求头（如有），用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；之后直接读取接口；被拒绝（过期或需要更多凭据）时用同一配置无窗口地在页面内读取一次并更新会话，仍失败才提示重新登录（6 小时内不重复尝试）。“退出 MiMo 登录”删除保存的会话。
+1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。右键 M 图标选“登录小米 MiMo…”（或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口；登录后程序在控制台页面内读取套餐（与网页本身的登录方式无关），成功后窗口自动关闭并弹出结果。程序只保留 `platform.xiaomimimo.com` 的 cookie 和控制台接口请求自带的令牌请求头（如有），用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；之后直接读取接口；被拒绝（过期或需要更多凭据）时用同一配置无窗口地在页面内读取一次并更新会话，仍失败才提示重新登录（6 小时内不重复尝试）。“退出 MiMo 登录”删除保存的会话。
 2. **本机记录（实时，仅本机）**：把 Codex、Claude Code、MiMo Code（`mimocode.db`）中 `mimo-*` 请求的缓存命中 / 未命中输入和输出 token 按官方价格表换算为 Credits（v2.6-pro / v2.5-pro：2.5 / 300 / 600；v2.6-flash / v2.5：2 / 100 / 200；北京时间 0:00–8:00 ×0.8；未收录型号按 pro 估算并注明），记入 `mimo-ledger.json`。两次控制台读取之间，显示值 = 最近一次控制台“已用” + 本机此后增量，下次读取时校准。
 3. **手动配置（不登录）**：`%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`（未给 `period_start` 时按到期日前一年计算）；用量只来自本机记录。
 
@@ -120,7 +120,7 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 
 | 客户端 | 计算方式 | 说明 |
 | --- | --- | --- |
-| MiMo Code | 真实输出 token 数（含思考）÷ 该消息首个输出开始至最后输出结束（思考/文本片段的 `time.start/end`，工具调用以参数流结束为止） | 不含首字延迟和工具执行时间；最接近生成 TPS。生成中的消息会点亮 X 图标 |
+| MiMo Code | 真实输出 token 数（含思考）÷ 该消息首个输出开始至最后输出结束（思考/文本片段的 `time.start/end`，工具调用以参数流结束为止） | 不含首字延迟和工具执行时间；最接近生成 TPS。生成中的消息会点亮 M 图标 |
 | Codex（模型提供方指向 MiMo） | 与 Codex 相同：真实输出 token 数 ÷ 首个输出项至计数完成的流式时间 | 客户端直连 MiMo 接口，流式时间可用 |
 | Claude Code（`ANTHROPIC_BASE_URL` 指向 MiMo） | 真实输出 token 数 ÷ 请求发出（上一条用户/工具结果记录）至回复结束 | 记录中没有流式时间，只能算**端到端速率**，包含首字延迟，数值偏低；标注“含首字延迟” |
 
@@ -132,7 +132,7 @@ Gemini TPS = 输出 token 数 / 回复步骤创建至完成的时间（含首字
 
 数据库被 Antigravity 锁定时读取其临时副本。
 
-Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。M 图标圆环、排序、预测与通知跟随优先级最高的池（Argon > Claude/GPT > Gemini）；任务面板顶部并列显示各池剩余与重置时间，右键“额度详情”逐行列出。
+Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。G 图标圆环、排序、预测与通知跟随优先级最高的池（Argon > Claude/GPT > Gemini）；任务面板顶部并列显示各池剩余与重置时间，右键“额度详情”逐行列出。
 
 Gemini 气泡的任务名来自会话数据库中用户消息步骤（step_type 14）的文字，桌面端还会读取 `~/.gemini/antigravity/brain/<会话>/task.md` 的标题；若客户端版本的步骤编号不同，可用 `CODEX_QUOTA_AGY_USER_STEPS=14,…` 指定。`--check-gemini-tps` 的 `user_steps`、`step_columns` 只报告字数与列名，便于核对。经 Codex 桥接使用 Gemini 时，同样采用 Codex 客户端的流式统计。
 
@@ -395,7 +395,7 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
 | Claude 没有显示 | 开通订阅并登录 Claude Code 后，在托盘菜单勾选“Claude 额度检测（订阅开通后启用）” |
 | Claude 有图标却没有额度 | 检查 Claude Code 的登录与订阅窗口；免费桌面端不通过该读取器接入 |
-| X 显示“未登录”或登录窗口不关闭 | 右键 X 选“登录小米 MiMo…”，或运行 `--mimo-login`，登录后停留在控制台页面；仍不成功时查看 `mimo-login.log`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
+| M 显示“未登录”或登录窗口不关闭 | 右键 M 选“登录小米 MiMo…”，或运行 `--mimo-login`，登录后停留在控制台页面；仍不成功时查看 `mimo-login.log`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
 | 任务面板在全屏应用中没有出现 | 先让任务栏图标可见；独占全屏和安全桌面尚不保证覆盖 |
 | 中文出现方框或显示模糊 | 检查系统中文字体，必要时用 legacy DPI 选项排错 |
 | 构建提示 EXE 被占用 | 退出正在运行的目标程序，或构建到另一输出目录 |

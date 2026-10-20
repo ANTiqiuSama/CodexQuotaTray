@@ -118,13 +118,13 @@ SPECS: tuple[ProviderSpec, ...] = (
         source_note="Codex App Server account/rateLimits/read（5 小时 + 每周）",
     ),
     ProviderSpec(
-        "grok", "G", "Grok", 10080, (203, 208, 216, 255), 30 * 60, 10 * 60, 20,
+        "grok", "X", "Grok", 10080, (203, 208, 216, 255), 30 * 60, 10 * 60, 20,
         ("cli", lambda: Path.home() / ".grok/bin/grok.exe"),
         source_note="临时 Grok CLI 会话 /usage（每周）",
         exhausted_seconds=3 * 3600,
     ),
     ProviderSpec(
-        "gemini", "M", "Gemini（5 小时）", 300, (164, 176, 245, 255), 5 * 60, 2 * 60, 8,
+        "gemini", "G", "Gemini（5 小时）", 300, (164, 176, 245, 255), 5 * 60, 2 * 60, 8,
         ("gui", lambda: _local_appdata() / "Programs/antigravity/Antigravity.exe"),
         source_note="agy --print /usage（Argon > Claude/GPT > Gemini 额度池）",
     ),
@@ -141,7 +141,7 @@ SPECS: tuple[ProviderSpec, ...] = (
         # Token Plan: one Credits pool per billing period (a whole year for
         # annual plans).  The console read is a cheap HTTPS call; local token
         # records move the figure in between (see mimo_usage.py).
-        "mimo", "X", "Xiaomi MiMo", None, (255, 112, 30, 255), 20 * 60, 5 * 60, 30,
+        "mimo", "M", "Xiaomi MiMo", None, (255, 112, 30, 255), 20 * 60, 5 * 60, 30,
         ("url", lambda: "https://platform.xiaomimimo.com/console/plan-manage"),
         default=False, detect=_mimo_used,
         source_note="MiMo 控制台套餐用量（登录后只读）+ 本机 Codex / Claude Code / MiMo Code 记录折算 Credits",

@@ -454,7 +454,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_mimo_detection_and_registry(self):
         spec = providers.get("mimo")
-        self.assertEqual((spec.letter, spec.label, spec.launch[0]), ("X", "Xiaomi MiMo", "url"))
+        self.assertEqual((spec.letter, spec.label, spec.launch[0]), ("M", "Xiaomi MiMo", "url"))
         self.assertEqual(providers.enabled_keys("codex,mimo"), ["codex", "mimo"])
         with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {"LOCALAPPDATA": root, "CODEX_HOME": root,
                                                                             "CLAUDE_CONFIG_DIR": root, "ANTHROPIC_BASE_URL": ""}), \
