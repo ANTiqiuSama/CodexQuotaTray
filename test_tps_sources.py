@@ -428,6 +428,16 @@ class TpsTests(unittest.TestCase):
         self.assertNotIn("private-response-id", output)
         self.assertNotIn("PRIVATE_PROMPT_CANARY", key("PRIVATE_PROMPT_CANARY"))
 
+    def test_tps_is_held_while_the_client_keeps_working(self):
+        import tempfile
+        from tps_sources import Observation
+        monitor = TpsMonitor(Path(tempfile.mkdtemp()))
+        now = 10_000.0
+        monitor.add(Observation("r1", "Antigravity CLI", "conv", "gemini", "gemini-3", now - 900, 400, 8.0, "本地步骤时间", True, 50.0), now)
+        self.assertIsNone(monitor.snapshot(now)["providers"]["gemini"]["display_tps"])      # idle: no stale rate
+        monitor.activity["conv"] = ("gemini", now - 5, "请求中")
+        self.assertEqual(50.0, monitor.snapshot(now)["providers"]["gemini"]["display_tps"])  # working: last rate, not 0
+
 
 if __name__ == "__main__":
     unittest.main()

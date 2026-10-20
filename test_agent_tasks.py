@@ -628,6 +628,16 @@ class HerdrAndHelperTests(unittest.TestCase):
         agents = herdr.attach([self.agent("k", title="任务", folder="repo")], 5.0)
         self.assertEqual(["p9"], [a.get("pane") for a in agents])
 
+    def test_agy_pane_claims_the_live_folderless_conversation(self):
+        import herdr_source
+        listing = json.dumps({"result": {"agents": [{"pane_id": "p2", "agent": "agy", "agent_status": "working", "cwd": "/w/app"}]}})
+        herdr = herdr_source.Herdr(exe="herdr", runner=lambda *a, **k: type("R", (), {"returncode": 0, "stdout": listing})(), enabled=True)
+        conversation = self.agent("conv", provider="gemini", source="Antigravity CLI", title="重构", tps=55.0)
+        agents = herdr.attach([conversation], 5.0)
+        self.assertEqual([("conv", "p2", 55.0)], [(a["key"], a.get("pane"), a["tps"]) for a in agents])
+        self.assertEqual(0, herdr.working("gemini", {"conv"}))
+        self.assertEqual(1, herdr.working("gemini", set()))
+
 
 if __name__ == "__main__":
     unittest.main()

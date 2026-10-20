@@ -89,6 +89,7 @@ class Herdr:
         self.looked_at = 0.0
         self.status = "未启用" if not enabled else "未发现"
         self.finished: dict[str, float] = {}       # pane -> when herdr last saw it working/blocked
+        self.linked: dict[str, set] = {}           # pane -> native session keys matched to it
 
     # ----- reading ------------------------------------------------------------------
     def _locate(self, now: float) -> str | None:
@@ -133,6 +134,15 @@ class Herdr:
         self.status = "已接入"
         return self.rows
 
+    def working(self, provider: str, known: set) -> int:
+        """Panes of this client herdr reports busy whose session the local records do not show as active."""
+        count = 0
+        for row in self.rows:
+            if str(row.get("agent_status")) in ("working", "blocked") and provider_of(str(row.get("agent") or "")) == provider \
+                    and not (session_ids(row) | self.linked.get(str(row["pane_id"]), set())) & known:
+                count += 1
+        return count
+
     # ----- merging into the agent list ------------------------------------------------
     def attach(self, agents: list[dict[str, Any]], now: float | None = None) -> list[dict[str, Any]]:
         """Tag native agents with their herdr pane and add panes without native logs."""
@@ -141,6 +151,7 @@ class Herdr:
         if not rows:
             return agents
         agents = [dict(agent) for agent in agents]
+        self.linked = {}
         by_key = {agent["key"]: agent for agent in agents}
         claimed: set[str] = set()
         extra = []
@@ -165,8 +176,14 @@ class Herdr:
             rivals = [other for other, _, _ in unmatched if provider_of(str(other.get("agent") or "")) == provider and
                       _folder(other.get("foreground_cwd") or other.get("cwd") or "") == folder]
             fits = [agent for agent in agents if agent["key"] not in claimed and not agent.get("parent") and
-                    agent.get("provider") == provider and folder and agent.get("folder") == folder]
-            if provider != "other" and len(rivals) == 1 and fits:
+                    agent.get("provider") == provider and folder and agent.get("folder") == folder] if len(rivals) == 1 else []
+            if not fits and sum(provider_of(str(other.get("agent") or "")) == provider for other, _, _ in unmatched) == 1:
+                # Clients that record no folder (Antigravity / agy): the one live
+                # session of that client without a folder.
+                loose = [agent for agent in agents if agent["key"] not in claimed and not agent.get("parent") and
+                         agent.get("provider") == provider and not agent.get("folder") and agent.get("live")]
+                fits = loose if len(loose) == 1 else []
+            if provider != "other" and fits:
                 agent = max(fits, key=lambda item: item.get("at") or 0)
                 self._tag(agent, row, pane, status)
                 claimed.add(agent["key"])
@@ -179,8 +196,8 @@ class Herdr:
         result.sort(key=lambda item: (not item["live"], -(item.get("at") or 0)))
         return result
 
-    @staticmethod
-    def _tag(agent: dict, row: dict, pane: str, status: str):
+    def _tag(self, agent: dict, row: dict, pane: str, status: str):
+        self.linked.setdefault(pane, set()).add(agent["key"])
         agent["pane"] = pane
         agent["herdr_status"] = status
         if status == "blocked":

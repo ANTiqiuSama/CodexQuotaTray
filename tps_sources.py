@@ -153,7 +153,8 @@ log = logging.getLogger(__name__)
 THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 MIN_TPS_TOKENS = 16      # shorter replies give meaningless rates
 MIN_TPS_SECONDS = 0.3
-TPS_GROUP_SECONDS = 90   # replies finished this close together are averaged
+TPS_GROUP_SECONDS = 90
+HOLD_TPS_SECONDS = 1800  # while still working, show the last rate measured this recently   # replies finished this close together are averaged
 
 
 @dataclass(frozen=True)
@@ -1078,6 +1079,8 @@ class TpsMonitor:
             samples = [e for e in self.events if e.provider == provider and now - 300 <= e.ended_at <= now and e.native_tps is not None]
             latest = max(samples, key=lambda e:e.ended_at) if samples else None
             active = sum(1 for value in self.activity.values() if value[0] == provider)
+            # herdr sees agents working before (and between) their local records.
+            active += self.herdr.working(provider, set(self.activity))
             output = sum(e.output_tokens for e in recent)
             generation = latest.native_tps if latest else None
             basis_text = latest.basis if latest else None
@@ -1089,6 +1092,13 @@ class TpsMonitor:
                 if len(group) > 1:
                     generation = round(sum(e.output_tokens for e in group) / sum(e.generation_seconds for e in group), 1)
                     basis_text = f"{latest.basis}；最近 {len(group)} 次回复按 token 加权"
+            if generation is None and active:
+                # A long reply or tool run has no finished sample for minutes; keep
+                # the last measured rate (up to HOLD_TPS_SECONDS) instead of 0.
+                held = [e for e in self.events if e.provider == provider and e.native_tps is not None and now - HOLD_TPS_SECONDS <= e.ended_at <= now]
+                if held:
+                    latest = max(held, key=lambda e: e.ended_at)
+                    generation, basis_text = latest.native_tps, f"{latest.basis}；仍在工作，保留上次测得的速率"
             providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
 

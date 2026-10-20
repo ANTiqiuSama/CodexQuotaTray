@@ -105,7 +105,7 @@ class PanelModel:
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
 RESET_HEIGHT = 54           # Countdown cards above the task field, with a 12 px gap.
-GEAR_RADIUS = 9.0
+GEAR_RADIUS = 7.5
 GEAR_HIT = 17.0
 
 
@@ -121,7 +121,7 @@ def footer_middle(model, field_h: float) -> float:
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
-    return WIDTH - PAD - GEAR_HIT, footer_middle(model, field_h)
+    return WIDTH - PAD - GEAR_RADIUS - 2, footer_middle(model, field_h)
 
 
 def header_offset(model: PanelModel | None) -> float:
@@ -543,11 +543,7 @@ class Scene:
         cx, cy = gear_center(model, field_h)
         level = self.gear.value
         tint = tuple(round(a + (b - a) * level) for a, b in zip(MUTED_TEXT[:3], accent(model.letter)[:3])) + (255,)
-        draw = ImageDraw.Draw(frame)
-        half = GEAR_HIT - 1
-        draw.rounded_rectangle((round(at(cx - half)), round(at(cy - half)), round(at(cx + half)), round(at(cy + half))),
-                               radius=round(9 * scale), fill=_with_alpha(tint, round(12 + 20 * level)),
-                               outline=_with_alpha(tint, round(30 + 65 * level)), width=max(1, round(scale)))
+        # Just the glyph: no button plate over the footer; it lights up and turns a little under the pointer.
         sprite = gear(round(GEAR_RADIUS * scale), tint)
         if level > 0.02:
             sprite = sprite.rotate(-self.gear_angle, resample=Image.BICUBIC, expand=True)
@@ -834,23 +830,26 @@ def arc(radius: int, letter: str) -> Image.Image:
 
 @lru_cache(maxsize=48)
 def gear(radius: int, color: tuple) -> Image.Image:
-    """Crisp outlined cog with evenly spaced teeth and a circular hub."""
+    """Small solid cog: six rounded teeth around a body with a punched hub."""
     size = (radius + 2) * 2
     big = size * SUPERSAMPLE
     r = radius * SUPERSAMPLE
     c = big / 2
-    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    points = []
-    for index in range(8):
-        angle = index * math.tau / 8
-        for offset, factor in ((-22.5, .72), (-13, .72), (-10, 1), (10, 1), (13, .72), (22.5, .72)):
+    shape = Image.new("L", (big, big), 0)
+    draw = ImageDraw.Draw(shape)
+    body = r * .74
+    draw.ellipse((c - body, c - body, c + body, c + body), fill=255)
+    for index in range(6):
+        angle = index * math.tau / 6
+        tooth = []
+        for offset, factor in ((-17, .7), (-11, 1), (11, 1), (17, .7)):
             a = angle + math.radians(offset)
-            points.append((c + math.cos(a) * r * factor, c + math.sin(a) * r * factor))
-    stroke = max(1, round(1.35 * SUPERSAMPLE))
-    draw.line(points + points[:1], fill=color, width=stroke, joint="curve")
-    hole = r * .29
-    draw.ellipse((c - hole, c - hole, c + hole, c + hole), outline=color, width=stroke)
+            tooth.append((c + math.cos(a) * r * factor, c + math.sin(a) * r * factor))
+        draw.polygon(tooth, fill=255)
+    hole = r * .3
+    draw.ellipse((c - hole, c - hole, c + hole, c + hole), fill=0)
+    image = Image.new("RGBA", (big, big), tuple(color[:3]) + (0,))
+    image.putalpha(shape.point(lambda value: value * (color[3] if len(color) > 3 else 255) // 255))
     return image.resize((size, size), Image.LANCZOS)
 
 
@@ -970,7 +969,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
     tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
     _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))
     face = ui_font(px(11))
-    lines = forecast_lines(model.forecast or "正在积累用量，稍后给出预测", px(WIDTH - 2 * PAD - 64), face, draw)
+    lines = forecast_lines(model.forecast or "正在积累用量，稍后给出预测", px(WIDTH - 2 * PAD - 48), face, draw)
     for index, line in enumerate(lines):
         draw.text((px(PAD + 18), px(middle + (index - (len(lines) - 1) / 2) * 17)), line, font=face, fill=tint, anchor="lm")
     return _compose(content, scale)
