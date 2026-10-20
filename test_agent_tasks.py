@@ -38,6 +38,22 @@ class TaskTextTests(unittest.TestCase):
 
 
 class NotesTests(unittest.TestCase):
+    def test_current_codex_user_records_and_tool_wait_keep_task_live(self):
+        notes = AgentNotes()
+        notes.codex("a", {"type":"event_msg","timestamp":stamp(100),"payload":{"type":"task_started"}})
+        notes.codex("a", {"type":"response_item","timestamp":stamp(101),"payload":{
+            "type":"message","role":"user","content":[{"type":"input_text","text":"请检查气泡布局与拖动合并"}]}})
+        notes.codex("a", {"type":"response_item","timestamp":stamp(102),"payload":{
+            "type":"function_call","name":"exec_command","arguments":json.dumps({"cmd":"python -m unittest test_agent_tasks"})}})
+        context={"a":{"source":"Codex","model":"gpt-6.1-sol"}}
+        active={"a":("codex",103,"刚完成生成")}
+        result=notes.export(active,context,{},110,lambda _:"codex")
+        self.assertEqual((result[0]["title"],result[0]["doing"],result[0]["live"]),
+                         ("检查气泡布局与拖动合并","运行测试",True))
+        notes.codex("a", {"type":"event_msg","timestamp":stamp(111),"payload":{"type":"task_complete"}})
+        result=notes.export({},context,{},112,lambda _:"codex")
+        self.assertFalse(result[0]["live"])
+
     def test_codex_follow_up_keeps_the_task_and_tracks_steps(self):
         notes = AgentNotes()
         notes.codex("s", {"type": "session_meta", "payload": {"cwd": "C:/w/CodexQuotaTray",
@@ -86,6 +102,7 @@ class NotesTests(unittest.TestCase):
             with sqlite3.connect(home / ".codex/state_5.sqlite") as db:
                 db.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, model TEXT, model_provider TEXT, updated_at INT, title TEXT, cwd TEXT)")
                 db.execute("INSERT INTO threads VALUES ('t1', ?, 'gpt-5', 'openai', 1, '整理发布说明', 'D:/proj')", (str(rollout),))
+            db.close()
             monitor = TpsMonitor(home)
             monitor.poll(now)
             monitor.last_discovery = 0
@@ -140,6 +157,31 @@ class GroupTests(unittest.TestCase):
 
 
 class SummarizerTests(unittest.TestCase):
+    def test_live_action_updates_even_when_summary_is_cached(self):
+        member=agent("a",title="验证布局",doing="运行测试")
+        self.assertEqual(describe(Cluster("a",(member,)),{"title":"布局验证","doing":"阅读代码"})[1],"运行测试")
+
+    def test_mimo_uses_native_auth_and_disables_thinking(self):
+        observed = []
+        class Reply(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                self.close()
+        def opener(request, timeout):
+            observed.append(request)
+            return Reply(json.dumps({"choices": [{"message": {"content": '{"title":"验证气泡","doing":"检查接口"}'}}]}).encode())
+        summarizer = Summarizer({"url":"https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
+                                 "key":"test-key", "model":"mimo-v2.6-flash"}, opener)
+        result = summarizer.request(Cluster("a", (agent("a", title="验证气泡交互"),)))
+        self.assertEqual(result["title"], "验证气泡")
+        self.assertEqual(observed[0].get_header("Api-key"), "test-key")
+        self.assertIsNone(observed[0].get_header("Authorization"))
+        payload = json.loads(observed[0].data)
+        self.assertEqual(payload["thinking"], {"type":"disabled"})
+        self.assertEqual(payload["max_completion_tokens"], 160)
+        self.assertNotIn("max_tokens", payload)
+
     def test_disabled_without_configuration(self):
         self.assertEqual(Summarizer(None).lookup(Cluster("a", (agent("a", title="x"),))), ({}, False))
 

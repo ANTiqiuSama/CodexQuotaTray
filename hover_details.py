@@ -574,7 +574,8 @@ class HoverDetails:
             self.panel_seen = now
         elif now - self.panel_seen > self.PANEL_GRACE or (left or right) and not panel.contains(point, 40):
             panel.close(now)
-        if now - self.panel_built >= self.PANEL_REFRESH and panel.closing_at is None:
+        if (now - self.panel_built >= self.PANEL_REFRESH and panel.closing_at is None
+                and not panel.scene.press and not panel.scene.dragging):
             model = self.agents.panel(panel.provider, keep=True)
             if model is not None:
                 panel.refresh(model, now)

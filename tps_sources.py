@@ -16,6 +16,7 @@ import sqlite3
 import tempfile
 import time
 from collections import deque
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -301,7 +302,7 @@ class TpsMonitor:
         state = self.codex_root / "state_5.sqlite"
         if state.is_file():
             try:
-                with readonly_db(state) as db:
+                with closing(readonly_db(state)) as db:
                     rows = db.execute("SELECT id,rollout_path,model,model_provider FROM threads ORDER BY updated_at DESC LIMIT 512").fetchall()
                 for session, filename, model, provider in rows:
                     # Registering all 512 threads used to parse ~1.5 MB of
@@ -334,7 +335,9 @@ class TpsMonitor:
 
     def _codex_titles(self, state: Path, now: float):
         """Thread title, folder and spawning parent of live Codex threads."""
-        live = [session for session in self.activity if self.context.get(session, {}).get("source") == "Codex"]
+        live = [session for session, note in self.notes.notes.items()
+                if self.context.get(session, {}).get("source") == "Codex" and
+                (session in self.activity or note.active_at > now - 180)]
         if not live:
             return
         try:
@@ -343,7 +346,7 @@ class TpsMonitor:
             pass
 
     def _read_codex_titles(self, state: Path, live: list):
-        with readonly_db(state) as db:
+        with closing(readonly_db(state)) as db:
             if self.thread_columns is None:
                 self.thread_columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
             wanted = [name for name in ("title", "cwd", "first_user_message", "source", "agent_nickname", "agent_role") if name in self.thread_columns]
@@ -604,7 +607,7 @@ class TpsMonitor:
         path = self.codex_root / "logs_2.sqlite"
         if not path.is_file():
             return
-        with readonly_db(path) as db:
+        with closing(readonly_db(path)) as db:
             maximum = db.execute("SELECT max(id) FROM logs").fetchone()[0] or 0
             begin = self.last_log_id or max(0, maximum - 20000)
             rows = db.execute("SELECT id,ts,ts_nanos,target,feedback_log_body,thread_id FROM logs WHERE id>? AND target='codex_core::stream_events_utils' ORDER BY id", (begin,)).fetchall()

@@ -443,13 +443,17 @@ class QuotaTray:
         a, b = self.clusters.get(first), self.clusters.get(second)
         if a is None or b is None or a.key == b.key:
             return None
-        return self.agent_groups.merge(a, b)
+        merged = self.agent_groups.merge(a, b)
+        log.info("agent group merged: %s members=%s", merged, len(a.members) + len(b.members))
+        return merged
 
     def split(self, key: str) -> list[str] | None:
         cluster = self.clusters.get(key)
         if cluster is None or len(cluster.members) < 2:
             return None
-        return self.agent_groups.split(cluster)
+        members = self.agent_groups.split(cluster)
+        log.info("agent group split: %s members=%s", key, len(members))
+        return members
 
     @staticmethod
     def reset_summary(label: str, timestamp: int | None, now: float) -> str:

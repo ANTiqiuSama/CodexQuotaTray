@@ -233,6 +233,8 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 
 ### 可选：轻量模型命名
 
+小米 MiMo / Token Plan 可使用控制台对应的 Base URL 和 `mimo-v2.6-flash`。程序会自动使用 `api-key` 认证、关闭深度思考并限制命名输出长度；密钥只保存在本机配置或环境变量中。气泡的当前动作始终优先显示本机最新工具状态，不会被较早的模型摘要覆盖。
+
 默认完全本地，不发送任何内容。若希望标题更精炼，可配置任意 OpenAI 兼容的 Chat Completions 接口（如 MiMo、DeepSeek、本地 Ollama 等的小模型）：
 
 ```powershell

@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -117,6 +118,26 @@ def tool_action(name: str, arguments: Any = None) -> str:
         except ValueError:
             arguments = {"input": arguments}
     arguments = arguments if isinstance(arguments, dict) else {}
+    if lower in ("exec", "functions.exec"):
+        code = str(arguments.get("input") or arguments.get("code") or "")
+        if "exec_command" in code:
+            match = re.search(r'''(?:cmd|command)["']?\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')''', code)
+            if match:
+                value = match.group(1)
+                try:
+                    command = json.loads(value) if value.startswith('"') else value[1:-1]
+                except ValueError:
+                    command = value[1:-1]
+                return _command_action(command)
+            return "运行命令"
+        if "write_stdin" in code:
+            return "等待命令完成"
+        if "apply_patch" in code:
+            return "编辑代码"
+        if "view_image" in code:
+            return "查看图像"
+        if "web__" in code:
+            return "查资料"
     path = arguments.get("file_path") or arguments.get("path") or arguments.get("filePath") or ""
     if lower.startswith("mcp__"):
         return f"调用 {shorten(lower.split('__')[1], 10)}"
@@ -194,6 +215,7 @@ class Note:
     role: str = ""
     active_at: float = 0.0
     buffer: str = ""
+    working: bool = False    # full task lifetime, including tools between output chunks
 
 
 class AgentNotes:
@@ -237,6 +259,11 @@ class AgentNotes:
         payload = record.get("payload") or {}
         moment = _moment(record.get("timestamp"))
         kind = record.get("type")
+        event = payload.get("type")
+        if kind == "event_msg" and event in ("task_started", "task_complete", "turn_aborted", "error"):
+            self.note(key).working = event == "task_started"
+            if moment:
+                self.touch(key, moment)
         if kind == "session_meta":
             self.describe(key, cwd=str(payload.get("cwd") or ""), parent=str(_find(payload.get("source"), "parent_thread_id") or ""),
                           role=str(_find(payload, "agent_nickname") or _find(payload, "agent_role") or ""))
@@ -248,7 +275,13 @@ class AgentNotes:
             self.act(key, "思考中", moment)
         elif kind == "response_item":
             item = payload.get("type")
-            if item in ("function_call", "custom_tool_call"):
+            if item == "message" and payload.get("role") == "user":
+                content = payload.get("content") or []
+                text = content if isinstance(content, str) else "\n".join(str(c.get("text") or "") for c in content if isinstance(c, dict))
+                self.ask(key, text, moment)
+            elif item == "reasoning":
+                self.act(key, "思考中", moment)
+            elif item in ("function_call", "custom_tool_call"):
                 self.act(key, tool_action(payload.get("name"), payload.get("arguments") or payload.get("input")), moment)
             elif item == "local_shell_call":
                 self.act(key, tool_action("local_shell", (payload.get("action") or {})), moment)
@@ -326,7 +359,9 @@ class AgentNotes:
             info = context.get(key) or context.get(note.parent) or {}
             if not (act or info or note.parent):
                 continue
-            live = bool(act and act[2] != "刚完成生成") or (not act and bool(note.parent) and now - note.active_at < LIVE_SECONDS)
+            live = (bool(act and act[2] != "刚完成生成") or
+                    note.working and now - note.active_at < 600 or
+                    not act and bool(note.parent) and now - note.active_at < LIVE_SECONDS)
             source = str(info.get("source") or "")
             if act:
                 provider = act[0]
@@ -487,6 +522,11 @@ class AgentGroups:
 
 # ----- optional summarizer ----------------------------------------------------------
 
+def is_mimo_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return host == "xiaomimimo.com" or host.endswith(".xiaomimimo.com")
+
+
 def summary_config() -> dict | None:
     """OpenAI-compatible chat completions endpoint, opt-in only."""
     config = {"url": os.environ.get("CODEX_QUOTA_SUMMARY_URL", ""), "key": os.environ.get("CODEX_QUOTA_SUMMARY_KEY", ""),
@@ -498,6 +538,8 @@ def summary_config() -> dict | None:
         except (OSError, ValueError, AttributeError):
             return None
     if not config["url"] or not config["model"]:
+        return None
+    if is_mimo_url(config["url"]) and not config["key"]:
         return None
     url = config["url"].rstrip("/")
     if not url.endswith("/chat/completions"):
@@ -571,15 +613,22 @@ class Summarizer:
                   "folder": m.get("folder") or "", "doing": m.get("doing") or "", "role": m.get("role") or ""}
                  for m in cluster.members[:6]]
         grouped = len(cluster.members) > 1
-        return {"model": self.config["model"], "temperature": 0.2, "max_tokens": 160, "stream": False,
+        payload = {"model": self.config["model"], "temperature": 0.2, "max_tokens": 160, "stream": False,
                 "messages": [{"role": "system", "content": GROUP_PROMPT if grouped else SINGLE_PROMPT},
                              {"role": "user", "content": json.dumps(items if grouped else items[0], ensure_ascii=False)}]}
+        if is_mimo_url(self.config["url"]):
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
+            payload["thinking"] = {"type": "disabled"}
+        return payload
 
     def request(self, cluster: Cluster) -> dict:
         body = json.dumps(self._payload(cluster), ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.config.get("key"):
-            headers["Authorization"] = f"Bearer {self.config['key']}"
+            if is_mimo_url(self.config["url"]):
+                headers["api-key"] = self.config["key"]
+            else:
+                headers["Authorization"] = f"Bearer {self.config['key']}"
         request = urllib.request.Request(self.config["url"], data=body, headers=headers, method="POST")
         with self.opener(request, timeout=12) as response:
             reply = json.loads(response.read().decode("utf-8"))
@@ -616,7 +665,7 @@ def describe(cluster: Cluster, summary: dict | None = None) -> tuple[str, str, s
     if len(members) == 1:
         agent = members[0]
         title = summary.get("title") or agent_title(agent)
-        doing = (summary.get("doing") if agent["live"] else "") or agent.get("doing") or ("生成中" if agent["live"] else "刚完成")
+        doing = agent.get("doing") or (summary.get("doing") if agent["live"] else "") or ("生成中" if agent["live"] else "刚完成")
         detail = agent.get("title") or agent.get("thread_title") or title
         return title, doing, detail
     title = summary.get("title") or group_title(members)
