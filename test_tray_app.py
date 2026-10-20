@@ -468,7 +468,7 @@ class AgentPanelTests(unittest.TestCase):
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
 
-    def test_upcoming_resets_selects_one_future_window_per_provider_in_time_order(self):
+    def test_argon_and_opus_can_occupy_two_columns_in_global_time_order(self):
         now = 1_000_000
         codex = self.tray.snapshots["codex"]
         codex.resets_at, codex.window_minutes = now + 7200, 300
@@ -476,17 +476,19 @@ class AgentPanelTests(unittest.TestCase):
         grok = self.tray.snapshots["grok"]
         grok.resets_at, grok.window_minutes = now + 86400, 10080
         gemini = self.tray.snapshots["gemini"]
-        gemini.pools = [{"label": "Argon", "window_minutes": 10080, "resets_at": now + 3 * 86400},
-                        {"label": "Gemini", "window_minutes": 300, "resets_at": now + 1800},
-                        {"label": "Claude/GPT", "window_minutes": 300, "resets_at": now - 1}]
+        gemini.pools = [{"key": "argon", "label": "Argon", "window_minutes": 10080, "resets_at": now + 1800},
+                        {"key": "gemini", "label": "Gemini", "window_minutes": 300, "resets_at": now + 60},
+                        {"key": "claude_gpt", "label": "Claude/GPT", "window_minutes": 300, "resets_at": now + 7200}]
         self.tray.snapshots["mimo"] = tray_app.placeholder("mimo")
         self.tray.snapshots["mimo"].resets_at = now + 1
         resets = self.tray.upcoming_resets(now)
-        self.assertEqual([r.provider for r in resets], ["gemini", "codex", "grok"])
+        self.assertEqual([r.provider for r in resets], ["gemini", "codex", "gemini"])
         self.assertEqual(resets[1].window, "每周")
-        self.assertEqual(resets[0].window, "Gemini · 5 小时")
-        self.assertEqual([r.letter for r in resets], ["G", "C", "X"])
-        self.assertEqual(len(set(r.provider for r in resets)), 3)
+        self.assertEqual([r.name for r in resets], ["Gemini · Argon", "Codex", "Gemini · Opus"])
+        self.assertEqual([r.letter for r in resets], ["G", "C", "G"])
+        gemini.pools[0]["resets_at"] = now - 1
+        later = self.tray.upcoming_resets(now)
+        self.assertEqual([r.name for r in later], ["Codex", "Gemini · Opus", "Grok"])
         self.assertIn("后", resets[0].countdown)
 
     def test_upcoming_resets_unknown_or_past_times_do_not_invent_dates(self):

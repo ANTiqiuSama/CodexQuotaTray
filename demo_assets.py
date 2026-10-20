@@ -23,9 +23,9 @@ def demo_models() -> tuple[ap.PanelModel, ...]:
     idle = ap.PanelModel("grok", "X", "Grok", "空闲", (("2 小时", 100.0, "已到重置时间"),), None, (), "idle")
     mimo = ap.PanelModel("mimo", "M", "Xiaomi MiMo", "空闲", (("套餐额度", 96.9, ""),), 0, (), "idle",
                          forecast="按近期速度可用到到期，预计剩余 82%", forecast_tone="ok", today_used=1.53e9)
-    upcoming = (ap.ResetColumn("gemini", "G", "Gemini", "Gemini · 5 小时", "10-20 23:10", "1 小时 12 分后"),
+    upcoming = (ap.ResetColumn("gemini", "G", "Gemini · Opus", "Claude/GPT · 5 小时", "10-20 23:10", "1 小时 12 分后"),
                 ap.ResetColumn("codex", "C", "Codex", "5 小时", "10-21 01:20", "3 小时 22 分后"),
-                ap.ResetColumn("grok", "X", "Grok", "每周", "10-27 11:02", "6 天 13 小时后"))
+                ap.ResetColumn("gemini", "G", "Gemini · Argon", "Argon · 每周", "10-26 11:02", "5 天 13 小时后"))
     return tuple(replace(model, upcoming_resets=upcoming) for model in (busy, idle, mimo))
 
 

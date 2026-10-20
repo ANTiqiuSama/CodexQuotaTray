@@ -372,6 +372,25 @@ class QuotaTray:
         for provider, snapshot in self.snapshots.items():
             if provider == "mimo" or provider not in PROVIDERS:
                 continue
+            if provider == "gemini" and snapshot.pools:
+                # Argon and the third-party (Opus/Claude/GPT) pool are
+                # independent limits; each may occupy a countdown column.
+                named = []
+                for pool in snapshot.pools:
+                    key = str(pool.get("key") or pool.get("label") or "").lower()
+                    label = {"argon": "Argon", "claude_gpt": "Opus", "claude/gpt": "Opus", "opus": "Opus"}.get(key)
+                    if label:
+                        named.append((pool, label))
+                if named:
+                    for pool, label in named:
+                        stamp = pool.get("resets_at")
+                        if stamp is None or stamp <= now:
+                            continue
+                        window = (pool.get("label") or label) + " · " + (window_label(pool.get("window_minutes")) or "周期")
+                        candidates.append((float(stamp), agent_panel.ResetColumn(provider, provider_letter(provider),
+                            "Gemini · " + label, window, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"),
+                            duration_text(stamp - now) + "后")))
+                    continue
             windows = []
             if snapshot.pools:
                 windows = [(p.get("resets_at"), p.get("remaining_percent"), (p.get("label") or p.get("key") or "额度") + " · "
