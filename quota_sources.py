@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import providers
-import claude_quota
+import cli_quota
 from cli_usage import CLAUDE_ARGS, CLAUDE_PROBE, parse_claude_usage, parse_grok_usage, run_agy_usage, run_temporary_usage
 
 
@@ -222,11 +222,10 @@ def get_codex_quota(raw: dict | None = None) -> QuotaSnapshot:
             rpc.close()
 
 
-def get_grok_quota() -> QuotaSnapshot:
+def get_grok_quota(raw: dict | None = None) -> QuotaSnapshot:
     executable = os.environ.get("CODEX_QUOTA_GROK_EXE") or str(Path.home() / ".grok/bin/grok.exe")
     try:
-        text = run_temporary_usage(executable, ["--minimal", "--no-alt-screen", "--no-memory", "--no-subagents", "--disable-web-search"])
-        parsed = parse_grok_usage(text)
+        parsed = cli_quota.read_usage(executable, "grok", raw)
         return QuotaSnapshot("grok", "Grok", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"], parsed["resets_at"], time.time(), False, None)
     except Exception as exc:
         return _unknown("grok", "Grok", 10080, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
@@ -246,7 +245,7 @@ def get_claude_quota() -> QuotaSnapshot:
     if executable is None:
         return _unknown("claude", "Claude", 300, "未找到 Claude Code（claude.exe / claude.cmd），可设置 CODEX_QUOTA_CLAUDE_EXE")
     try:
-        parsed = claude_quota.read_usage(str(executable))
+        parsed = cli_quota.read_usage(str(executable))
         return QuotaSnapshot("claude", "Claude", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
                              parsed["resets_at"], time.time(), False, None,
                              parsed.get("secondary_window_minutes"), parsed.get("secondary_used_percent"),

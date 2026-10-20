@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import cli_usage
-import claude_quota
+import cli_quota as claude_quota
 import subprocess
 import providers
 import quota_sources

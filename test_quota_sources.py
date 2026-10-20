@@ -4,8 +4,75 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import cli_usage
+import cli_quota
+import json
+import subprocess
+import tempfile
 import quota_sources
 from cli_usage import parse_agy_usage_json, parse_cli_percent, parse_grok_usage, parse_reset, run_temporary_usage
+
+
+class GrokIsolationTests(unittest.TestCase):
+    def test_native_startup_hang_is_bounded_and_preserves_last_good_quota(self):
+        process = Mock()
+        process.wait.side_effect = subprocess.TimeoutExpired("worker", 35)
+        with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
+                patch.object(cli_quota, "no_quota_reason") as claude_status, \
+                patch.object(cli_quota.subprocess, "Popen", return_value=process), \
+                patch.object(cli_quota, "stop_worker") as stop:
+            snapshot = quota_sources.get_grok_quota()
+            self.assertIn("35 秒", snapshot.error)
+            self.assertIn("隐藏终端初始化", snapshot.error)
+            process.wait.assert_called_once_with(timeout=35)
+            stop.assert_called_once_with(process)
+            claude_status.assert_not_called()
+            old = quota_sources.QuotaSnapshot("grok", "Grok", 10080, 30, 70, 2_000_000, 1_000_000, False, None)
+            kept = quota_sources.keep_last_good(snapshot, old)
+            self.assertEqual(kept.remaining_percent, 70)
+            self.assertTrue(kept.stale)
+
+    def test_repeated_frozen_reads_get_fresh_workers_and_transfer_cli_reset(self):
+        commands = []
+        def start(command, **kwargs):
+            commands.append(command)
+            self.assertEqual(command[1], "--grok-quota-worker")
+            Path(command[-1]).write_text(json.dumps({"quota": {"remaining_percent": 70},
+                "cli": {"next_reset": "Next reset: October 27, 11:02"}}), encoding="utf-8")
+            return Mock()
+        with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
+                patch.object(cli_quota.sys, "frozen", True, create=True), \
+                patch.object(cli_quota.subprocess, "Popen", side_effect=start):
+            for _ in range(2):
+                raw = {}
+                self.assertEqual(cli_quota.read_usage("grok.exe", "grok", raw)["remaining_percent"], 70)
+                self.assertEqual(raw["next_reset"], "Next reset: October 27, 11:02")
+            self.assertNotEqual(commands[0][-1], commands[1][-1])
+            self.assertEqual(list((Path(folder) / "CodexQuotaTray/work").iterdir()), [])
+
+    def test_grok_worker_exports_only_quota_lines_without_identity(self):
+        text = "private@example.test\nWeekly limit: 30%\nNext reset: October 27, 11:02\nSECRET-TOKEN"
+        with tempfile.TemporaryDirectory() as folder, patch.object(cli_quota, "run_temporary_usage", return_value=text):
+            destination = Path(folder) / "result.json"
+            self.assertEqual(cli_quota.worker("grok.exe", str(destination), "grok"), 0)
+            result = destination.read_text(encoding="utf-8")
+            self.assertNotIn("private@", result)
+            self.assertNotIn("SECRET-TOKEN", result)
+            parsed = json.loads(result)
+            self.assertEqual(parsed["quota"]["remaining_percent"], 70)
+            self.assertEqual(parsed["cli"]["next_reset"], "Next reset: October 27, 11:02")
+
+    def test_timeout_cleanup_targets_only_the_owned_worker_tree(self):
+        process = Mock(pid=1234)
+        children = [Mock(), Mock()]
+        with patch.object(cli_quota.psutil, "Process") as lookup:
+            lookup.return_value.children.return_value = children
+            cli_quota.stop_worker(process)
+        lookup.assert_called_once_with(1234)
+        lookup.return_value.children.assert_called_once_with(recursive=True)
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+        for child in children:
+            child.kill.assert_called_once_with()
 
 
 class QuotaTests(unittest.TestCase):

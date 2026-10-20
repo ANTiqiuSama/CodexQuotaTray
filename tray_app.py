@@ -997,9 +997,10 @@ def check_claude(destination: Path, raw: bool = False) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) == 4 and sys.argv[1] == "--claude-quota-worker":
-        import claude_quota
-        return claude_quota.worker(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 4 and sys.argv[1] in ("--claude-quota-worker", "--grok-quota-worker"):
+        import cli_quota
+        provider = "grok" if sys.argv[1] == "--grok-quota-worker" else "claude"
+        return cli_quota.worker(sys.argv[2], sys.argv[3], provider)
     if len(sys.argv) == 3 and sys.argv[1] == "--check-hover":
         from hover_check import check_hover_runtime
         tray = QuotaTray.__new__(QuotaTray)
@@ -1031,11 +1032,14 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(antigravity_diagnostics(), ensure_ascii=False, indent=2), encoding="utf-8")
         return 0
-    if len(sys.argv) == 3 and sys.argv[1] == "--check-grok":
-        snapshot = get_grok_quota()
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-grok":
+        raw: dict = {}
+        snapshot = get_grok_quota(raw)
         destination = Path(sys.argv[2]).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(dump_snapshot({"grok": snapshot}), encoding="utf-8")
+        if len(sys.argv) == 4 and sys.argv[3] == "--raw":
+            destination.with_suffix(".raw.json").write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         return 1 if snapshot.error else 0
     if len(sys.argv) in (3, 4) and sys.argv[1] == "--check-codex":
         destination = Path(sys.argv[2]).resolve()
