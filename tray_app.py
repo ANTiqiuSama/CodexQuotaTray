@@ -366,6 +366,29 @@ class QuotaTray:
 
     # ----- agent panel (hover thread) ---------------------------------------------
 
+    def upcoming_resets(self, now: float) -> tuple[agent_panel.ResetColumn, ...]:
+        """Nearest future reset per enabled provider; MiMo expires rather than resets."""
+        candidates = []
+        for provider, snapshot in self.snapshots.items():
+            if provider == "mimo" or provider not in PROVIDERS:
+                continue
+            windows = []
+            if snapshot.pools:
+                windows = [(p.get("resets_at"), (p.get("label") or p.get("key") or "额度") + " · "
+                            + (window_label(p.get("window_minutes")) or "周期")) for p in snapshot.pools]
+            else:
+                windows = [(snapshot.resets_at, window_label(snapshot.window_minutes) or "当前窗口"),
+                           (snapshot.secondary_resets_at, window_label(snapshot.secondary_window_minutes) or "第二窗口")]
+            future = [(float(stamp), label) for stamp, label in windows if stamp is not None and stamp > now]
+            if not future:
+                continue
+            stamp, label = min(future, key=lambda item: item[0])
+            name = {"codex": "Codex", "gemini": "Gemini", "grok": "Grok", "claude": "Claude"}.get(provider, provider)
+            candidates.append((stamp, agent_panel.ResetColumn(provider, provider_letter(provider), name, label,
+                                datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"), duration_text(stamp - now) + "后")))
+        candidates.sort(key=lambda item: (item[0], item[1].provider))
+        return tuple(item[1] for item in candidates[:3])
+
     def panel(self, provider: str) -> agent_panel.PanelModel | None:
         """The hover panel: quota header, task bubbles, forecast and settings.
         None for a source without a quota to show (Claude without a
@@ -393,15 +416,13 @@ class QuotaTray:
         if snapshot is not None and provider == "mimo":
             quota.append(("套餐额度", snapshot.display_remaining, ""))
         elif snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
-            compact = len(snapshot.pools) > 2
             for pool in snapshot.pools[:3]:
-                reset = short_reset(pool.get("resets_at"), now) if compact else reset_hint(pool.get("resets_at"))
-                quota.append((pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"), reset))
+                quota.append((pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"), ""))
         elif snapshot is not None:
-            quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent, reset_hint(snapshot.resets_at)))
+            quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent, ""))
             if snapshot.secondary_window_minutes or snapshot.secondary_remaining_percent is not None:
                 quota.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent,
-                              reset_hint(snapshot.secondary_resets_at)))
+                              ""))
         data = self.performance["providers"].get(provider, {})
         if working:
             status, tone = f"{working} 个在工作", "live"
@@ -423,7 +444,7 @@ class QuotaTray:
                           else mimo_tracker().view(now).today_used)
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
-                                      tone, banner, forecast, forecast_tone, today_used)
+                                      tone, banner, forecast, forecast_tone, today_used, self.upcoming_resets(now))
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)

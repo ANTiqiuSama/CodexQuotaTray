@@ -461,10 +461,50 @@ class AgentPanelTests(unittest.TestCase):
         self.tray.snapshots["gemini"] = snapshot
         model = self.tray.panel("gemini")
         self.assertEqual([item[:2] for item in model.quota], [("Argon", 25.0), ("Claude/GPT", 40.0), ("Gemini", 90.0)])
-        self.assertTrue(model.quota[0][2].endswith(" 重置") and ":" in model.quota[0][2])
-        self.assertTrue(model.quota[2][2].startswith("周"))
+        self.assertTrue(all(not item[2] for item in model.quota))
+        upcoming = next(item for item in model.upcoming_resets if item.provider == "gemini")
+        self.assertIn("Argon", upcoming.window)
+        self.assertIn(":", upcoming.when)
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
+
+    def test_upcoming_resets_selects_one_future_window_per_provider_in_time_order(self):
+        now = 1_000_000
+        codex = self.tray.snapshots["codex"]
+        codex.resets_at, codex.window_minutes = now + 7200, 300
+        codex.secondary_resets_at, codex.secondary_window_minutes = now + 3600, 10080
+        grok = self.tray.snapshots["grok"]
+        grok.resets_at, grok.window_minutes = now + 86400, 10080
+        gemini = self.tray.snapshots["gemini"]
+        gemini.pools = [{"label": "Argon", "window_minutes": 10080, "resets_at": now + 3 * 86400},
+                        {"label": "Gemini", "window_minutes": 300, "resets_at": now + 1800},
+                        {"label": "Claude/GPT", "window_minutes": 300, "resets_at": now - 1}]
+        self.tray.snapshots["mimo"] = tray_app.placeholder("mimo")
+        self.tray.snapshots["mimo"].resets_at = now + 1
+        resets = self.tray.upcoming_resets(now)
+        self.assertEqual([r.provider for r in resets], ["gemini", "codex", "grok"])
+        self.assertEqual(resets[1].window, "每周")
+        self.assertEqual(resets[0].window, "Gemini · 5 小时")
+        self.assertEqual([r.letter for r in resets], ["G", "C", "X"])
+        self.assertEqual(len(set(r.provider for r in resets)), 3)
+        self.assertIn("后", resets[0].countdown)
+
+    def test_upcoming_resets_unknown_or_past_times_do_not_invent_dates(self):
+        now = time.time()
+        for snapshot in self.tray.snapshots.values():
+            snapshot.resets_at = now - 1
+            snapshot.secondary_resets_at = None
+        self.assertEqual(self.tray.upcoming_resets(now), ())
+        model = self.tray.panel("codex")
+        self.assertTrue(all(not item[2] for item in model.quota))
+        from dataclasses import replace
+        one = agent_panel.ResetColumn("codex", "C", "Codex", "5 小时", "10-21 01:00", "3 小时后")
+        sizes = []
+        for reset_items in ((), (one,), (one,) * 3):
+            scene = agent_panel.Scene()
+            scene.set_model(replace(model, upcoming_resets=reset_items), 0)
+            sizes.append(scene.render(1.25).size)
+        self.assertEqual(sizes, [sizes[0]] * 3)
 
     def test_forecast_replaces_schedules_in_hover_footer(self):
         self.tray.headline_forecast = Mock(return_value=("按当前速度，可用到下次重置", "ok"))

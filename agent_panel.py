@@ -67,12 +67,22 @@ class ScheduleChip:
 
 
 @dataclass(frozen=True)
+class ResetColumn:
+    provider: str
+    letter: str
+    name: str
+    window: str
+    when: str
+    countdown: str
+
+
+@dataclass(frozen=True)
 class PanelModel:
     provider: str
     letter: str
     title: str
     status: str
-    quota: tuple[tuple, ...]                    # (label, remaining %, reset text)
+    quota: tuple[tuple, ...]                    # (label, remaining %, reserved)
     tps: float | None
     bubbles: tuple[BubbleModel, ...]
     status_tone: str = "live"                   # live | idle | stale | error
@@ -80,18 +90,20 @@ class PanelModel:
     forecast: str = ""                          # pace forecast: will the quota last at the current rate
     forecast_tone: str = "unknown"              # danger | warn | ok | idle | unknown
     today_used: float | None = None              # MiMo Credits used today
+    upcoming_resets: tuple[ResetColumn, ...] = ()
 
     @property
     def header(self) -> tuple:
         """Static part of the panel (cached background). Quota figures, bars and
-        TPS are animated per frame, so only their labels and reset texts are here."""
+        TPS are animated per frame; upcoming reset columns are cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]), self.banner,
-                (self.forecast, self.forecast_tone), not self.bubbles, self.provider == "mimo")
+                tuple((item[0], "") for item in self.quota[:3]), self.banner,
+                (self.forecast, self.forecast_tone), not self.bubbles, self.provider == "mimo", self.upcoming_resets[:3])
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
+RESET_HEIGHT = 108          # Upcoming resets: three provider columns, fixed height.
 GEAR_RADIUS = 9.0
 GEAR_HIT = 17.0
 
@@ -103,7 +115,7 @@ def meter_columns(count: int) -> list[tuple[float, float]]:
 
 
 def footer_middle(model, field_h: float) -> float:
-    return field_top(model) + field_h + 32
+    return field_top(model) + field_h + RESET_HEIGHT + 32
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
@@ -117,7 +129,7 @@ def header_offset(model: PanelModel | None) -> float:
 def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
-    # The reset-text row is always reserved so every source's panel is the same height.
+    # Reserve the subtitle row (e.g. MiMo Credits) to keep every source the same height.
     return FIELD_TOP + 14 + header_offset(model)
 
 
@@ -148,7 +160,7 @@ def field_height(bubbles) -> float:
 
 
 def panel_height(model: PanelModel, field: float) -> float:
-    return field_top(model) + field + FOOTER + 8
+    return field_top(model) + field + RESET_HEIGHT + FOOTER + 8
 
 
 # ----- motion helpers ------------------------------------------------------------
@@ -861,9 +873,9 @@ def compact_usage(value: float | None) -> tuple[str, str]:
 
 @lru_cache(maxsize=24)
 def background(header: tuple, field_h: int, scale: float) -> Image.Image:
-    letter, title, status, tone, meters, banner, forecast, empty, daily = header
+    letter, title, status, tone, meters, banner, forecast, empty, daily, resets = header
     model = PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (), tone, banner,
-                       forecast[0], forecast[1])
+                       forecast[0], forecast[1], upcoming_resets=resets)
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -903,6 +915,27 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     if empty:
         draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
+    reset_y = top + field_h + 12
+    draw.text((px(PAD), px(reset_y)), "最近重置", font=ui_font(px(10)), fill=MUTED_TEXT, anchor="lt")
+    gap = 8
+    column_w = (WIDTH - 2 * PAD - 2 * gap) / 3
+    for index in range(3):
+        x = PAD + index * (column_w + gap)
+        y = reset_y + 18
+        draw.rounded_rectangle((px(x), px(y), px(x + column_w), px(y + 70)), radius=px(8),
+                               fill=(240, 238, 230, 8), outline=(240, 238, 230, 18), width=max(1, round(s)))
+        if index >= len(resets):
+            draw.text((px(x + column_w / 2), px(y + 35)), "暂无已知重置", font=ui_font(px(10)), fill=MUTED_TEXT, anchor="mm")
+            continue
+        item = resets[index]
+        face = ui_font(px(11), "bold")
+        name = forecast_text(f"{item.letter}  {item.name}", px(column_w - 16), face, draw)
+        draw.text((px(x + 8), px(y + 6)), name, font=face, fill=accent(item.letter), anchor="lt")
+        face = ui_font(px(9.5))
+        window = forecast_text(item.window, px(column_w - 16), face, draw)
+        draw.text((px(x + 8), px(y + 24)), window, font=face, fill=SECONDARY_TEXT, anchor="lt")
+        draw.text((px(x + 8), px(y + 41)), item.when, font=ui_font(px(10)), fill=TEXT, anchor="lt")
+        draw.text((px(x + 8), px(y + 56)), item.countdown, font=ui_font(px(9)), fill=MUTED_TEXT, anchor="lt")
     middle = footer_middle(model, field_h)
     tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
     _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))
