@@ -11,6 +11,7 @@ import pystray
 from pystray._util import win32
 
 from detail_card import MARGIN, render_card, text_card
+import agent_panel
 
 
 WM_USER = 0x0400
@@ -425,6 +426,98 @@ class DetailCardWindow:
             self.hwnd = None
 
 
+class AgentPanelWindow:
+    """Interactive bubble panel. Layered and topmost like the card, but it
+    takes the pointer (no WS_EX_TRANSPARENT) so bubbles can be dragged; it is
+    still never activated, so focus stays in the user's window."""
+
+    OPEN_SECONDS, CLOSE_SECONDS = 0.2, 0.14
+
+    def __init__(self):
+        self.hwnd = user.CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            "STATIC", "AI Agent 任务", 0x80000000 | 0x0100, 0, 0, 0, 0, None, None, None, None)  # WS_POPUP | SS_NOTIFY
+        if not self.hwnd:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.scene = agent_panel.Scene()
+        self.provider = None
+        self.anchor = None
+        self.rect = None
+        self.scale = 1.0
+        self.work = None
+        self.opened_at = self.closing_at = None
+        self.shown = False
+        self.checked_at = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self.provider is not None
+
+    def open(self, provider, model, anchor, now):
+        monitor, self.work = DetailCardWindow._work_area(self, anchor)
+        self.scale = monitor_scale(monitor)
+        if self.provider is None or self.closing_at is not None:
+            self.scene = agent_panel.Scene()
+            self.opened_at, self.closing_at = now, None
+        self.provider, self.anchor = provider, anchor
+        self.scene.set_model(model, now)
+
+    def refresh(self, model, now):
+        self.scene.set_model(model, now)
+
+    def contains(self, point, slack=6) -> bool:
+        rect = self.rect
+        return bool(rect) and rect[0] - slack <= point.x < rect[2] + slack and rect[1] - slack <= point.y < rect[3] + slack
+
+    def local(self, point):
+        if not self.rect:
+            return None
+        origin = MARGIN * self.scale
+        return ((point.x - self.rect[0] - origin) / self.scale, (point.y - self.rect[1] - origin) / self.scale)
+
+    def close(self, now):
+        if self.provider is not None and self.closing_at is None:
+            self.closing_at = now
+
+    def frame(self, point, left, right, now):
+        """Advance and present one frame; returns the scene's input events."""
+        inside = point is not None and self.contains(point, 0)
+        events = self.scene.step(now, self.local(point) if inside or self.scene.dragging else None,
+                                 left and (inside or bool(self.scene.press)), right and inside)
+        image = self.scene.render(self.scale)
+        margin = round(MARGIN * self.scale)
+        x, y = tooltip_position(self.anchor, image.size, self.work, gap=round(6 * self.scale) - margin)
+        if self.closing_at is not None:
+            progress = min(1.0, (now - self.closing_at) / self.CLOSE_SECONDS)
+            alpha, lift = 1 - progress, -4 * progress
+            if progress >= 1:
+                self.hide()
+                return []
+        else:
+            progress = agent_panel.ease_out_cubic((now - self.opened_at) / self.OPEN_SECONDS)
+            alpha, lift = progress, 10 * (1 - progress)
+        y += round(lift * self.scale)
+        DetailCardWindow._present(self, image, x, y, round(255 * alpha))
+        self.rect = (x, y, x + image.width, y + image.height)
+        if not self.shown or now - self.checked_at > 0.5:
+            # Z-order walk is cheap but not free; twice a second is plenty.
+            self.checked_at = now
+            if not self.shown or is_window_covered(self.hwnd, wintypes.RECT(*self.rect)):
+                user.SetWindowPos(self.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | SWP_NOACTIVATE | 0x0040)
+                self.shown = True
+        return events
+
+    def hide(self):
+        user.ShowWindow(self.hwnd, SW_HIDE)
+        self.provider = self.rect = self.closing_at = None
+        self.shown = False
+
+    def destroy(self):
+        if self.hwnd:
+            user.DestroyWindow(self.hwnd)
+            self.hwnd = None
+
+
 def create_popup():
     """Prefer the rendered card; fall back to the native tooltip."""
     try:
@@ -435,10 +528,19 @@ def create_popup():
 
 
 class HoverDetails:
-    def __init__(self, icons, text_for, stop_event):
+    """Hover a tray icon for its card; when agents are working, the bubble
+    panel replaces the card and stays while the pointer is on it."""
+
+    PANEL_GRACE = 0.45          # Time to travel from the icon to the panel.
+    PANEL_REFRESH = 0.5
+
+    def __init__(self, icons, text_for, stop_event, agents=None):
         self.icons, self.text_for, self.stop_event = icons, text_for, stop_event
+        self.agents = agents     # object with panel(provider), merge(a, b), split(key)
         self.candidate = None
         self.entered_at = 0.0
+        self.panel_seen = 0.0
+        self.panel_built = 0.0
 
     def update(self, popup, provider, anchor, now, dwell=0.4):
         if provider != self.candidate:
@@ -461,23 +563,82 @@ class HoverDetails:
                 return key, rect
         return None, None
 
+    def drive_panel(self, panel, point, provider, anchor, left, right, now) -> None:
+        """One frame of the open panel: hand input to the scene, act on drops."""
+        if provider and provider != panel.provider and not panel.scene.dragging:
+            model = self.agents.panel(provider)
+            if model is not None:
+                panel.open(provider, model, anchor, now)
+        over = panel.contains(point) or provider == panel.provider
+        if over or panel.scene.dragging:
+            self.panel_seen = now
+        elif now - self.panel_seen > self.PANEL_GRACE or (left or right) and not panel.contains(point, 40):
+            panel.close(now)
+        if now - self.panel_built >= self.PANEL_REFRESH and panel.closing_at is None:
+            model = self.agents.panel(panel.provider, keep=True)
+            if model is not None:
+                panel.refresh(model, now)
+            self.panel_built = now
+        for event in panel.frame(point, left, right, now):
+            if event[0] == "merge":
+                merged = self.agents.merge(event[1], event[2])
+                if merged:
+                    panel.scene.absorb(event[1], event[2], merged, now)
+            elif event[0] == "split":
+                members = self.agents.split(event[1])
+                if members:
+                    panel.scene.burst(event[1], members, now)
+            model = self.agents.panel(panel.provider, keep=True)
+            if model is not None:
+                panel.refresh(model, now)
+
     def run(self):
-        popup = None
+        popup = panel = None
         try:
             enable_thread_dpi_awareness()
             popup = create_popup()
-            while not self.stop_event.wait(0.1):
+            if self.agents is not None:
+                try:
+                    panel = AgentPanelWindow()
+                except Exception:
+                    logging.getLogger(__name__).exception("agent panel unavailable")
+            while not self.stop_event.wait(0.016 if panel and panel.active else 0.1):
                 popup.pump()
                 point = wintypes.POINT()
                 provider, anchor = None, None
-                if (user.GetCursorPos(ctypes.byref(point)) and notification_area_at(point)
-                        and not any(user.GetAsyncKeyState(key) & 0x8000 for key in (1, 2))):
+                have_point = user.GetCursorPos(ctypes.byref(point))
+                left, right = (bool(user.GetAsyncKeyState(key) & 0x8000) for key in (1, 2))
+                if have_point and notification_area_at(point) and not (left or right):
                     provider, anchor = self.target_at(point)
+                if panel and panel.active:
+                    for key, icon in self.icons.items():
+                        icon.details_visible = key == panel.provider
+                    try:
+                        self.drive_panel(panel, point, provider, anchor, left, right, time.monotonic())
+                    except Exception:
+                        logging.getLogger(__name__).exception("agent panel failed")
+                        panel.hide()
+                        panel.destroy()
+                        panel = None
+                    self.candidate = provider
+                    continue
                 for key, icon in self.icons.items():
                     icon.details_visible = key == provider
                 shell_dwell = provider and getattr(self.icons[provider], "_version4", False)
+                now = time.monotonic()
+                if panel and provider:
+                    if provider != self.candidate:
+                        popup.hide()
+                        self.candidate, self.entered_at = provider, now
+                    if now - self.entered_at >= (0 if shell_dwell else 0.4):
+                        model = self.agents.panel(provider)
+                        if model is not None:
+                            popup.hide()
+                            panel.open(provider, model, anchor, now)
+                            self.panel_seen = self.panel_built = now
+                            continue
                 try:
-                    self.update(popup, provider, anchor, time.monotonic(), dwell=0 if shell_dwell else 0.4)
+                    self.update(popup, provider, anchor, now, dwell=0 if shell_dwell else 0.4)
                 except Exception:
                     if not isinstance(popup, DetailCardWindow):
                         raise
@@ -496,3 +657,5 @@ class HoverDetails:
                 icon.details_visible = False
             if popup:
                 popup.close()
+            if panel:
+                panel.destroy()

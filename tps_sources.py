@@ -1,7 +1,8 @@
 """Passive, numeric-only readers for local AI generation records.
 
 Antigravity's numeric wire fields follow the independently verified Tokscale
-database layout. No credential files, model prompts, or response text are saved.
+database layout. No credential files, model prompts, or response text are saved;
+the short task notes behind the agent bubbles (agent_tasks) live in memory only.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from typing import Any
 import psutil
 
 import providers
+from agent_tasks import AgentNotes
 
 
 PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray/performance.json"
@@ -245,6 +247,9 @@ class TpsMonitor:
         self.software: list[dict[str, Any]] = []
         self.last_slow_discovery = 0.0
         self.usage_versions: dict[Path, tuple[int, int]] = {}
+        self.notes = AgentNotes()          # what each agent is doing; memory only
+        self.thread_columns: set[str] | None = None
+        self.titles_checked: dict[Path, float] = {}
 
     def add(self, observation: Observation, now: float):
         if observation.identity in self.seen or not now - 86400 <= observation.ended_at <= now + 5:
@@ -280,6 +285,7 @@ class TpsMonitor:
             if moment < now - FORGET_SECONDS:
                 self.completed_at.pop(session, None)
         live = set(self.file_sessions.values()) | set(self.activity) | set(self.client_stream_starts)
+        self.notes.prune(live, now)
         for session in list(self.context):
             if session not in live and session not in self.completed_at:
                 self.context.pop(session, None)
@@ -302,6 +308,7 @@ class TpsMonitor:
                     # each history on the first poll; only recent ones matter.
                     if filename and (Path(filename) in self.readers or self._recent(Path(filename), now)):
                         self._register(Path(filename), session, "Codex", model or "", provider or "")
+                self._codex_titles(state, now)
                 self.health["Codex"] = {"status": "已接入", "sessions": len(rows)}
             except (OSError, sqlite3.Error) as error:
                 self.health["Codex"] = {"status": "读取失败", "error": type(error).__name__}
@@ -324,6 +331,32 @@ class TpsMonitor:
             self._forget_idle(now)
             self.last_slow_discovery = now
         self.last_discovery = now
+
+    def _codex_titles(self, state: Path, now: float):
+        """Thread title, folder and spawning parent of live Codex threads."""
+        live = [session for session in self.activity if self.context.get(session, {}).get("source") == "Codex"]
+        if not live:
+            return
+        try:
+            self._read_codex_titles(state, live)
+        except sqlite3.Error:
+            pass
+
+    def _read_codex_titles(self, state: Path, live: list):
+        with readonly_db(state) as db:
+            if self.thread_columns is None:
+                self.thread_columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+            wanted = [name for name in ("title", "cwd", "first_user_message", "source", "agent_nickname", "agent_role") if name in self.thread_columns]
+            if not wanted:
+                return
+            marks = ",".join("?" * len(live))
+            rows = db.execute(f"SELECT id,{','.join(wanted)} FROM threads WHERE id IN ({marks})", live).fetchall()
+        for row in rows:
+            value = dict(zip(wanted, row[1:]))
+            parent = _find_text(value.get("source"), "parent_thread_id")
+            self.notes.describe(row[0], title=str(value.get("title") or value.get("first_user_message") or ""),
+                                cwd=str(value.get("cwd") or ""), parent=parent,
+                                role=str(value.get("agent_nickname") or value.get("agent_role") or ""))
 
     def _discover_claude(self, now: float):
         """Claude Code transcripts: ~/.claude/projects/<project>/<session>.jsonl
@@ -472,6 +505,30 @@ class TpsMonitor:
             bounds[message_id] = (min(low, start), max(high, end))
         return {message_id: high - low for message_id, (low, high) in bounds.items()}
 
+    def _mimocode_titles(self, path: Path, sessions: set):
+        """Session title, folder and parent (sub-agent) of recently written sessions."""
+        sessions = [session for session in sessions if session in self.activity][:50]
+        if not sessions:
+            return
+        db = readonly_db(path)
+        try:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(session)")}
+            wanted = [name for name in ("title", "directory", "parent_id") if name in columns]
+            if not wanted:
+                return
+            marks = ",".join("?" * len(sessions))
+            rows = db.execute(f"SELECT id,{','.join(wanted)} FROM session WHERE id IN ({marks})", sessions).fetchall()
+        except sqlite3.Error:
+            return
+        finally:
+            db.close()
+        for row in rows:
+            value = dict(zip(wanted, row[1:]))
+            title = str(value.get("title") or "")
+            if re.match(r"^(New session|Child session)\b", title):
+                title = ""
+            self.notes.describe(str(row[0]), title=title, cwd=str(value.get("directory") or ""), parent=str(value.get("parent_id") or ""))
+
     def _mimocode(self, now: float):
         """MiMo Code (an OpenCode fork) stores each message as JSON in SQLite;
         read token counts of completed assistant messages only."""
@@ -533,6 +590,7 @@ class TpsMonitor:
                                      int((number(tokens.get("input"), 0) or 0) + (number(cache.get("write"), 0) or 0)),
                                      int(number(cache.get("read"), 0) or 0)), now)
             self.mimocode_cursor[path] = newest
+            self._mimocode_titles(path, {str(row[1]) for row in rows})
             for _, session, _, completed, _ in finished:
                 if self.activity.get(str(session), (None, 0, None))[1] <= completed:
                     if completed > now - 3:
@@ -862,12 +920,15 @@ class TpsMonitor:
             try:
                 source = self.context.get(session, {}).get("source")
                 if source == "Claude Code":
+                    agent = path.stem if path.parent.name == "subagents" else session
                     for record in reader.read():
+                        self.notes.claude(agent, record, session if agent != session else "")
                         self._claude_record(record, session, now)
                 elif source == "Grok CLI":
                     session = path.parent.name
                     for record in reader.read():
                         if path.name == "updates.jsonl":
+                            self.notes.grok(session, record)
                             self._grok_record(record, session, now)
                         else:
                             self._grok_activity(record, session, now)
@@ -879,6 +940,7 @@ class TpsMonitor:
                     if any(r.get("type") == "token_usage_record" for r in records):
                         self.context[session]["modern_usage"] = True
                     for record in records:
+                        self.notes.codex(session, record)
                         self._codex_record(record, session, now)
             except (OSError, ValueError, TypeError):
                 self.health[self.context.get(session or "", {}).get("source", "记录读取")] = {"status": "部分记录不可读取"}
@@ -899,6 +961,16 @@ class TpsMonitor:
             self.seen.discard(self.events.popleft().identity)
         self.activity = {s: v for s, v in self.activity.items() if now - v[1] < (3 if v[2] == "刚完成生成" else 600)}
         return self.snapshot(now)
+
+    def agents(self, now: float) -> list[dict[str, Any]]:
+        """Working (and just finished) agents with their latest measured TPS."""
+        rates: dict[str, float] = {}
+        for event in reversed(self.events):
+            if event.ended_at < now - 300:
+                break
+            if event.native_tps is not None:
+                rates.setdefault(event.session, event.native_tps)
+        return self.notes.export(self.activity, self.context, rates, now, provider_for)
 
     def snapshot(self, now: float) -> dict[str, Any]:
         # The installed Codex bridge emits a second copy of agy's usage. Only
@@ -934,6 +1006,20 @@ class TpsMonitor:
                     basis_text = f"{latest.basis}；最近 {len(group)} 次回复按 token 加权"
             providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
+
+
+def _find_text(value: Any, wanted: str) -> str:
+    if isinstance(value, str) and value.startswith("{"):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return ""
+    if isinstance(value, dict):
+        for name, item in value.items():
+            found = item if name == wanted and item else _find_text(item, wanted)
+            if found:
+                return str(found)
+    return ""
 
 
 def _antigravity_query(db) -> tuple[list, list]:
