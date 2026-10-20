@@ -103,7 +103,7 @@ class PanelModel:
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-RESET_HEIGHT = 88           # Three compact provider columns, without a section heading.
+RESET_HEIGHT = 56           # Source name and countdown only.
 GEAR_RADIUS = 9.0
 GEAR_HIT = 17.0
 
@@ -921,20 +921,16 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
     for index in range(3):
         x = PAD + index * (column_w + gap)
         y = reset_y
-        draw.rounded_rectangle((px(x), px(y), px(x + column_w), px(y + 70)), radius=px(8),
+        draw.rounded_rectangle((px(x), px(y), px(x + column_w), px(y + 42)), radius=px(8),
                                fill=(240, 238, 230, 8), outline=(240, 238, 230, 18), width=max(1, round(s)))
         if index >= len(resets):
-            draw.text((px(x + column_w / 2), px(y + 35)), "暂无已知重置", font=ui_font(px(10)), fill=MUTED_TEXT, anchor="mm")
+            draw.text((px(x + column_w / 2), px(y + 21)), "暂无已知重置", font=ui_font(px(10)), fill=MUTED_TEXT, anchor="mm")
             continue
         item = resets[index]
         face = ui_font(px(11), "bold")
         name = forecast_text(item.name, px(column_w - 16), face, draw)
         draw.text((px(x + 8), px(y + 6)), name, font=face, fill=accent(item.letter), anchor="lt")
-        face = ui_font(px(9.5))
-        window = forecast_text(item.window, px(column_w - 16), face, draw)
-        draw.text((px(x + 8), px(y + 24)), window, font=face, fill=SECONDARY_TEXT, anchor="lt")
-        draw.text((px(x + 8), px(y + 41)), item.when, font=ui_font(px(10)), fill=TEXT, anchor="lt")
-        draw.text((px(x + 8), px(y + 56)), item.countdown, font=ui_font(px(9)), fill=MUTED_TEXT, anchor="lt")
+        draw.text((px(x + 8), px(y + 25)), item.countdown, font=ui_font(px(10)), fill=TEXT, anchor="lt")
     middle = footer_middle(model, field_h)
     tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
     _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))

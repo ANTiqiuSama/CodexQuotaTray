@@ -367,22 +367,37 @@ class QuotaTray:
     # ----- agent panel (hover thread) ---------------------------------------------
 
     def upcoming_resets(self, now: float) -> tuple[agent_panel.ResetColumn, ...]:
-        """Nearest future reset per enabled provider; MiMo expires rather than resets."""
+        """Reset of the limiting window; all exhausted shared windows must recover."""
         candidates = []
         for provider, snapshot in self.snapshots.items():
             if provider == "mimo" or provider not in PROVIDERS:
                 continue
             windows = []
             if snapshot.pools:
-                windows = [(p.get("resets_at"), (p.get("label") or p.get("key") or "额度") + " · "
+                windows = [(p.get("resets_at"), p.get("remaining_percent"), (p.get("label") or p.get("key") or "额度") + " · "
                             + (window_label(p.get("window_minutes")) or "周期")) for p in snapshot.pools]
             else:
-                windows = [(snapshot.resets_at, window_label(snapshot.window_minutes) or "当前窗口"),
-                           (snapshot.secondary_resets_at, window_label(snapshot.secondary_window_minutes) or "第二窗口")]
-            future = [(float(stamp), label) for stamp, label in windows if stamp is not None and stamp > now]
+                windows = [(snapshot.resets_at, snapshot.remaining_percent, window_label(snapshot.window_minutes) or "当前窗口"),
+                           (snapshot.secondary_resets_at, snapshot.secondary_remaining_percent, window_label(snapshot.secondary_window_minutes) or "第二窗口")]
+            known = [item for item in windows if item[1] is not None]
+            exhausted = [item for item in known if item[1] < 0.5]
+            if exhausted and not snapshot.pools:
+                # Codex/Claude require both windows to be available. An earlier
+                # reset cannot restore use while another exhausted window remains.
+                if any(stamp is None or stamp <= now for stamp, _, _ in exhausted):
+                    continue
+                relevant = exhausted
+                choose = max
+            else:
+                # Independent model pools can recover separately. Prefer the
+                # exhausted/lowest-remaining pool instead of a plentiful one.
+                least = min((item[1] for item in known), default=None)
+                relevant = [item for item in known if item[1] == least] if known else windows
+                choose = min
+            future = [(float(stamp), label) for stamp, _, label in relevant if stamp is not None and stamp > now]
             if not future:
                 continue
-            stamp, label = min(future, key=lambda item: item[0])
+            stamp, label = choose(future, key=lambda item: item[0])
             name = {"codex": "Codex", "gemini": "Gemini", "grok": "Grok", "claude": "Claude"}.get(provider, provider)
             candidates.append((stamp, agent_panel.ResetColumn(provider, provider_letter(provider), name, label,
                                 datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"), duration_text(stamp - now) + "后")))

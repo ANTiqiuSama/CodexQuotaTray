@@ -506,6 +506,39 @@ class AgentPanelTests(unittest.TestCase):
             sizes.append(scene.render(1.25).size)
         self.assertEqual(sizes, [sizes[0]] * 3)
 
+    def test_codex_weekly_exhausted_hides_ineffective_five_hour_reset(self):
+        now = time.time()
+        snapshot = self.tray.snapshots["codex"]
+        snapshot.window_minutes, snapshot.secondary_window_minutes = 300, 10080
+        snapshot.resets_at, snapshot.secondary_resets_at = now + 3600, now + 3 * 86400
+        snapshot.remaining_percent, snapshot.secondary_remaining_percent = 80, 0
+        item = next(item for item in self.tray.upcoming_resets(now) if item.provider == "codex")
+        self.assertEqual(item.window, "每周")
+        self.assertEqual(item.countdown, tray_app.duration_text(3 * 86400) + "后")
+        snapshot.remaining_percent = 0  # both windows must recover
+        item = next(item for item in self.tray.upcoming_resets(now) if item.provider == "codex")
+        self.assertEqual(item.window, "每周")
+        snapshot.secondary_resets_at = None
+        self.assertNotIn("codex", [item.provider for item in self.tray.upcoming_resets(now)])
+
+    def test_nonempty_shared_windows_show_the_binding_limit_not_earliest_time(self):
+        now = time.time()
+        snapshot = self.tray.snapshots["codex"]
+        snapshot.window_minutes, snapshot.secondary_window_minutes = 300, 10080
+        snapshot.resets_at, snapshot.secondary_resets_at = now + 3600, now + 3 * 86400
+        snapshot.remaining_percent, snapshot.secondary_remaining_percent = 80, 5
+        self.assertEqual(self.tray.upcoming_resets(now)[0].window, "每周")
+        snapshot.remaining_percent, snapshot.secondary_remaining_percent = 5, 80
+        self.assertEqual(self.tray.upcoming_resets(now)[0].window, "5 小时")
+
+    def test_independent_pool_prioritizes_exhausted_model_pool(self):
+        now = time.time()
+        snapshot = self.tray.snapshots["gemini"]
+        snapshot.pools = [{"label": "Gemini", "remaining_percent": 99, "window_minutes": 300, "resets_at": now + 60},
+                          {"label": "Claude/GPT", "remaining_percent": 0, "window_minutes": 300, "resets_at": now + 3600}]
+        item = next(item for item in self.tray.upcoming_resets(now) if item.provider == "gemini")
+        self.assertEqual(item.window, "Claude/GPT · 5 小时")
+
     def test_forecast_replaces_schedules_in_hover_footer(self):
         self.tray.headline_forecast = Mock(return_value=("按当前速度，可用到下次重置", "ok"))
         model = self.tray.panel("codex")
