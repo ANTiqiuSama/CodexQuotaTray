@@ -414,9 +414,7 @@ class QuotaTray:
         # The Codex reset notice is shown on every panel (same size everywhere).
         banner, codex = "", self.snapshots.get("codex")
         if reset_watch.ENABLED and codex is not None and "codex" in self.snapshots:
-            banner = reset_watch.card_lines(getattr(self, "reset_outlook", None), codex.display_remaining, now)[0]
-            if banner and provider != "codex":
-                banner = "Codex · " + banner
+            banner = reset_watch.panel_line(getattr(self, "reset_outlook", None), now)
         forecast, forecast_tone = self.headline_forecast(provider)
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),

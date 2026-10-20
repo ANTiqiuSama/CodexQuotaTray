@@ -18,6 +18,13 @@ RADAR = {"code": 0, "data": {"probability24h": 12, "probability48h": 30, "events
 
 
 class ResetWatchTests(unittest.TestCase):
+    def test_panel_probability_is_visible_even_below_alert_threshold(self):
+        now = time.time()
+        outlook = ResetOutlook("s", "p", 22, 39, fetched_at=now)
+        self.assertEqual(reset_watch.panel_line(outlook, now), "GPT 社区重置预测 · 24h 22% · 48h 39%")
+        self.assertIn("正在读取", reset_watch.panel_line(None, now))
+        self.assertIn("数据待更新", reset_watch.panel_line(outlook, now + reset_watch.STALE_SECONDS + 1))
+
     def test_parsers(self):
         a = parse_willreset(WILLRESET)
         self.assertEqual((a.prob_24, a.prob_48, a.promise, a.last_reset_text), (71, 81, "Done", "Direct usage reset"))

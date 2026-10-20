@@ -22,7 +22,7 @@ from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compos
 from agent_tasks import width as text_units
 from icon_art import AMBER, CLAY, RESET_BLUE, accent, ring_color
 
-WIDTH = 360
+WIDTH = 420
 PAD = 18
 FIELD_TOP = 118
 BASE_RADIUS = 30.0
@@ -90,9 +90,9 @@ class PanelModel:
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
-FOOTER = 30                 # Forecast line and the settings gear under the field.
-GEAR_RADIUS = 8.0
-GEAR_HIT = 14.0
+FOOTER = 54                 # Two forecast lines plus a separate settings button.
+GEAR_RADIUS = 9.0
+GEAR_HIT = 17.0
 
 
 def meter_columns(count: int) -> list[tuple[float, float]]:
@@ -102,18 +102,22 @@ def meter_columns(count: int) -> list[tuple[float, float]]:
 
 
 def footer_middle(model, field_h: float) -> float:
-    return field_top(model) + field_h + 10 + 10
+    return field_top(model) + field_h + 32
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
-    return WIDTH - PAD - GEAR_RADIUS + 2, footer_middle(model, field_h)
+    return WIDTH - PAD - GEAR_HIT, footer_middle(model, field_h)
+
+
+def header_offset(model: PanelModel | None) -> float:
+    return 32 if model and model.banner else 0
 
 
 def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
     # The reset-text row is always reserved so every source's panel is the same height.
-    return FIELD_TOP + 14 + (26 if model.banner else 0)
+    return FIELD_TOP + 14 + header_offset(model)
 
 
 def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
@@ -411,7 +415,7 @@ class Scene:
 
         self.gear.target = 1.0 if gear and not self.dragging else 0.0
         self.gear.step(dt)
-        self.gear_angle = (self.gear_angle + dt * 120 * self.gear.value) % 360
+        self.gear_angle = 24 * self.gear.value
         self.field.step(dt)
         if now - self.opened > 0.08:            # let the window fade in before the bars run
             for spring in self.meters:
@@ -491,10 +495,14 @@ class Scene:
         cx, cy = gear_center(model, field_h)
         level = self.gear.value
         tint = tuple(round(a + (b - a) * level) for a, b in zip(MUTED_TEXT[:3], accent(model.letter)[:3])) + (255,)
-        sprite = gear(round(GEAR_RADIUS * (1 + 0.12 * level) * scale), tint)
+        draw = ImageDraw.Draw(frame)
+        half = GEAR_HIT - 1
+        draw.rounded_rectangle((round(at(cx - half)), round(at(cy - half)), round(at(cx + half)), round(at(cy + half))),
+                               radius=round(9 * scale), fill=_with_alpha(tint, round(12 + 20 * level)),
+                               outline=_with_alpha(tint, round(30 + 65 * level)), width=max(1, round(scale)))
+        sprite = gear(round(GEAR_RADIUS * scale), tint)
         if level > 0.02:
-            blit(frame, faded(halo(round((GEAR_RADIUS + 3) * scale), model.letter), 0.35 * level), at(cx), at(cy))
-            sprite = sprite.rotate(-self.gear_angle, resample=Image.BICUBIC)
+            sprite = sprite.rotate(-self.gear_angle, resample=Image.BICUBIC, expand=True)
         blit(frame, sprite, at(cx), at(cy))
 
         for ripple in self.ripples:
@@ -547,27 +555,28 @@ class Scene:
         """Animated header: counting quota figures and bars, easing TPS, a sonar
         ping on the title dot while agents work, drifting shells when idle."""
         draw = ImageDraw.Draw(frame)
+        meter_top = METER_TOP + header_offset(model)
         columns = meter_columns(len(self.meters))
         for (x, end), spring, item in zip(columns, self.meters, model.quota[:3]):
             value = item[1]
             shade = TEXT if value is None or value >= 50 else ring_color(value, model.letter)
             shown = None if value is None else spring.value
             blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
-                                  shade, shade, scale), at(x), at(METER_TOP + 38))
+                                  shade, shade, scale), at(x), at(meter_top + 38))
             if shown and shown > 0.3:
                 fill = ring_color(value, model.letter)
-                draw.rounded_rectangle((round(at(x)), round(at(METER_TOP + 45)),
-                                        round(at(x + max(4.0, (end - x) * min(100.0, shown) / 100))), round(at(METER_TOP + 49))),
+                draw.rounded_rectangle((round(at(x)), round(at(meter_top + 45)),
+                                        round(at(x + max(4.0, (end - x) * min(100.0, shown) / 100))), round(at(meter_top + 49))),
                                        radius=max(1, round(2 * scale)), fill=fill)
         x = columns[-1][0]
         color = accent(model.letter)
         rate = max(0.0, self.rate.value)
         blit_at(frame, figure(f"{rate:.0f}", "tok/s", color if model.tps and rate >= 0.5 else TEXT, SECONDARY_TEXT, scale),
-                at(x), at(METER_TOP + 38))
+                at(x), at(meter_top + 38))
         if model.status_tone == "live":
             p = (self.time % 1.8) / 1.8
             blit(frame, faded(ring(round((4 + 7 * ease_out_cubic(p)) * scale), max(1, round(1.2 * scale)), model.letter),
-                              0.8 * (1 - p) ** 1.6), at(PAD + 4), at(PAD + 9))
+                              0.8 * (1 - p) ** 1.6), at(PAD + 4), at(PAD + 9 + header_offset(model)))
         if not model.bubbles:
             top = field_top(model)
             for index, (dx, dy, radius) in enumerate(((-96, -6, 16), (92, 4, 12), (-58, 18, 8), (64, -20, 7))):
@@ -771,22 +780,23 @@ def arc(radius: int, letter: str) -> Image.Image:
 
 @lru_cache(maxsize=48)
 def gear(radius: int, color: tuple) -> Image.Image:
-    """Eight-tooth settings gear with a hollow hub."""
+    """Crisp outlined cog with evenly spaced teeth and a circular hub."""
     size = (radius + 2) * 2
     big = size * SUPERSAMPLE
     r = radius * SUPERSAMPLE
     c = big / 2
     image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    body, tooth_out, half = r * 0.74, r * 1.0, math.radians(13)
+    points = []
     for index in range(8):
         angle = index * math.tau / 8
-        points = [(c + math.cos(angle + s * half * k) * radius_, c + math.sin(angle + s * half * k) * radius_)
-                  for s, k, radius_ in ((-1, 1.25, body * 0.95), (-1, 0.9, tooth_out), (1, 0.9, tooth_out), (1, 1.25, body * 0.95))]
-        draw.polygon(points, fill=color)
-    draw.ellipse((c - body, c - body, c + body, c + body), fill=color)
-    hole = r * 0.34
-    draw.ellipse((c - hole, c - hole, c + hole, c + hole), fill=(0, 0, 0, 0))
+        for offset, factor in ((-22.5, .72), (-13, .72), (-10, 1), (10, 1), (13, .72), (22.5, .72)):
+            a = angle + math.radians(offset)
+            points.append((c + math.cos(a) * r * factor, c + math.sin(a) * r * factor))
+    stroke = max(1, round(1.35 * SUPERSAMPLE))
+    draw.line(points + points[:1], fill=color, width=stroke, joint="curve")
+    hole = r * .29
+    draw.ellipse((c - hole, c - hole, c + hole, c + hole), outline=color, width=stroke)
     return image.resize((size, size), Image.LANCZOS)
 
 
@@ -800,6 +810,13 @@ def forecast_text(text: str, limit: float, face, probe) -> str:
     while text and probe.textlength(text + "…", font=face) > limit:
         text = text[:-1]
     return text + "…"
+
+
+def forecast_lines(text: str, limit: float, face, probe) -> list[str]:
+    lines = _wrap(probe, text, face, limit)
+    if len(lines) > 2:
+        lines = [lines[0], forecast_text("".join(lines[1:]), limit, face, probe)]
+    return lines
 
 
 def _trend(draw, x, cy, s, color, stroke):
@@ -826,7 +843,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
     draw = ImageDraw.Draw(content)
     color = accent(letter)
     right = WIDTH - PAD
-    y = PAD
+    y = PAD + header_offset(model)
     draw.ellipse((px(PAD), px(y + 5), px(PAD + 8), px(y + 13)), fill=color)
     draw.text((px(PAD + 16), px(y + 9)), title, font=ui_font(px(14), "bold"), fill=TEXT, anchor="lm")
     pill = ui_font(px(11))
@@ -835,7 +852,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
     draw.rounded_rectangle((px(right - width), px(y), px(right), px(y + 18)), radius=px(9), fill=fill)
     draw.text((px(right - width / 2), px(y + 9)), status, font=pill, fill=ink, anchor="mm")
 
-    y = METER_TOP
+    y = METER_TOP + header_offset(model)
     label_font, small = ui_font(px(11)), ui_font(px(10))
     columns = meter_columns(len(meters))
     for (x, end), (label, reset) in zip(columns, tuple(meters) + (("TPS", ""),)):
@@ -845,7 +862,7 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
             if reset:
                 draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
     if banner:
-        y_banner = top - 32
+        y_banner = PAD - 2
         draw.rounded_rectangle((px(PAD - 6), px(y_banner), px(right + 6), px(y_banner + 20)), radius=px(7),
                                fill=_with_alpha(RESET_BLUE, 38), outline=_with_alpha(RESET_BLUE, 110), width=max(1, round(s)))
         draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=ui_font(px(11), "bold"), fill=RESET_BLUE, anchor="lm")
@@ -856,7 +873,8 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
     middle = footer_middle(model, field_h)
     tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
     _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))
-    face = ui_font(px(10.5))
-    line = forecast_text(model.forecast or "正在积累用量，稍后给出预测", px(WIDTH - 2 * PAD - 52), face, draw)
-    draw.text((px(PAD + 18), px(middle)), line, font=face, fill=tint, anchor="lm")
+    face = ui_font(px(11))
+    lines = forecast_lines(model.forecast or "正在积累用量，稍后给出预测", px(WIDTH - 2 * PAD - 64), face, draw)
+    for index, line in enumerate(lines):
+        draw.text((px(PAD + 18), px(middle + (index - (len(lines) - 1) / 2) * 17)), line, font=face, fill=tint, anchor="lm")
     return _compose(content, scale)

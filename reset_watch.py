@@ -161,6 +161,16 @@ def ago_text(moment: float | None, now: float) -> str:
     return f"{hours / 24:.1f} 天前"
 
 
+def panel_line(outlook: ResetOutlook | None, now: float) -> str:
+    """Always show the current community probabilities above the panel title."""
+    if outlook is None:
+        return "GPT 社区重置预测 · 正在读取"
+    if outlook.level(now) == "unknown":
+        return "GPT 社区重置预测 · 数据待更新"
+    second = "—" if outlook.prob_48 is None else f"{outlook.prob_48}%"
+    return f"GPT 社区重置预测 · 24h {outlook.prob_24}% · 48h {second}"
+
+
 def card_lines(outlook: ResetOutlook | None, remaining: float | None, now: float) -> tuple[str, list[str]]:
     """(banner, notes) for the Codex card.  The banner is only set when a
     global reset looks likely within 24 hours."""

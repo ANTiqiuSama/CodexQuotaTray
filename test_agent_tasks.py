@@ -329,6 +329,22 @@ def panel(*bubbles):
 
 
 class SceneTests(unittest.TestCase):
+    def test_long_quota_forecast_wraps_without_losing_the_ending_at_each_dpi(self):
+        from PIL import Image, ImageDraw
+        text = "5 小时额度：按当前速度，预计 2 小时 40 分后用完，早于下次重置约 35 分钟"
+        for scale in (1.0, 1.25, 1.5):
+            face = agent_panel.ui_font(round(11 * scale))
+            probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+            limit = round((agent_panel.WIDTH - 2 * agent_panel.PAD - 64) * scale)
+            lines = agent_panel.forecast_lines(text, limit, face, probe)
+            self.assertEqual(len(lines), 2)
+            self.assertEqual("".join(lines).replace(" ", ""), text.replace(" ", ""))
+            self.assertTrue(all(probe.textlength(line, font=face) <= limit for line in lines))
+            scene = agent_panel.Scene()
+            scene.set_model(agent_panel.PanelModel("codex", "C", "GPT / Codex", "空闲", (("5 小时", 70, "2小时后重置"),),
+                                                  0, (), "idle", "GPT 社区重置预测 · 24h 22% · 48h 39%", text, "warn"), 0)
+            self.assertIsNotNone(scene.render(scale))
+
     def test_gear_release_and_right_click_open_settings(self):
         scene = agent_panel.Scene()
         model = panel()
