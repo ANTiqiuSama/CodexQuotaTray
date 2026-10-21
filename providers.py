@@ -12,6 +12,7 @@ Which providers are shown:
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -23,16 +24,52 @@ def _local_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
 
 
-def claude_choice() -> bool | None:
-    """A saved menu choice overrides auto-detection and the environment list."""
-    value = _read(_local_appdata() / "CodexQuotaTray/claude-enabled.txt").strip()
-    return {"enabled": True, "disabled": False}.get(value)
+def _choices_path() -> Path:
+    return _local_appdata() / "CodexQuotaTray/providers.json"
 
 
-def set_claude_enabled(enabled: bool) -> None:
+def provider_choices() -> dict[str, bool]:
+    """Saved on/off switches per source (settings page). Missing = automatic."""
+    try:
+        stored = json.loads(_read(_choices_path()) or "{}")
+    except ValueError:
+        stored = {}
+    choices = {str(key): bool(value) for key, value in (stored.items() if isinstance(stored, dict) else []) if isinstance(value, bool)}
+    legacy = {"enabled": True, "disabled": False}.get(_read(_local_appdata() / "CodexQuotaTray/claude-enabled.txt").strip())
+    if "claude" not in choices and legacy is not None:
+        choices["claude"] = legacy
+    return choices
+
+
+def set_provider_choices(changes: dict[str, bool | None]) -> None:
+    choices = provider_choices()
+    for key, value in changes.items():
+        if value is None:
+            choices.pop(key, None)
+        else:
+            choices[key] = bool(value)
+    path = _choices_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(choices, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+    if "claude" in changes and changes["claude"] is not None:
+        _write_claude_legacy(bool(changes["claude"]))
+
+
+def _write_claude_legacy(enabled: bool) -> None:
     path = _local_appdata() / "CodexQuotaTray/claude-enabled.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("enabled" if enabled else "disabled", encoding="utf-8")
+
+
+def claude_choice() -> bool | None:
+    """A saved switch overrides auto-detection and the environment list."""
+    return provider_choices().get("claude")
+
+
+def set_claude_enabled(enabled: bool) -> None:
+    set_provider_choices({"claude": enabled})
 
 
 def claude_home() -> Path:
@@ -155,14 +192,51 @@ def get(key: str) -> ProviderSpec:
     return BY_KEY[key]
 
 
-def enabled_keys(env: str | None = None) -> list[str]:
-    """Ordered provider keys to show in the tray."""
+def _env_list(env: str | None = None) -> set[str] | None:
     raw = os.environ.get("CODEX_QUOTA_PROVIDERS") if env is None else env
-    wanted = ({part.strip().lower() for part in raw.replace(";", ",").split(",") if part.strip()}
-              if raw else {spec.key for spec in SPECS if spec.available()})
-    choice = claude_choice()
-    if choice is True:
-        wanted.add("claude")
-    elif choice is False:
-        wanted.discard("claude")
+    return {part.strip().lower() for part in raw.replace(";", ",").split(",") if part.strip()} if raw else None
+
+
+def enabled_keys(env: str | None = None) -> list[str]:
+    """Ordered provider keys to show in the tray.  A switch saved in the
+    settings page wins over the environment list, which wins over detection."""
+    listed = _env_list(env)
+    wanted = listed if listed is not None else {spec.key for spec in SPECS if spec.available()}
+    for key, choice in provider_choices().items():
+        if choice is True:
+            wanted.add(key)
+        elif choice is False:
+            wanted.discard(key)
     return [spec.key for spec in SPECS if spec.key in wanted]
+
+
+DESCRIPTIONS = {
+    "codex": "读取 Codex App Server 的 5 小时与每周额度；需要已安装并登录 Codex。",
+    "grok": "用临时 Grok CLI 会话读取 /usage 每周额度；需要已安装并登录 Grok CLI。",
+    "gemini": "用 agy（Antigravity CLI）读取 Argon、Claude/GPT、Gemini 额度池；需要已安装并登录 Antigravity。",
+    "claude": "用临时 Claude Code 会话读取订阅额度；需要 Claude 订阅（Pro/Max）并登录 Claude Code。",
+    "mimo": "读取小米 MiMo Token Plan 控制台套餐；需要在设置 → 小米 MiMo 中登录或填写手动套餐。",
+}
+
+
+def provider_states(env: str | None = None) -> list[dict]:
+    """Every source with whether it is shown and why, for the settings page and diagnostics."""
+    listed = _env_list(env)
+    choices = provider_choices()
+    shown = set(enabled_keys(env))
+    states = []
+    for spec in SPECS:
+        choice = choices.get(spec.key)
+        if choice is not None:
+            reason = "手动开启" if choice else "手动关闭"
+        elif listed is not None:
+            reason = "环境变量 CODEX_QUOTA_PROVIDERS " + ("包含" if spec.key in listed else "未包含")
+        elif spec.default:
+            reason = "默认开启"
+        elif spec.key == "claude":
+            reason = "默认关闭（开通订阅后手动开启）"
+        else:
+            reason = "已检测到，自动开启" if spec.key in shown else "未检测到，默认关闭"
+        states.append({"key": spec.key, "letter": spec.letter, "label": spec.label, "enabled": spec.key in shown,
+                       "reason": reason, "manual": choice is not None, "description": DESCRIPTIONS.get(spec.key, "")})
+    return states

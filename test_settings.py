@@ -72,5 +72,42 @@ class SettingsViewTests(unittest.TestCase):
             self.assertEqual("auto", tray_app.TRAY_ORDER_MODE)
 
 
+class SourceSwitchTests(unittest.TestCase):
+    def test_states_explain_every_source_and_saved_switches_win(self):
+        import providers
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {"LOCALAPPDATA": root}):
+            states = {item["key"]: item for item in providers.provider_states("codex,grok")}
+            self.assertEqual({"codex", "grok", "gemini", "claude", "mimo"}, set(states))
+            self.assertFalse(states["claude"]["enabled"])
+            self.assertIn("未包含", states["claude"]["reason"])
+            providers.set_provider_choices({"claude": True, "grok": False})
+            states = {item["key"]: item for item in providers.provider_states("codex,grok")}
+            self.assertTrue(states["claude"]["enabled"])
+            self.assertEqual("手动开启", states["claude"]["reason"])
+            self.assertFalse(states["grok"]["enabled"])
+            self.assertEqual(["codex", "claude"], providers.enabled_keys("codex,grok"))
+            providers.set_provider_choices({"grok": None})
+            self.assertNotIn("grok", providers.provider_choices())
+
+    def test_mimo_manual_plan_from_settings_form(self):
+        import json
+        import mimo_usage
+        self.assertEqual(49.2e9, mimo_usage.parse_credits("49.2B"))
+        self.assertEqual(4.92e10, mimo_usage.parse_credits("492亿"))
+        self.assertIsNone(mimo_usage.parse_credits("abc"))
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "mimo.json"
+            mimo_usage.save_manual_plan("49.2B", "2027年6月1日", "1.5B", "Max", path=path)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("2027-06-01", saved["period_end"])
+            self.assertEqual(1.5e9, saved["used_credits"])
+            with self.assertRaises(ValueError):
+                mimo_usage.save_manual_plan("", "2027-06-01", path=path)
+            with self.assertRaises(ValueError):
+                mimo_usage.save_manual_plan("1B", "next year", path=path)
+            mimo_usage.remove_manual_plan(path)
+            self.assertFalse(path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

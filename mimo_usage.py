@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -358,6 +359,51 @@ def manual_plan(path: Path | None = None) -> PlanStatus | None:
     return status
 
 
+def parse_credits(text: Any) -> float | None:
+    """'49.2B', '492亿', '1,000,000', '3.5e9' -> Credits."""
+    value = str(text or "").strip().replace(",", "").replace("，", "").replace(" ", "")
+    if not value:
+        return None
+    units = {"k": 1e3, "K": 1e3, "m": 1e6, "M": 1e6, "b": 1e9, "B": 1e9, "g": 1e9, "G": 1e9, "万": 1e4, "亿": 1e8}
+    factor = 1.0
+    while value and value[-1] in units:
+        factor *= units[value[-1]]
+        value = value[:-1]
+    try:
+        number = float(value) * factor
+    except ValueError:
+        return None
+    return number if number >= 0 else None
+
+
+def save_manual_plan(total: Any, period_end: Any, used: Any = "", name: str = "", path: Path | None = None) -> dict:
+    """Write mimo.json from the settings page; raises ValueError with a readable message."""
+    amount = parse_credits(total)
+    if not amount:
+        raise ValueError("请填写套餐总 Credits，例如 49.2B 或 492亿")
+    match = re.fullmatch(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", str(period_end or "").strip())
+    end = parse_time(f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}") if match else None
+    if end is None:
+        raise ValueError("请填写到期日期，格式 YYYY-MM-DD")
+    config: dict[str, Any] = {"total_credits": amount, "period_end": datetime.fromtimestamp(end, BEIJING).strftime("%Y-%m-%d")}
+    spent = parse_credits(used)
+    if spent:
+        config["used_credits"] = spent
+        config["used_at"] = datetime.now(BEIJING).isoformat(timespec="seconds")
+    if name.strip():
+        config["plan_name"] = name.strip()
+    path = path or CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+    return config
+
+
+def remove_manual_plan(path: Path | None = None) -> None:
+    (path or CONFIG_PATH).unlink(missing_ok=True)
+
+
 # ----- local ledger ------------------------------------------------------------
 
 class LocalLedger:
@@ -488,7 +534,8 @@ class MimoTracker:
             plan = fetcher()
             error = None
         except LoginRequired as exc:
-            plan, error = manual_plan(), f"未登录 MiMo 控制台（{exc}）：右键图标选择“登录小米 MiMo…”"
+            plan = manual_plan()
+            error = None if plan else f"未登录 MiMo 控制台（{exc}）：打开设置 → 小米 MiMo，点“登录小米 MiMo”，或填写手动套餐"
         except Exception as exc:  # network, format change
             plan, error = None, f"读取 MiMo 控制台失败：{type(exc).__name__}: {exc}"
         with self.lock:

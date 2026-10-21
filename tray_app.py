@@ -836,16 +836,27 @@ class QuotaTray:
             ctypes.windll.user32.MessageBoxW(None, str(error), f"{label} · 无法打开", 0x10)
 
     def mimo_login(self, _icon=None, _item=None) -> None:
+        if getattr(self, "mimo_login_running", False):
+            return
+        self.mimo_login_running, self.mimo_login_result = True, "已打开登录窗口，请在浏览器中登录小米账号…"
+
         def run():
             try:
                 plan = mimo_usage.login(interactive=True)
-                tracker = mimo_tracker()
-                tracker.refresh(lambda: plan)
-                with self.ui_lock:
-                    self.snapshots["mimo"] = mimo_snapshot(tracker.view())
-                self.wake.set()
+                self.mimo_login_result = "登录成功，已读取套餐"
+                if "mimo" in PROVIDERS:
+                    tracker = mimo_tracker()
+                    tracker.refresh(lambda: plan)
+                    with self.ui_lock:
+                        self.snapshots["mimo"] = mimo_snapshot(tracker.view())
+                    self.wake.set()
+                else:
+                    self.mimo_login_result = "登录成功；在“额度来源”中开启小米 MiMo 并保存后显示 M 图标"
             except Exception as error:
+                self.mimo_login_result = f"登录未完成：{error}"
                 ctypes.windll.user32.MessageBoxW(None, str(error), "Xiaomi MiMo · 登录未完成", 0x30)
+            finally:
+                self.mimo_login_running = False
         threading.Thread(target=run, name="mimo-login", daemon=True).start()
 
     def mimo_logout(self, _icon=None, _item=None) -> None:
@@ -1031,6 +1042,45 @@ class QuotaTray:
         log.info("Claude quota polling manually %s", "enabled" if enabled else "disabled")
         self.restart_requested = True
         self.exit_app()
+
+    def set_providers(self, changes: dict) -> None:
+        """Settings-page source switches; the tray restarts to show the new set."""
+        changes = {key: value for key, value in changes.items() if (key in PROVIDERS) != bool(value)}
+        if not changes:
+            return
+        provider_registry.set_provider_choices(changes)
+        log.info("source switches changed: %s", changes)
+        self.restart_requested = True
+        self.exit_app()
+
+    def mimo_status(self) -> dict:
+        """What the MiMo settings page shows: login, manual plan, latest error."""
+        view = mimo_tracker().view() if "mimo" in PROVIDERS else None
+        manual = mimo_usage.manual_plan()
+        return {
+            "enabled": "mimo" in PROVIDERS,
+            "logged_in": mimo_usage.COOKIE_PATH.exists(),
+            "browser": mimo_usage.edge_path(),
+            "manual": manual,
+            "plan": getattr(view, "plan_name", "") if view else "",
+            "source": getattr(view, "source", "") if view else "",
+            "total": getattr(view, "total", None) if view else None,
+            "used": getattr(view, "used", None) if view else None,
+            "error": getattr(view, "error", "") if view else "",
+            "logging_in": bool(getattr(self, "mimo_login_running", False)),
+            "login_result": getattr(self, "mimo_login_result", ""),
+        }
+
+    def save_mimo_manual(self, total: str, period_end: str, used: str = "", name: str = "") -> None:
+        mimo_usage.save_manual_plan(total, period_end, used, name)
+        if "mimo" in PROVIDERS:
+            if not mimo_usage.COOKIE_PATH.exists():      # the console, when logged in, is read by the scheduler
+                tracker = mimo_tracker()
+                tracker.refresh(mimo_usage.manual_plan)
+                with self.ui_lock:
+                    self.snapshots["mimo"] = mimo_snapshot(tracker.view())
+            self.scheduler.request(["mimo"], time.time(), "手动配置")
+            self.wake.set()
 
     def open_settings(self, _icon=None, _item=None) -> None:
         from settings_window import SettingsController
