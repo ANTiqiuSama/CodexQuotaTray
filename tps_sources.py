@@ -86,7 +86,10 @@ def key(*parts: Any) -> str:
 
 
 def readonly_db(path: Path):
-    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.3)
+    # A client mid-checkpoint (MiMo Code, Codex) briefly holds the WAL lock;
+    # 0.3 s often failed the first read after it started. Still short enough
+    # for the 1 s TPS loop, and a locked database is simply retried next round.
+    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.5)
 
 
 def proto_fields(data: bytes) -> dict[int, list[int | bytes]]:

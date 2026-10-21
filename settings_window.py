@@ -37,7 +37,8 @@ def save_summary(config: dict, enabled: bool) -> None:
     os.replace(temporary, path)
 
 
-PAGES = (("overview", "概览"), ("sources", "额度来源"), ("agents", "任务与 herdr"), ("naming", "任务命名 API"), ("general", "常规"))
+PAGES = (("overview", "概览"), ("sources", "额度来源"), ("mimo", "小米 MiMo"), ("agents", "任务与 herdr"),
+         ("naming", "任务命名 API"), ("general", "常规"))
 PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "mimo": "Xiaomi MiMo"}
 
 
@@ -169,14 +170,17 @@ class SettingsWindow:
         draw()
         return canvas
 
-    def row(self, parent, title, detail, variable, command=None):
+    def row(self, parent, title, detail, variable, command=None, badge=None):
         """A setting line: title + explanation on the left, switch on the right."""
         frame = self.tk.Frame(parent, bg=view.SURFACE, padx=self.S(16), pady=self.S(12))
+        if badge:
+            letter, color = badge
+            self.tk.Label(frame, text=letter, bg=color, fg="#1f1e1c", font=self.font(10, "bold"), width=2).pack(side="left", padx=(0, self.S(12)))
         text = self.tk.Frame(frame, bg=view.SURFACE)
         text.pack(side="left", fill="x", expand=True)
         self.label(text, title, 11, weight="bold").pack(anchor="w")
-        if detail:
-            self.label(text, detail, 9, view.INK_3, wraplength=self.S(520)).pack(anchor="w", pady=(self.S(2), 0))
+        frame.detail = self.label(text, detail, 9, view.INK_3, wraplength=self.S(500))
+        frame.detail.pack(anchor="w", pady=(self.S(2), 0))
         self.switch(frame, variable, command).pack(side="right", padx=(self.S(12), 0))
         return frame
 
@@ -261,6 +265,7 @@ class SettingsWindow:
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._overview(self.scrollable(self.pages["overview"]))
         self._sources(self.scrollable(self.pages["sources"]))
+        self._mimo(self.scrollable(self.pages["mimo"]))
         self._agents(self.scrollable(self.pages["agents"]))
         self._naming(self.pages["naming"])
         self._general(self.pages["general"])
@@ -291,20 +296,121 @@ class SettingsWindow:
         self.chart_holder.pack(fill="x", pady=(S(14), 0))
 
     def _sources(self, page):
+        import providers
         tk, S = self.tk, self.S
-        self.heading(page, "额度来源", "各数据源的接入状态。Claude 需要订阅后再开启；MiMo 通过控制台登录读取。")
-        self.vars["claude"] = tk.BooleanVar()
-        self.row(page, "Claude 额度检测", "开启后读取 Claude Code 的订阅额度；更改此项需要重启托盘（保存时自动重启）。",
-                 self.vars["claude"]).pack(fill="x", pady=(0, S(10)))
+        self.heading(page, "额度来源", "每个来源可单独开关，显示当前是否开启及原因。更改开关后点“保存并应用”，托盘会自动重启。")
+        self.source_rows = {}
+        for state in providers.provider_states():
+            key = state["key"]
+            self.vars["source:" + key] = tk.BooleanVar(value=state["enabled"])
+            row = self.row(page, PROVIDER_NAMES.get(key, key), "", self.vars["source:" + key], command=self._fill_sources,
+                           badge=(state["letter"], view.hex_color(view.accent(state["letter"]))))
+            row.pack(fill="x", pady=(0, S(8)))
+            self.source_rows[key] = row
+        if os.environ.get("CODEX_QUOTA_PROVIDERS"):
+            self.label(page, f"已设置 CODEX_QUOTA_PROVIDERS={os.environ['CODEX_QUOTA_PROVIDERS']}；本页开关优先于它。", 9, "#e5a84b").pack(anchor="w")
         actions = tk.Frame(page, bg=view.BG)
-        actions.pack(fill="x", pady=(0, S(14)))
-        self.button(actions, "登录小米 MiMo", self.app.mimo_login).pack(side="left")
-        if "mimo" in self.app.snapshots:
-            self.button(actions, "退出 MiMo 登录", self.app.mimo_logout).pack(side="left", padx=S(8))
-        self.button(actions, "全部 AI 速率", self.app.open_all_performance).pack(side="left", padx=S(8))
+        actions.pack(fill="x", pady=(S(6), S(14)))
+        self.button(actions, "全部 AI 速率", self.app.open_all_performance).pack(side="left")
+        self.button(actions, "立即刷新额度", self.app.request_refresh).pack(side="left", padx=S(8))
         self.label(page, "本机记录", 11, weight="bold").pack(anchor="w", pady=(0, S(6)))
         self.health_box = tk.Frame(page, bg=view.BG)
         self.health_box.pack(fill="x")
+
+    def _fill_sources(self):
+        import providers
+        for state in providers.provider_states():
+            row = self.source_rows.get(state["key"])
+            if row is None:
+                continue
+            now = "已开启" if state["enabled"] else "已关闭"
+            pending = bool(self.vars["source:" + state["key"]].get()) != state["enabled"]
+            text = f"{state['description']}\n当前：{now} · {state['reason']}" + ("　→ 保存后重启生效" if pending else "")
+            if row.detail.cget("text") != text:
+                row.detail.configure(text=text)
+
+    def _mimo(self, page):
+        tk, S = self.tk, self.S
+        self.heading(page, "小米 MiMo", "两种方式任选其一：登录控制台（精确，含所有设备的用量），或手动填写套餐（只统计本机用量）。")
+        status = tk.Frame(page, bg=view.SURFACE, padx=S(16), pady=S(14))
+        status.pack(fill="x")
+        self.mimo_lines = [self.label(status, "", 11, weight="bold"), self.label(status, "", 9, view.INK_3, wraplength=S(600)),
+                           self.label(status, "", 9, "#e5a84b", wraplength=S(600))]
+        for line in self.mimo_lines:
+            line.pack(anchor="w", pady=(0, S(2)))
+        login = tk.Frame(page, bg=view.SURFACE, padx=S(16), pady=S(14))
+        login.pack(fill="x", pady=(S(12), 0))
+        self.label(login, "方式一：登录控制台（推荐）", 11, weight="bold").pack(anchor="w")
+        self.label(login, "1. 点击“登录小米 MiMo”，会打开一个独立的 Edge/Chrome 窗口进入 platform.xiaomimimo.com\n"
+                          "2. 用小米账号登录，进入套餐页后程序自动读取，窗口随后关闭\n"
+                          "3. 会话用 Windows 加密保存在本机（mimo-session.bin），不保存账号密码", 9, view.INK_3).pack(anchor="w", pady=(S(4), S(10)))
+        line = tk.Frame(login, bg=view.SURFACE)
+        line.pack(anchor="w")
+        self.button(line, "登录小米 MiMo", self.mimo_login, "primary").pack(side="left")
+        self.button(line, "退出登录", self.mimo_logout).pack(side="left", padx=S(8))
+        manual = tk.Frame(page, bg=view.SURFACE, padx=S(16), pady=S(14))
+        manual.pack(fill="x", pady=(S(12), 0))
+        manual.columnconfigure(1, weight=1)
+        self.label(manual, "方式二：手动填写套餐（不登录 / 免费额度 / 登录失败时）", 11, weight="bold").grid(row=0, column=0, columnspan=3, sticky="w")
+        self.mimo_fields = {name: tk.StringVar() for name in ("total", "end", "used", "name")}
+        for index, (name, title, hint) in enumerate((("total", "套餐总 Credits", "例如 49.2B、492亿"), ("end", "到期日期", "YYYY-MM-DD"),
+                                                     ("used", "已用 Credits（可选）", "填写控制台当前已用"), ("name", "套餐名（可选）", "例如 Max 年付")), 1):
+            self.label(manual, title, 10, view.INK_2).grid(row=index, column=0, sticky="w", pady=S(5), padx=(0, S(16)))
+            self.entry(manual, self.mimo_fields[name]).grid(row=index, column=1, sticky="ew", pady=S(5), ipady=S(4))
+            self.label(manual, hint, 9, view.INK_3).grid(row=index, column=2, sticky="w", padx=(S(12), 0))
+        line = tk.Frame(manual, bg=view.SURFACE)
+        line.grid(row=5, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        self.button(line, "保存手动套餐", self.save_mimo_manual).pack(side="left")
+        self.button(line, "删除手动套餐", self.remove_mimo_manual).pack(side="left", padx=S(8))
+
+    def entry(self, parent, variable, secret=False):
+        return self.tk.Entry(parent, textvariable=variable, show="●" if secret else "", bg=view.FIELD, fg=view.INK,
+                             insertbackground=view.INK, relief="flat", font=self.font(10), highlightthickness=1,
+                             highlightbackground=view.BORDER, highlightcolor="#7ec9a6")
+
+    def _fill_mimo(self):
+        info = self.app.mimo_status() if hasattr(self.app, "mimo_status") else {}
+        manual = info.get("manual")
+        if info.get("logged_in"):
+            head = "✓ 已登录控制台"
+        elif manual is not None:
+            head = "✓ 使用手动套餐"
+        else:
+            head = "✗ 尚未配置：请登录控制台或填写手动套餐"
+        total, used = info.get("total"), info.get("used")
+        parts = []
+        if total:
+            parts.append(f"套餐 {info.get('plan') or ''} 共 {total / 1e9:.2f}B Credits" + (f"，已用 {used / 1e9:.2f}B" if used is not None else ""))
+        parts.append("MiMo 来源：" + ("已开启" if info.get("enabled") else "已关闭（在“额度来源”中开启后显示 M 图标）"))
+        if not info.get("browser"):
+            parts.append("未找到 Edge/Chrome：登录需要其中之一，或设置 CODEX_QUOTA_MIMO_BROWSER 指向浏览器")
+        warn = info.get("login_result") or info.get("error") or ""
+        for line, text in zip(self.mimo_lines, (head, " · ".join(parts), warn)):
+            if line.cget("text") != text:
+                line.configure(text=text)
+
+    def mimo_login(self):
+        self.app.mimo_login()
+        self.root.after(300, self._fill_mimo)
+
+    def mimo_logout(self):
+        self.app.mimo_logout()
+        self._fill_mimo()
+
+    def save_mimo_manual(self):
+        values = {name: var.get() for name, var in self.mimo_fields.items()}
+        try:
+            self.app.save_mimo_manual(values["total"], values["end"], values["used"], values["name"])
+            self.status.set("✓ 手动套餐已保存")
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror("未能保存", str(error), parent=self.root)
+        self._fill_mimo()
+
+    def remove_mimo_manual(self):
+        import mimo_usage
+        mimo_usage.remove_manual_plan()
+        self.status.set("已删除手动套餐")
+        self._fill_mimo()
 
     def _agents(self, page):
         tk, S = self.tk, self.S
@@ -375,7 +481,10 @@ class SettingsWindow:
             if self.page == "overview":
                 self._fill_overview()
             elif self.page == "sources":
+                self._fill_sources()
                 self._fill_health()
+            elif self.page == "mimo":
+                self._fill_mimo()
             elif self.page == "agents":
                 self._fill_agents()
         except Exception:
@@ -499,7 +608,17 @@ class SettingsWindow:
             value.set(config[name])
         self.vars["summary"].set(config["enabled"])
         self.vars["startup"].set(self.app.startup_enabled())
-        self.vars["claude"].set("claude" in providers.enabled_keys())
+        for state in providers.provider_states():
+            self.vars["source:" + state["key"]].set(state["enabled"])
+        manual = {}
+        try:
+            import mimo_usage
+            manual = json.loads(mimo_usage.CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError, ImportError):
+            pass
+        for name, key in (("total", "total_credits"), ("end", "period_end"), ("used", "used_credits"), ("name", "plan_name")):
+            value = manual.get(key, "") if isinstance(manual, dict) else ""
+            self.mimo_fields[name].set(f"{value / 1e9:g}B" if name in ("total", "used") and isinstance(value, (int, float)) else str(value or ""))
         herdr = getattr(getattr(self.app, "tps_monitor", None), "herdr", None)
         self.vars["herdr"].set(bool(herdr.enabled) if herdr is not None else True)
         import sys
@@ -518,9 +637,12 @@ class SettingsWindow:
             if hasattr(self.app, "save_preferences"):
                 self.app.save_preferences(prefs)
             self.status.set("✓ 设置已保存并生效")
-            if self.vars["claude"].get() != self.origins["claude"]:
+            sources = {name[7:]: bool(var.get()) for name, var in self.vars.items()
+                       if name.startswith("source:") and var.get() != self.origins.get(name)}
+            if sources:
+                self.status.set("✓ 已保存，托盘正在重启以应用来源开关…")
                 self.root.withdraw()
-                self.app.toggle_claude()
+                self.app.set_providers(sources)
             self.origins = {name: var.get() for name, var in self.vars.items()}
         except (OSError, ValueError) as error:
             self.messagebox.showerror("未能保存", str(error), parent=self.root)
