@@ -359,9 +359,10 @@ def present(hwnd, image, x, y, alpha=255):
         ok = user.UpdateLayeredWindow(hwnd, screen, ctypes.byref(wintypes.POINT(x, y)),
             ctypes.byref(wintypes.SIZE(width, height)), memory, ctypes.byref(wintypes.POINT(0, 0)),
             0, ctypes.byref(blend), ULW_ALPHA)
+        error = ctypes.get_last_error() if not ok else 0
         gdi.SelectObject(memory, previous)
         if not ok:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise ctypes.WinError(error)
     finally:
         if bitmap:
             gdi.DeleteObject(bitmap)
@@ -446,7 +447,11 @@ class AgentPanelWindow:
             # Z-order walk is cheap but not free; twice a second is plenty.
             self.checked_at = now
             if not self.shown or is_window_covered(self.hwnd, wintypes.RECT(*self.rect)):
-                user.SetWindowPos(self.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | SWP_NOACTIVATE | 0x0040)
+                if not user.SetWindowPos(self.hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | SWP_NOACTIVATE | 0x0040):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not self.shown:
+                    logging.getLogger(__name__).info('agent panel shown: provider=%s bubbles=%s rect=%s',
+                                                     self.provider, len(self.scene.bodies), self.rect)
                 self.shown = True
         return events
 
@@ -468,6 +473,7 @@ class HoverDetails:
 
     PANEL_GRACE = 0.45          # Time to travel from the icon to the panel.
     PANEL_REFRESH = 0.5
+    PANEL_RETRY_SECONDS = 2.0
 
     def __init__(self, icons, text_for, stop_event, agents=None):
         self.icons, self.text_for, self.stop_event = icons, text_for, stop_event
@@ -549,6 +555,7 @@ class HoverDetails:
 
     def run(self):
         tooltip = panel = None
+        retry_at = 0.0
         try:
             enable_thread_dpi_awareness()
             if self.agents is not None:
@@ -556,6 +563,7 @@ class HoverDetails:
                     panel = AgentPanelWindow()
                 except Exception:
                     logging.getLogger(__name__).exception("agent panel unavailable, using tooltip")
+                    retry_at = time.monotonic() + self.PANEL_RETRY_SECONDS
             if panel is None:
                 tooltip = TrackingTooltip()
             while not self.stop_event.wait(0.016 if panel and panel.active else 0.1):
@@ -581,6 +589,13 @@ class HoverDetails:
                 if have_point and notification_area_at(point) and not (left or right):
                     provider, anchor = self.target_at(point)
                 now = time.monotonic()
+                if panel is None and self.agents is not None and provider and now >= retry_at:
+                    try:
+                        panel = AgentPanelWindow()
+                        logging.getLogger(__name__).info('agent panel recreated after temporary failure')
+                    except Exception:
+                        logging.getLogger(__name__).exception('agent panel retry failed, using tooltip')
+                        retry_at = now + self.PANEL_RETRY_SECONDS
                 if panel is not None:
                     try:
                         if panel.active:
@@ -602,12 +617,14 @@ class HoverDetails:
                             tooltip.hide()
                         shown = panel.provider if panel.active else (provider if tooltip and tooltip.visible else None)
                     except Exception:
-                        # A rendering/GDI failure downgrades to the native tooltip
-                        # instead of losing hover details for the whole session.
+                        # A transient GDI failure must not disable bubbles for
+                        # the rest of this process. Retry on hover, at a bounded rate.
                         logging.getLogger(__name__).exception("agent panel failed, using tooltip")
                         panel.hide()
                         panel.destroy()
-                        panel, tooltip = None, TrackingTooltip()
+                        panel = None
+                        tooltip = tooltip or TrackingTooltip()
+                        retry_at = now + self.PANEL_RETRY_SECONDS
                         shown = None
                     if panel is not None:
                         for key, icon in self.icons.items():

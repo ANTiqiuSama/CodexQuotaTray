@@ -653,3 +653,65 @@ class AgentPanelTests(unittest.TestCase):
         panel.close.assert_not_called()
         hover.drive_panel(panel, point, None, None, False, False, 10.0 + hover.PANEL_GRACE + 0.1)
         panel.close.assert_called_once()
+
+
+class HoverRecoveryTests(unittest.TestCase):
+    def run_hover(self, factory, seconds=3.0):
+        clock = [0.0]
+
+        class Stop:
+            def wait(self, _delay):
+                clock[0] += 0.1
+                return clock[0] > seconds
+
+        icon = SimpleNamespace(_version4=True, hover_open=True, suppress_hover=False)
+        agents = SimpleNamespace(panel=Mock(return_value=object()), settings_requested=threading.Event())
+        hover = HoverDetails({'codex': icon}, lambda _: 'temporary tooltip', Stop(), agents)
+        tooltip = Mock()
+        with patch('hover_details.enable_thread_dpi_awareness'), \
+                patch('hover_details.AgentPanelWindow', side_effect=factory) as create, \
+                patch('hover_details.TrackingTooltip', return_value=tooltip) as tips, \
+                patch('hover_details.notification_area_at', return_value=True), \
+                patch.object(hover, 'target_at', return_value=('codex', (0, 0, 24, 24))), \
+                patch('hover_details.user.GetCursorPos', return_value=True), \
+                patch('hover_details.user.GetAsyncKeyState', return_value=0), \
+                patch('hover_details.time.monotonic', side_effect=lambda: clock[0]), \
+                self.assertLogs('hover_details', level='ERROR'):
+            hover.run()
+        return create, tips, tooltip
+
+    @staticmethod
+    def panel(error=None):
+        panel = Mock(active=False, provider=None, closing_at=None)
+        panel.scene = SimpleNamespace(dragging=False, press=False)
+        panel.contains.return_value = True
+        panel.frame = Mock(side_effect=error, return_value=[])
+
+        def opened(provider, _model, _anchor, _now):
+            panel.provider, panel.active = provider, True
+        panel.open.side_effect = opened
+        return panel
+
+    def test_render_failure_recovers_without_restarting_tray(self):
+        failed = self.panel(OSError(8, 'not enough memory'))
+        recovered = self.panel()
+        create, tips, tooltip = self.run_hover(iter([failed, recovered]).__next__)
+        self.assertEqual(create.call_count, 2)
+        failed.destroy.assert_called_once()
+        recovered.frame.assert_called()
+        tooltip.show.assert_called()
+        tooltip.hide.assert_called()
+        self.assertEqual(tips.call_count, 1)
+
+    def test_initial_window_creation_failure_is_not_permanent(self):
+        recovered = self.panel()
+        create, _, tooltip = self.run_hover(Mock(side_effect=[OSError(8, 'not enough memory'), recovered]))
+        self.assertEqual(create.call_count, 2)
+        recovered.frame.assert_called()
+        tooltip.show.assert_called()
+
+    def test_repeated_failures_are_rate_limited_and_reuse_tooltip(self):
+        create, tips, _ = self.run_hover(lambda: self.panel(OSError(8, 'not enough memory')), seconds=4.6)
+        self.assertGreaterEqual(create.call_count, 2)
+        self.assertLessEqual(create.call_count, 3)
+        self.assertEqual(tips.call_count, 1)
