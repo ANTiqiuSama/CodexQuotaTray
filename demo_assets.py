@@ -18,7 +18,7 @@ def demo_models() -> tuple[ap.PanelModel, ...]:
         (bubble("a", "重构悬停面板", "编辑 hover_details.py", "C", True, "重构悬停面板气泡交互"),
          bubble("b", "补齐测试", "运行测试", "C", True),
          bubble("d", "README 文档", "刚完成", "G", False)),
-        "live", "GPT 社区重置预测 · 24h 22% · 48h 39%",
+        "live", "Codex 重置概率 22%",
         "5 小时额度：按当前速度，预计 2 小时 40 分后用完，早于下次重置约 35 分钟", "warn")
     idle = ap.PanelModel("grok", "X", "Grok", "空闲", (("2 小时", 100.0, "已到重置时间"),), None, (), "idle")
     mimo = ap.PanelModel("mimo", "M", "Xiaomi MiMo", "空闲", (("套餐额度", 96.9, ""),), 0, (), "idle",

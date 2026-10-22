@@ -348,6 +348,8 @@ class SceneTests(unittest.TestCase):
         scene.set_model(model, 0)
         field = scene.field.value
         self.assertGreater(agent_panel.chart_top(model, field), agent_panel.field_top(model) + field)
+        # Field plate ends 4 below the field, the chart plate starts 4 above the chart: keep them apart.
+        self.assertGreaterEqual((agent_panel.chart_top(model, field) - 4) - (agent_panel.field_top(model) + field + 4), 8)
         self.assertLess(agent_panel.chart_top(model, field) + agent_panel.CHART_H, agent_panel.resets_middle(model, field) - 5)
         self.assertGreater(agent_panel.footer_middle(model, field) - 8, agent_panel.resets_middle(model, field) + 5)
         self.assertLess(agent_panel.footer_middle(model, field) + 10, agent_panel.panel_height(model, field))
@@ -389,7 +391,7 @@ class SceneTests(unittest.TestCase):
             self.assertTrue(all(probe.textlength(line, font=face) <= limit for line in lines))
             scene = agent_panel.Scene()
             scene.set_model(agent_panel.PanelModel("codex", "C", "GPT / Codex", "空闲", (("5 小时", 70, "2小时后重置"),),
-                                                  0, (), "idle", "GPT 社区重置预测 · 24h 22% · 48h 39%", text, "warn"), 0)
+                                                  0, (), "idle", "Codex 重置概率 22%", text, "warn"), 0)
             self.assertIsNotNone(scene.render(scale))
 
     def test_gear_release_and_right_click_open_settings(self):
@@ -563,8 +565,17 @@ class SteadyBubbleTests(unittest.TestCase):
 
     def test_lines_use_the_colour_of_their_header_bar(self):
         shade = agent_panel.quota_shade
-        pools = {shade("G", slot, 40.0, True) for slot in range(3)}
-        self.assertEqual(len(pools), 3)                                   # Gemini pools stay apart
+        pools = [shade("G", slot, 40.0, True) for slot in range(3)]
+        self.assertEqual(len(set(pools)), 3)                              # Gemini pools stay apart
+        import colorsys
+        for color in pools:                                               # ... and all of them blue
+            hue, _, saturation = colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))
+            self.assertTrue(185 <= hue * 360 <= 240 and saturation > 0.6, color)
+        for index, a in enumerate(pools):
+            for b in pools[index + 1:]:
+                self.assertGreater(sum(abs(x - y) for x, y in zip(a[:3], b[:3])), 120, (a, b))
+        lightness = [colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))[1] for color in pools]
+        self.assertGreater(lightness[0] - lightness[1], 0.2)               # Argon vs Claude/GPT: light vs dark
         self.assertEqual(shade("G", 0, 40.0, True), agent_panel.accent("G"))
         self.assertEqual(shade("C", 1, 11.0, False), agent_panel.ring_color(11.0, "C"))   # low Codex window: red, like its bar
         model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),

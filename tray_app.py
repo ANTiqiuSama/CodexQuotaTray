@@ -525,9 +525,11 @@ class QuotaTray:
         else:
             status, tone = "空闲", "idle"
         # The Codex reset notice is shown on every panel (same size everywhere).
-        banner, codex = "", self.snapshots.get("codex")
+        banner, alert, codex = "", "", self.snapshots.get("codex")
         if reset_watch.ENABLED and codex is not None and "codex" in self.snapshots:
-            banner = reset_watch.panel_line(getattr(self, "reset_outlook", None), now)
+            outlook = getattr(self, "reset_outlook", None)
+            banner = reset_watch.panel_line(outlook, now)
+            alert = "官方预告" if reset_watch.announced(outlook, now) else ""
         forecast, forecast_tone = self.headline_forecast(provider)
         today_used = None
         if provider == "mimo":
@@ -537,7 +539,7 @@ class QuotaTray:
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used, self.upcoming_resets(now),
-                                      self.burn_chart(provider, now))
+                                      self.burn_chart(provider, now), alert)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)

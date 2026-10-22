@@ -12,7 +12,7 @@ import json
 import os
 import time
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +39,9 @@ class ResetOutlook:
     last_reset_text: str = ""
     promise: str = ""
     fetched_at: float = 0.0
+    signal_at: float | None = None          # an official post the source scores as a reset promise
+    signal_percent: int | None = None       # how strongly the source reads that post
+    readings: list = field(default_factory=list)   # per source: {"source", "prob_24", "prob_48", "signal"}
 
     def level(self, now: float | None = None) -> str:
         """"high" (24 h chance at or above the alert), "watch" (48 h chance at
@@ -91,8 +94,17 @@ def parse_codex_reset(data: dict) -> ResetOutlook:
     hint = data.get("tease_signal") or {}
     quote = ((hint.get("post") or {}).get("quote") or "") if hint else ""
     last = data.get("last_reset_at")
-    return ResetOutlook("codex-reset.com", "https://codex-reset.com/", _percent(probabilities.get("rounded_24h")),
-                        _percent(probabilities.get("rounded_48h")), _when(last), str(last) if last else None, "", str(quote)[:80])
+    outlook = ResetOutlook("codex-reset.com", "https://codex-reset.com/", _percent(probabilities.get("rounded_24h")),
+                           _percent(probabilities.get("rounded_48h")), _when(last), str(last) if last else None, "", str(quote)[:80])
+    # Its published probability is the statistical model only; an official post it
+    # scores as a promise ("it's reset day today") is reported separately.
+    signal = data.get("official_signal") or {}
+    band = ((signal.get("score") or {}).get("band") or (data.get("signal_score") or {}).get("band") or "")
+    if signal.get("at") and band == "promise":
+        outlook.signal_at = _when(signal.get("at"))
+        outlook.signal_percent = _percent(probabilities.get("signal_percent") or probabilities.get("commitment_floor_percent"))
+        outlook.promise = str(signal.get("summary") or "").split("\n", 1)[0][:80] or outlook.promise
+    return outlook
 
 
 def parse_willcodexreset(data: dict) -> ResetOutlook:
@@ -110,6 +122,7 @@ SOURCES: list[tuple[str, Callable[[dict], ResetOutlook]]] = [
     ("https://codex-reset.com/api/forecast", parse_codex_reset),
     ("https://willcodexreset.com/api/reset-radar", parse_willcodexreset),
 ]
+SIGNAL_SECONDS = 24 * 3600       # an official promise counts for a day, until a reset follows it
 
 
 def _get_json(url: str, timeout: float = 10.0) -> dict:
@@ -118,21 +131,64 @@ def _get_json(url: str, timeout: float = 10.0) -> dict:
         return json.loads(response.read(4_000_000).decode("utf-8"))
 
 
+def effective(outlook: ResetOutlook, last_reset: float | None, now: float) -> tuple[int | None, int | None, bool]:
+    """(24 h, 48 h, promised) of one source, raised to its own reading of a
+    fresh official promise that no reset has followed yet."""
+    p24, p48 = outlook.prob_24, outlook.prob_48
+    promised = bool(outlook.signal_at and outlook.signal_percent and now - outlook.signal_at <= SIGNAL_SECONDS
+                    and not (last_reset and last_reset >= outlook.signal_at))
+    if promised:
+        p24 = max(p24 or 0, outlook.signal_percent)
+        p48 = max(p48 or 0, outlook.signal_percent)
+    return p24, p48, promised
+
+
+def combine(outlooks: list[ResetOutlook], now: float) -> ResetOutlook:
+    """One forecast from every source that answered: the mean of their 24 h /
+    48 h figures (each raised by a fresh official promise it reports), the most
+    recent reset any of them saw, and the per-source readings for display."""
+    latest = max(outlooks, key=lambda o: o.last_reset_at or 0.0)
+    last_reset = latest.last_reset_at
+    readings = []
+    for outlook in outlooks:
+        p24, p48, promised = effective(outlook, last_reset, now)
+        readings.append({"source": outlook.source, "prob_24": p24, "prob_48": p48, "signal": promised})
+    mean = lambda values: round(sum(values) / len(values)) if values else None  # noqa: E731
+    p24 = mean([r["prob_24"] for r in readings if r["prob_24"] is not None])
+    p48 = mean([r["prob_48"] for r in readings if r["prob_48"] is not None])
+    lead = max(outlooks, key=lambda o: o.prob_24 or 0)
+    promise = next((o.promise for o in outlooks if o.promise), "")
+    name = outlooks[0].source if len(outlooks) == 1 else f"{len(outlooks)} 个来源"
+    return ResetOutlook(name, lead.page, p24, p48, last_reset, latest.last_reset_id, latest.last_reset_text, promise, now,
+                        readings=readings)
+
+
 def fetch_outlook(get: Callable[[str], dict] = _get_json, now: float | None = None) -> tuple[ResetOutlook | None, list[str]]:
-    """First source that answers with a usable probability; plus errors seen."""
-    errors = []
-    for url, parse in SOURCES:
+    """Every source, read in parallel and combined; plus the errors seen.
+    One site's estimate alone was misleading: one model ignored an official
+    "reset day today" post that another raised to 89 %."""
+    from concurrent.futures import ThreadPoolExecutor
+    now = now or time.time()
+    errors, answers = [], []
+
+    def read(source):
+        url, parse = source
         try:
-            outlook = parse(get(url))
-        except Exception as error:   # network, JSON or layout change: try the next source
-            errors.append(f"{url}: {type(error).__name__}: {error}")
-            continue
-        if outlook.prob_24 is None:
-            errors.append(f"{url}: no probability")
-            continue
-        outlook.fetched_at = now or time.time()
-        return outlook, errors
-    return None, errors
+            return url, parse(get(url)), None
+        except Exception as error:   # network, JSON or layout change: the other sources still count
+            return url, None, f"{url}: {type(error).__name__}: {error}"
+
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+        for url, outlook, error in pool.map(read, SOURCES):
+            if error:
+                errors.append(error)
+            elif outlook.prob_24 is None:
+                errors.append(f"{url}: no probability")
+            else:
+                answers.append(outlook)
+    if not answers:
+        return None, errors
+    return combine(answers, now), errors
 
 
 def load(path: Path) -> ResetOutlook | None:
@@ -151,10 +207,14 @@ def save(path: Path, outlook: ResetOutlook) -> None:
 
 
 def panel_line(outlook: ResetOutlook | None, now: float) -> str:
-    """Always show the current community probabilities above the panel title."""
+    """The panel's one-line summary: the combined 24 h chance only."""
     if outlook is None:
-        return "GPT 社区重置预测 · 正在读取"
+        return "Codex 重置概率 读取中"
     if outlook.level(now) == "unknown":
-        return "GPT 社区重置预测 · 数据待更新"
-    second = "—" if outlook.prob_48 is None else f"{outlook.prob_48}%"
-    return f"GPT 社区重置预测 · 24h {outlook.prob_24}% · 48h {second}"
+        return "Codex 重置概率 —"
+    return f"Codex 重置概率 {outlook.prob_24}%"
+
+
+def announced(outlook: ResetOutlook | None, now: float) -> bool:
+    """A fresh official promise reported by any source (shown as a badge)."""
+    return bool(outlook and outlook.level(now) != "unknown" and any(r.get("signal") for r in outlook.readings))

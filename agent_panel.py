@@ -19,7 +19,7 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from icon_art import AMBER, CLAY, IVORY, RESET_BLUE, UNIFORM_LETTERS, accent, ring_color
+from icon_art import AMBER, CLAY, RESET_BLUE, UNIFORM_LETTERS, accent, ring_color
 
 WIDTH = 420
 PAD = 18
@@ -88,14 +88,16 @@ class BurnChart:
     series: tuple[BurnSeries, ...]
 
 
+POOL_BLUES = ((35, 90, 230, 255), (40, 212, 236, 255))    # deep cobalt, sky blue: after the source's own periwinkle
+
+
 def quota_shade(letter: str, slot: int, value: float | None, pooled: bool) -> tuple[int, int, int, int]:
     """Colour of one quota window: its header bar and its chart line use this.
-    Sources drawn in one colour (Gemini) get one shade per pool when they show
-    several, so the lines stay apart and still match their bars."""
+    Sources drawn in one colour (Gemini) get one blue per pool when they show
+    several: their own light periwinkle, a dark cobalt (far apart in lightness)
+    and a sky blue (far apart in hue); CIELAB ΔE ≥ 46 between any two."""
     if pooled and letter in UNIFORM_LETTERS and value is not None:
-        base = accent(letter)
-        mix, toward = ((0.0, IVORY), (0.42, IVORY), (0.38, (78, 70, 150, 255)))[slot % 3]
-        return tuple(round(a + (b - a) * mix) for a, b in zip(base[:3], toward[:3])) + (255,)
+        return accent(letter) if slot % 3 == 0 else POOL_BLUES[slot % 3 - 1]
     return ring_color(value, letter)
 
 
@@ -119,20 +121,21 @@ class PanelModel:
     today_used: float | None = None              # MiMo Credits used today
     upcoming_resets: tuple[ResetColumn, ...] = ()
     burn: BurnChart | None = None
+    banner_alert: str = ""                      # e.g. "官方预告": the banner turns solid with this badge
 
     @property
     def header(self) -> tuple:
         """Static part of the panel (cached background). Quota figures, bars,
         TPS and the burn chart are drawn per frame; the reset line is cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], "") for item in self.quota[:3]), self.banner,
+                tuple((item[0], "") for item in self.quota[:3]), (self.banner, self.banner_alert),
                 (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3])
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-CHART = 88                  # Burn chart under the task field, plus the upcoming-resets line.
-CHART_TOP = 10              # Gap between the task field and the chart.
+CHART = 94                  # Burn chart under the task field, plus the upcoming-resets line.
+CHART_TOP = 16              # Field bottom to chart sprite; the two plates keep an 8 px gap.
 CHART_H = 64                # Chart sprite: label row and plot.
 CHART_LABEL = 15            # Label row inside the sprite.
 GEAR_RADIUS = 7.5
@@ -1153,9 +1156,9 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 
 def _header_model(header: tuple) -> PanelModel:
-    letter, title, status, tone, meters, banner, forecast, daily, resets = header
+    letter, title, status, tone, meters, (banner, alert), forecast, daily, resets = header
     return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (),
-                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets)
+                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets, banner_alert=alert)
 
 
 @lru_cache(maxsize=8)
@@ -1171,7 +1174,7 @@ def empty_note(scale: float) -> Image.Image:
 @lru_cache(maxsize=12)
 def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     model = _header_model(header)
-    letter, title, status, tone, meters, banner, _, daily, resets = header
+    letter, title, status, tone, meters, (banner, alert), _, daily, resets = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -1204,9 +1207,21 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
                 draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
     if banner:
         y_banner = PAD - 2
-        draw.rounded_rectangle((px(PAD - 6), px(y_banner), px(right + 6), px(y_banner + 20)), radius=px(7),
-                               fill=_with_alpha(RESET_BLUE, 38), outline=_with_alpha(RESET_BLUE, 110), width=max(1, round(s)))
-        draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=ui_font(px(11), "bold"), fill=RESET_BLUE, anchor="lm")
+        box = (px(PAD - 6), px(y_banner), px(right + 6), px(y_banner + 20))
+        face = ui_font(px(11), "bold")
+        if alert:
+            # Official announcement: a solid bar with a bright badge, impossible to miss.
+            draw.rounded_rectangle(box, radius=px(7), fill=RESET_BLUE)
+            draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=face, fill=(20, 24, 34, 255), anchor="lm")
+            badge = ui_font(px(11), "bold")
+            width = draw.textlength(alert, font=badge) / s + 16
+            draw.rounded_rectangle((px(right + 2 - width), px(y_banner + 2), px(right + 2), px(y_banner + 18)), radius=px(6),
+                                   fill=AMBER)
+            draw.text((px(right + 2 - width / 2), px(y_banner + 10)), alert, font=badge, fill=(31, 30, 28, 255), anchor="mm")
+        else:
+            draw.rounded_rectangle(box, radius=px(7), fill=_with_alpha(RESET_BLUE, 38), outline=_with_alpha(RESET_BLUE, 110),
+                                   width=max(1, round(s)))
+            draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=face, fill=RESET_BLUE, anchor="lm")
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     chart_y = chart_top(model, field_h)
