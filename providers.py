@@ -107,12 +107,6 @@ def claude_routes_to_mimo() -> bool:
     return any("xiaomimimo" in _read(claude_home() / name) for name in ("settings.json", "settings.local.json"))
 
 
-def _claude_installed() -> bool:
-    if claude_routes_to_mimo():
-        return False
-    return find_claude() is not None or (claude_home() / "projects").is_dir()
-
-
 def _mimo_used() -> bool:
     data = _local_appdata() / "CodexQuotaTray"
     if (data / "mimo-session.bin").is_file() or (data / "mimo.json").is_file():
@@ -185,7 +179,6 @@ SPECS: tuple[ProviderSpec, ...] = (
     ),
 )
 BY_KEY = {spec.key: spec for spec in SPECS}
-BY_LETTER = {spec.letter: spec for spec in SPECS}
 
 
 def get(key: str) -> ProviderSpec:

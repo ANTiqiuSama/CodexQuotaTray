@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import reset_watch
-from reset_watch import ResetOutlook, card_lines, fetch_outlook, parse_codex_reset, parse_willcodexreset, parse_willreset
+from reset_watch import ResetOutlook, fetch_outlook, panel_line, parse_codex_reset, parse_willcodexreset, parse_willreset
 
 WILLRESET = {"answer": "promised", "fetched_at": "2026-10-19T04:18:22.032775575Z", "last_reset_at": "2026-10-17T21:12:21Z",
              "last_reset_id": "2111566005684289735", "last_reset_text": "Direct usage reset", "prob_24": 71, "prob_48": 81,
@@ -55,16 +55,13 @@ class ResetWatchTests(unittest.TestCase):
         self.assertEqual(make(10, 20).level(now), "low")
         self.assertEqual(make(90, 95, now - 4 * 3600).level(now), "unknown")
 
-    def test_card_banner_only_when_high_and_mentions_low_quota(self):
+    def test_panel_line_shows_probabilities_or_state(self):
         now = time.time()
         high = ResetOutlook("willreset.com", "p", 71, 81, now - 3600, "x", "Direct usage reset", "Done", now)
-        banner, notes = card_lines(high, 12.0, now)
-        self.assertIn("71%", banner)
-        self.assertIn("12%", banner)
-        self.assertTrue(any("非 OpenAI 官方" in note for note in notes))
-        banner, _ = card_lines(ResetOutlook("s", "p", 20, 30, fetched_at=now), 12.0, now)
-        self.assertEqual(banner, "")
-        self.assertEqual(card_lines(None, 50.0, now), ("", []))
+        self.assertEqual(panel_line(high, now), "GPT 社区重置预测 · 24h 71% · 48h 81%")
+        self.assertEqual(panel_line(ResetOutlook("s", "p", 20, None, fetched_at=now), now), "GPT 社区重置预测 · 24h 20% · 48h —")
+        self.assertIn("正在读取", panel_line(None, now))
+        self.assertIn("待更新", panel_line(ResetOutlook("s", "p", 20, 30, fetched_at=now - 5 * 3600), now))
 
 
 class TrayResetTests(unittest.TestCase):

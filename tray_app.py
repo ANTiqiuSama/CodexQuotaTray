@@ -20,7 +20,7 @@ import agent_panel
 import agent_tasks
 from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
-from icon_art import color_for, live_icon, quota_icon  # noqa: F401  (color_for re-exported)
+from icon_art import live_icon, quota_icon
 from quota_sources import (
     mimo_snapshot,
     mimo_tracker,
@@ -98,21 +98,6 @@ def reset_hint(timestamp: int | None) -> str:
     return countdown if countdown == "已到重置时间" else f"{countdown}后重置"
 
 
-def short_reset(timestamp: int | None, now: float | None = None) -> str:
-    """Compact reset time for narrow columns: "14:30 重置" or "周三 重置"."""
-    if not timestamp:
-        return ""
-    now = now or time.time()
-    if timestamp <= now:
-        return "已到重置"
-    moment = datetime.fromtimestamp(timestamp)
-    if timestamp - now < 86400:
-        return moment.strftime("%H:%M") + " 重置"
-    if timestamp - now < 6 * 86400:
-        return "周" + "一二三四五六日"[moment.weekday()] + " 重置"
-    return moment.strftime("%m-%d") + " 重置"
-
-
 def pool_lines(snapshot: QuotaSnapshot) -> list[str]:
     """One line per extra model pool (Antigravity), ring pool first."""
     lines = []
@@ -122,18 +107,6 @@ def pool_lines(snapshot: QuotaSnapshot) -> list[str]:
         reset = f" · {reset_text(pool['resets_at'])} 重置" if pool.get("resets_at") else ""
         lines.append(f"  {pool.get('label') or pool.get('key')}：{value}{reset}")
     return lines
-
-
-def schedule_when(chip: dict, now: float) -> str:
-    if chip.get("next_at") and chip["next_at"] > now:
-        moment, prefix = chip["next_at"], "下次"
-    elif chip.get("last_at"):
-        moment, prefix = chip["last_at"], "上次"
-    else:
-        return "待运行"
-    stamp = datetime.fromtimestamp(moment)
-    same_day = stamp.date() == datetime.fromtimestamp(now).date()
-    return f"{prefix} " + stamp.strftime("%H:%M" if same_day else "%m-%d %H:%M").lstrip("0")
 
 
 def provider_letter(provider: str) -> str:
@@ -510,15 +483,6 @@ class QuotaTray:
         members = self.agent_groups.split(cluster)
         log.info("agent group split: %s members=%s", key, len(members))
         return members
-
-    @staticmethod
-    def reset_summary(label: str, timestamp: int | None, now: float) -> str:
-        name = f"{label}重置" if label else "重置"
-        if not timestamp:
-            return f"{name}时间未知"
-        when = datetime.fromtimestamp(timestamp).strftime("%m-%d %H:%M")
-        tail = f"{duration_text(timestamp - now)}后" if timestamp > now else "已到重置时间，等待刷新"
-        return f"{name}  {when} · {tail}"
 
     def tooltip(self, provider: str) -> str:
         snapshot = self.snapshots[provider]

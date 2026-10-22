@@ -23,7 +23,6 @@ except ImportError:  # psutil is a hard requirement of the app; stay importable.
 
 
 ANSI_RE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])")
-PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 GROK_WEEKLY_RE = re.compile(r"weekly\s+limit\s*[:：-]?\s*(\d+(?:\.\d+)?)\s*%", re.I)
 GROK_READY_RE = re.compile(r"minimal\s*·\s*/help|\d+(?:\.\d+)?[km]?\s*/\s*\d+(?:\.\d+)?[km]?\s*\(\d+%\)", re.I)
 RESET_PATTERNS = (
@@ -34,17 +33,6 @@ RESET_PATTERNS = (
 
 def clean_terminal_text(text: str) -> str:
     return ANSI_RE.sub("", text).replace("\r", "\n")
-
-
-def parse_percent(text: str, labels: tuple[str, ...]) -> float | None:
-    normalized = clean_terminal_text(text).lower()
-    for label in labels:
-        match = re.search(rf"{re.escape(label)}\s*[:：-]?\s*([^\n]*)", normalized)
-        if match:
-            percent = PERCENT_RE.search(match.group(1))
-            if percent:
-                return max(0.0, min(100.0, float(percent.group(1))))
-    return None
 
 
 def parse_reset(text: str) -> int | None:
@@ -225,17 +213,6 @@ def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0,
         _terminate(children)
         if own_console:
             ctypes.windll.kernel32.FreeConsole()
-
-
-def parse_cli_percent(text: str, labels: tuple[str, ...], window_minutes: int) -> dict[str, Any]:
-    used = parse_percent(text, labels)
-    remaining = None if used is None else max(0.0, min(100.0, 100.0 - used))
-    return {
-        "used_percent": used,
-        "remaining_percent": remaining,
-        "resets_at": parse_reset(text),
-        "window_minutes": window_minutes,
-    }
 
 
 def parse_grok_usage(text: str) -> dict[str, Any]:

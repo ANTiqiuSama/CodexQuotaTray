@@ -9,7 +9,7 @@ import json
 import subprocess
 import tempfile
 import quota_sources
-from cli_usage import parse_agy_usage_json, parse_cli_percent, parse_grok_usage, parse_reset, run_temporary_usage
+from cli_usage import parse_agy_usage_json, parse_grok_usage, parse_reset, run_temporary_usage
 
 
 class GrokIsolationTests(unittest.TestCase):
@@ -222,11 +222,9 @@ class QuotaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_grok_usage("2.2K /256K (1%)")
 
-    def test_cli_usage_parser_handles_gemini_five_hour_label(self):
+    def test_cli_reset_parser_reads_next_reset_line(self):
         text = "5-hour limit: 25% used\nNext reset: 2026-09-23 14:00"
-        parsed = parse_cli_percent(text, ("5-hour limit", "used"), 300)
-        self.assertEqual(parsed["remaining_percent"], 75.0)
-        self.assertEqual(parse_reset(text), parsed["resets_at"])
+        self.assertIsNotNone(parse_reset(text))
 
     def test_agy_usage_json_reads_gemini_five_hour_bucket(self):
         payload = {

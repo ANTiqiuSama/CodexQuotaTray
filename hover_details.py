@@ -141,9 +141,6 @@ user.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user.DispatchMessageW.restype = ctypes.c_ssize_t
 user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-user.GetDC.argtypes = [wintypes.HWND]
-user.GetDC.restype = wintypes.HDC
-user.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 user.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC, ctypes.POINTER(wintypes.POINT),
     ctypes.POINTER(wintypes.SIZE), wintypes.HDC, ctypes.POINTER(wintypes.POINT), wintypes.DWORD,
     ctypes.POINTER(BlendFunction), wintypes.DWORD]
@@ -340,42 +337,78 @@ def work_area(anchor):
     return monitor, (work.left, work.top, work.right, work.bottom)
 
 
-def present(hwnd, image, x, y, alpha=255):
-    """Hand a straight-alpha PIL image to a layered window (premultiplied BGRA)."""
-    width, height = image.size
-    data = image.convert("RGBa").tobytes("raw", "BGRa")
-    header = BitmapInfoHeader(biSize=ctypes.sizeof(BitmapInfoHeader), biWidth=width,
-        biHeight=-height, biPlanes=1, biBitCount=32, biCompression=0)
-    screen = user.GetDC(None)
-    memory = gdi.CreateCompatibleDC(screen)
-    bits = ctypes.c_void_p()
-    bitmap = gdi.CreateDIBSection(screen, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
-    try:
+class LayeredSurface:
+    """One memory DC + DIB reused for every frame of a layered window. Making a
+    fresh screen DC, memory DC and DIB section 60 times a second churned GDI
+    handles (a WinError 8 under memory pressure once disabled the bubbles).
+    The DIB only grows; smaller frames use its top rows."""
+
+    def __init__(self):
+        self.memory = gdi.CreateCompatibleDC(None)
+        if not self.memory:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.bitmap = self.previous = None
+        self.bits = ctypes.c_void_p()
+        self.width = self.height = 0
+
+    def _reserve(self, width, height):
+        if width == self.width and height <= self.height:
+            return
+        height = max(height, self.height if width == self.width else 0)
+        header = BitmapInfoHeader(biSize=ctypes.sizeof(BitmapInfoHeader), biWidth=width,
+            biHeight=-height, biPlanes=1, biBitCount=32, biCompression=0)
+        bits = ctypes.c_void_p()
+        bitmap = gdi.CreateDIBSection(self.memory, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
         if not bitmap or not bits:
             raise ctypes.WinError(ctypes.get_last_error())
-        ctypes.memmove(bits, data, len(data))
-        previous = gdi.SelectObject(memory, bitmap)
-        blend = BlendFunction(0, 0, alpha, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
-        ok = user.UpdateLayeredWindow(hwnd, screen, ctypes.byref(wintypes.POINT(x, y)),
-            ctypes.byref(wintypes.SIZE(width, height)), memory, ctypes.byref(wintypes.POINT(0, 0)),
-            0, ctypes.byref(blend), ULW_ALPHA)
-        error = ctypes.get_last_error() if not ok else 0
-        gdi.SelectObject(memory, previous)
+        old = gdi.SelectObject(self.memory, bitmap)
+        if self.bitmap:
+            gdi.DeleteObject(self.bitmap)
+        else:
+            self.previous = old
+        self.bitmap, self.bits, self.width, self.height = bitmap, bits, width, height
+
+    def present(self, hwnd, image, x, y, alpha=255):
+        """Hand a straight-alpha PIL image to the window (premultiplied BGRA)."""
+        width, height = image.size
+        self._reserve(width, height)
+        data = image.convert("RGBa").tobytes("raw", "BGRa")
+        ctypes.memmove(self.bits, data, len(data))
+        self._update(hwnd, x, y, alpha, (width, height))
+
+    def move(self, hwnd, x, y, alpha=255):
+        """Same pixels, new position or opacity (opening fade, closing)."""
+        self._update(hwnd, x, y, alpha, None)
+
+    def _update(self, hwnd, x, y, alpha, size):
+        blend = BlendFunction(0, 0, max(0, min(255, alpha)), 1)  # AC_SRC_OVER, AC_SRC_ALPHA
+        ok = user.UpdateLayeredWindow(hwnd, None, ctypes.byref(wintypes.POINT(x, y)),
+            ctypes.byref(wintypes.SIZE(*size)) if size else None, self.memory if size else None,
+            ctypes.byref(wintypes.POINT(0, 0)) if size else None, 0, ctypes.byref(blend), ULW_ALPHA)
         if not ok:
-            raise ctypes.WinError(error)
-    finally:
-        if bitmap:
-            gdi.DeleteObject(bitmap)
-        gdi.DeleteDC(memory)
-        user.ReleaseDC(None, screen)
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self):
+        if self.memory:
+            if self.previous:
+                gdi.SelectObject(self.memory, self.previous)
+            if self.bitmap:
+                gdi.DeleteObject(self.bitmap)
+            gdi.DeleteDC(self.memory)
+        self.memory = self.bitmap = self.previous = None
 
 
 class AgentPanelWindow:
     """Interactive bubble panel. Layered and topmost like the card, but it
     takes the pointer (no WS_EX_TRANSPARENT) so bubbles can be dragged; it is
-    still never activated, so focus stays in the user's window."""
+    still never activated, so focus stays in the user's window.
+
+    The scene is stepped on every tick (input), but a frame is only drawn when
+    something moves (every tick), for slow ambient loops (30 fps), or after a
+    data change; a panel at rest costs no rendering at all."""
 
     OPEN_SECONDS, CLOSE_SECONDS = 0.2, 0.14
+    AMBIENT_SECONDS = 1 / 30 - 0.004       # every second 60 Hz tick, despite timer jitter
 
     def __init__(self):
         self.hwnd = user.CreateWindowExW(
@@ -383,6 +416,11 @@ class AgentPanelWindow:
             "STATIC", "AI Agent 任务", 0x80000000 | 0x0100, 0, 0, 0, 0, None, None, None, None)  # WS_POPUP | SS_NOTIFY
         if not self.hwnd:
             raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            self.surface = LayeredSurface()
+        except Exception:
+            user.DestroyWindow(self.hwnd)
+            raise
         self.scene = agent_panel.Scene()
         self.provider = None
         self.anchor = None
@@ -392,6 +430,9 @@ class AgentPanelWindow:
         self.opened_at = self.closing_at = None
         self.shown = False
         self.checked_at = 0.0
+        self.image = None           # last presented frame
+        self.placed = None          # (x, y, alpha) it was presented at
+        self.drawn_at = 0.0
 
     @property
     def active(self) -> bool:
@@ -399,10 +440,14 @@ class AgentPanelWindow:
 
     def open(self, provider, model, anchor, now):
         monitor, self.work = work_area(anchor)
-        self.scale = monitor_scale(monitor)
+        scale = monitor_scale(monitor)
         if self.provider is None or self.closing_at is not None:
             self.scene = agent_panel.Scene()
             self.opened_at, self.closing_at = now, None
+            self.image = None
+        if scale != self.scale or anchor != self.anchor:
+            self.image = None
+        self.scale = scale
         self.provider, self.anchor = provider, anchor
         self.scene.set_model(model, now)
 
@@ -424,25 +469,36 @@ class AgentPanelWindow:
             self.closing_at = now
 
     def frame(self, point, left, right, now):
-        """Advance and present one frame; returns the scene's input events."""
+        """Advance the scene and present a frame if one is due; returns input events."""
         inside = point is not None and self.contains(point, 0)
-        events = self.scene.step(now, self.local(point) if inside or self.scene.dragging else None,
-                                 left and (inside or bool(self.scene.press)), right and inside)
-        image = self.scene.render(self.scale)
-        margin = round(MARGIN * self.scale)
-        x, y = tooltip_position(self.anchor, image.size, self.work, gap=round(6 * self.scale) - margin)
+        scene = self.scene
+        events = scene.step(now, self.local(point) if inside or scene.dragging else None,
+                            left and (inside or bool(scene.press)), right and inside)
         if self.closing_at is not None:
             progress = min(1.0, (now - self.closing_at) / self.CLOSE_SECONDS)
-            alpha, lift = 1 - progress, -4 * progress
             if progress >= 1:
                 self.hide()
                 return []
+            alpha, lift = 1 - progress, -4 * progress
         else:
             progress = agent_panel.ease_out_cubic((now - self.opened_at) / self.OPEN_SECONDS)
             alpha, lift = progress, 10 * (1 - progress)
-        y += round(lift * self.scale)
-        present(self.hwnd, image, x, y, round(255 * alpha))
-        self.rect = (x, y, x + image.width, y + image.height)
+        if (self.image is None or scene.dirty or scene.animating
+                or scene.ambient and now - self.drawn_at >= self.AMBIENT_SECONDS):
+            image, self.drawn_at = scene.render(self.scale), now
+        else:
+            image = None
+        size = (image or self.image).size
+        margin = round(MARGIN * self.scale)
+        x, y = tooltip_position(self.anchor, size, self.work, gap=round(6 * self.scale) - margin)
+        placed = (x, y + round(lift * self.scale), round(255 * alpha))
+        if image is not None:
+            self.surface.present(self.hwnd, image, *placed)
+            self.image = image
+        elif placed != self.placed:
+            self.surface.move(self.hwnd, *placed)
+        self.placed = placed
+        self.rect = (placed[0], placed[1], placed[0] + size[0], placed[1] + size[1])
         if not self.shown or now - self.checked_at > 0.5:
             # Z-order walk is cheap but not free; twice a second is plenty.
             self.checked_at = now
@@ -451,19 +507,23 @@ class AgentPanelWindow:
                     raise ctypes.WinError(ctypes.get_last_error())
                 if not self.shown:
                     logging.getLogger(__name__).info('agent panel shown: provider=%s bubbles=%s rect=%s',
-                                                     self.provider, len(self.scene.bodies), self.rect)
+                                                     self.provider, len(scene.bodies), self.rect)
                 self.shown = True
         return events
 
     def hide(self):
         user.ShowWindow(self.hwnd, SW_HIDE)
         self.provider = self.rect = self.closing_at = None
+        self.image = self.placed = None
         self.shown = False
 
     def destroy(self):
         if self.hwnd:
             user.DestroyWindow(self.hwnd)
             self.hwnd = None
+        if getattr(self, "surface", None):
+            self.surface.close()
+            self.surface = None
 
 
 class HoverDetails:
@@ -553,7 +613,39 @@ class HoverDetails:
             if model is not None:
                 panel.refresh(model, now)
 
+    FRAME_SECONDS = 1 / 60
+
+    def pause(self, delay: float) -> bool:
+        """Sleep until the next tick; True once the tray is stopping. Event.wait
+        follows the 15.6 ms system tick, which turns a 16 ms frame into an
+        uneven 15/31 ms cadence (visible judder); time.sleep is high resolution."""
+        if delay < 0.05:
+            time.sleep(delay)
+            return self.stop_event.is_set()
+        return self.stop_event.wait(delay)
+
+    def pointer(self):
+        """(point, provider, anchor, left, right) for this tick."""
+        point = wintypes.POINT()
+        have_point = bool(user.GetCursorPos(ctypes.byref(point)))
+        left, right = (bool(user.GetAsyncKeyState(key) & 0x8000) for key in (1, 2))
+        provider = anchor = None
+        if have_point and notification_area_at(point) and not (left or right):
+            provider, anchor = self.target_at(point)
+        elif have_point:
+            for icon in self.icons.values():     # target_at clears this itself on the tray
+                if getattr(icon, "suppress_hover", False):
+                    rect = icon_rect(icon)
+                    if not rect or not contains(rect, point.x, point.y):
+                        icon.suppress_hover = False
+        return point, provider, anchor, left, right
+
+    def dwell(self, provider) -> float:
+        # Shell v4 already waited for its own hover delay before POPUPOPEN.
+        return 0.0 if provider and getattr(self.icons[provider], "_version4", False) else 0.4
+
     def run(self):
+        log = logging.getLogger(__name__)
         tooltip = panel = None
         retry_at = 0.0
         try:
@@ -562,80 +654,71 @@ class HoverDetails:
                 try:
                     panel = AgentPanelWindow()
                 except Exception:
-                    logging.getLogger(__name__).exception("agent panel unavailable, using tooltip")
+                    log.exception("agent panel unavailable, using tooltip")
                     retry_at = time.monotonic() + self.PANEL_RETRY_SECONDS
             if panel is None:
                 tooltip = TrackingTooltip()
-            while not self.stop_event.wait(0.016 if panel and panel.active else 0.1):
+            deadline = time.monotonic()
+            while True:
+                period = self.FRAME_SECONDS if panel is not None and panel.active else 0.1
+                deadline = max(deadline + period, time.monotonic())
+                if self.pause(max(0.0, deadline - time.monotonic())):
+                    break
                 TrackingTooltip.pump()
                 requested = getattr(self.agents, "settings_requested", None)
                 if requested is not None and requested.is_set():
                     requested.clear()
                     self.candidate = None
-                    if panel:
-                        panel.hide()
-                    if tooltip:
-                        tooltip.hide()
-                point = wintypes.POINT()
-                provider, anchor = None, None
-                have_point = user.GetCursorPos(ctypes.byref(point))
-                if have_point:
-                    for icon in self.icons.values():
-                        if getattr(icon, "suppress_hover", False):
-                            rect = icon_rect(icon)
-                            if not rect or not contains(rect, point.x, point.y):
-                                icon.suppress_hover = False
-                left, right = (bool(user.GetAsyncKeyState(key) & 0x8000) for key in (1, 2))
-                if have_point and notification_area_at(point) and not (left or right):
-                    provider, anchor = self.target_at(point)
+                    for popup in (panel, tooltip):
+                        if popup:
+                            popup.hide()
+                point, provider, anchor, left, right = self.pointer()
                 now = time.monotonic()
                 if panel is None and self.agents is not None and provider and now >= retry_at:
                     try:
                         panel = AgentPanelWindow()
-                        logging.getLogger(__name__).info('agent panel recreated after temporary failure')
+                        log.info("agent panel recreated after temporary failure")
                     except Exception:
-                        logging.getLogger(__name__).exception('agent panel retry failed, using tooltip')
+                        log.exception("agent panel retry failed, using tooltip")
                         retry_at = now + self.PANEL_RETRY_SECONDS
-                if panel is not None:
-                    try:
-                        if panel.active:
-                            self.drive_panel(panel, point, provider, anchor, left, right, now)
-                        else:
-                            if provider != self.candidate:
-                                self.candidate, self.entered_at = provider, now
-                            shell_dwell = provider and getattr(self.icons[provider], "_version4", False)
-                            model = (self.agents.panel(provider)
-                                     if provider and now - self.entered_at >= (0 if shell_dwell else 0.4) else None)
-                            if model is not None:
-                                panel.open(provider, model, anchor, now)
-                                self.panel_seen = self.panel_built = now
-                            elif provider and now - self.entered_at >= (0 if shell_dwell else 0.4):
-                                # Sources without a quota panel keep the native tooltip.
-                                tooltip = tooltip or TrackingTooltip()
-                                tooltip.show(self.text_for(provider), anchor)
-                        if tooltip and (panel.active or provider is None):
-                            tooltip.hide()
-                        shown = panel.provider if panel.active else (provider if tooltip and tooltip.visible else None)
-                    except Exception:
-                        # A transient GDI failure must not disable bubbles for
-                        # the rest of this process. Retry on hover, at a bounded rate.
-                        logging.getLogger(__name__).exception("agent panel failed, using tooltip")
-                        panel.hide()
-                        panel.destroy()
-                        panel = None
-                        tooltip = tooltip or TrackingTooltip()
-                        retry_at = now + self.PANEL_RETRY_SECONDS
-                        shown = None
-                    if panel is not None:
-                        for key, icon in self.icons.items():
-                            icon.details_visible = key == shown
-                        continue
+                if panel is None:
+                    for key, icon in self.icons.items():
+                        icon.details_visible = key == provider
+                    tooltip = tooltip or TrackingTooltip()
+                    self.update(tooltip, provider, anchor, now, dwell=self.dwell(provider))
+                    continue
+                try:
+                    if panel.active:
+                        self.drive_panel(panel, point, provider, anchor, left, right, now)
+                    else:
+                        if provider != self.candidate:
+                            self.candidate, self.entered_at = provider, now
+                        due = provider and now - self.entered_at >= self.dwell(provider)
+                        model = self.agents.panel(provider) if due else None
+                        if model is not None:
+                            panel.open(provider, model, anchor, now)
+                            self.panel_seen = self.panel_built = now
+                        elif due:
+                            # Sources without a quota panel keep the native tooltip.
+                            tooltip = tooltip or TrackingTooltip()
+                            tooltip.show(self.text_for(provider), anchor)
+                    if tooltip and (panel.active or provider is None):
+                        tooltip.hide()
+                    shown = panel.provider if panel.active else (provider if tooltip and tooltip.visible else None)
+                except Exception:
+                    # A transient GDI failure must not disable bubbles for the
+                    # rest of this process. Retry on hover, at a bounded rate.
+                    log.exception("agent panel failed, using tooltip")
+                    panel.hide()
+                    panel.destroy()
+                    panel = None
+                    tooltip = tooltip or TrackingTooltip()
+                    retry_at = now + self.PANEL_RETRY_SECONDS
+                    shown = None
                 for key, icon in self.icons.items():
-                    icon.details_visible = key == provider
-                shell_dwell = provider and getattr(self.icons[provider], "_version4", False)
-                self.update(tooltip, provider, anchor, now, dwell=0 if shell_dwell else 0.4)
+                    icon.details_visible = key == shown
         except Exception:
-            logging.getLogger(__name__).exception("AI hover details stopped")
+            log.exception("AI hover details stopped")
             # Restore the Shell tooltip if the independent popup cannot run.
             for icon in self.icons.values():
                 icon._message(1, win32.NIF_TIP | 0x80, szTip=icon.title)

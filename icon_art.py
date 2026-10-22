@@ -39,7 +39,6 @@ def _mix(base, top, amount):
     return tuple(round(b + (t - b) * amount) for b, t in zip(base[:3], top[:3])) + (255,)
 
 
-INK_EDGE = _mix(INK, IVORY, 0.10)  # hairline that lifts the disc off dark taskbars
 TRACK = _mix(INK, IVORY, 0.17)     # unfilled ring
 MUTED = (164, 159, 148, 255)       # unknown state
 AMBER = (229, 168, 75, 255)        # < 50 %
@@ -121,15 +120,6 @@ def ring_color(percent: float | None, letter: str) -> tuple[int, int, int, int]:
     if percent >= 20:
         return AMBER
     return CLAY
-
-
-def _hex(rgba: tuple[int, int, int, int]) -> str:
-    return "#{:02X}{:02X}{:02X}".format(*rgba[:3])
-
-
-def color_for(percent: float | None, letter: str = "C") -> str:
-    """Hex colour for a quota level (kept for callers that want a swatch)."""
-    return _hex(ring_color(percent, letter))
 
 
 def _centered_text(draw: ImageDraw.ImageDraw, text: str, face, box, fill, optical_dy: float = 0.0) -> None:

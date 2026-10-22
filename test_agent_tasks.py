@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import sqlite3
 from contextlib import closing
 import tempfile
@@ -529,6 +530,67 @@ class SteadyBubbleTests(unittest.TestCase):
 
     def test_footprint_does_not_depend_on_caption(self):
         self.assertEqual(bubble("a", doing="思考中").half_width, bubble("a", doing="编辑 a_very_long_file_name.py").half_width)
+
+    def test_follower_glides_without_overshoot_and_lands_exactly(self):
+        for dt in (1 / 240, 1 / 60, 1 / 20):
+            follow = agent_panel.Follow(0.0)
+            follow.target = 100.0
+            previous = 0.0
+            for _ in range(int(2 / dt)):
+                value = follow.step(dt)
+                self.assertGreaterEqual(value, previous - 1e-9)       # monotonic
+                self.assertLessEqual(value, 100.0)                    # never past the target
+                previous = value
+            self.assertTrue(follow.settled)
+            self.assertEqual(follow.value, 100.0)
+
+    def test_panel_comes_to_rest_exactly_on_its_slots(self):
+        scene = agent_panel.Scene()
+        scene.set_model(panel(bubble("a"), bubble("b")), 0.0)
+        moment = self.run_frames(scene, 0.0, 30)
+        scene.set_model(panel(bubble("a"), bubble("b"), bubble("c"), bubble("d")), moment)
+        self.assertTrue(scene.animating)
+        moment = self.run_frames(scene, moment, 90)
+        self.assertFalse(scene.animating)
+        for key, body in scene.bodies.items():
+            self.assertEqual((body.x, body.y), scene.homes[key])
+        idle = agent_panel.PanelModel("codex", "C", "GPT / Codex", "空闲", (("5 小时", 70.0),), 0.0,
+                                      tuple(agent_panel.BubbleModel(k, f"任务 {k}", "完成", "C", False) for k in "abcd"), "idle")
+        scene.set_model(idle, moment)
+        moment = self.run_frames(scene, moment, 100)
+        scene.set_model(idle, moment)                   # the next refresh, after LIVE_HOLD
+        moment = self.run_frames(scene, moment, 60)
+        self.assertFalse(scene.animating or scene.ambient)
+        frame = scene.render(1.0)
+        self.run_frames(scene, moment, 30)
+        self.assertEqual(scene.render(1.0).tobytes(), frame.tobytes())   # idle bubbles are pixel-still
+
+    def test_arriving_and_leaving_bubbles_never_overlap_their_neighbours(self):
+        scene = agent_panel.Scene()
+        first = [bubble(str(index)) for index in range(3)]
+        scene.set_model(panel(*first), 0.0)
+        moment = self.run_frames(scene, 0.0, 60)
+        for bubbles in (first + [bubble("n1"), bubble("g", (("C", True),) * 3), bubble("n2")], first[1:] + [bubble("n2")], first):
+            scene.set_model(panel(*bubbles), moment)
+            for _ in range(60):
+                moment = self.run_frames(scene, moment, 1)
+                bodies = list(scene.bodies.values())
+                for index, a in enumerate(bodies):
+                    for b in bodies[index + 1:]:
+                        gap = math.hypot(a.x - b.x, a.y - b.y) - a.size - b.size
+                        self.assertGreater(gap, -1.0, f"{a.model.key} overlaps {b.model.key}")
+
+    def test_sliced_background_matches_a_full_render(self):
+        from PIL import ImageChops
+        model = panel(bubble("a"))
+        for scale in (1.0, 1.5, 2.0):
+            for field in (96, 140, 220):
+                sliced = agent_panel.background(model.header, round(field * scale), scale)
+                full = agent_panel._background(model.header, field, scale)
+                self.assertEqual(sliced.size, full.size)
+                top = round((agent_panel.MARGIN + agent_panel.field_top(model) + agent_panel.SLICE_INSET) * scale)
+                self.assertIsNone(ImageChops.difference(sliced.crop((0, 0, full.width, top)),
+                                                        full.crop((0, 0, full.width, top))).getbbox())
 
     def test_brief_live_flicker_is_ignored(self):
         scene = agent_panel.Scene()

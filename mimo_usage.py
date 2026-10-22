@@ -28,7 +28,6 @@ import re
 import socket
 import struct
 import subprocess
-import tempfile
 import threading
 import time
 import urllib.error

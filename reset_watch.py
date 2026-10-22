@@ -150,17 +150,6 @@ def save(path: Path, outlook: ResetOutlook) -> None:
         pass
 
 
-def ago_text(moment: float | None, now: float) -> str:
-    if not moment:
-        return "未知"
-    hours = max(0.0, now - moment) / 3600
-    if hours < 1:
-        return "不到 1 小时前"
-    if hours < 48:
-        return f"{hours:.0f} 小时前"
-    return f"{hours / 24:.1f} 天前"
-
-
 def panel_line(outlook: ResetOutlook | None, now: float) -> str:
     """Always show the current community probabilities above the panel title."""
     if outlook is None:
@@ -169,24 +158,3 @@ def panel_line(outlook: ResetOutlook | None, now: float) -> str:
         return "GPT 社区重置预测 · 数据待更新"
     second = "—" if outlook.prob_48 is None else f"{outlook.prob_48}%"
     return f"GPT 社区重置预测 · 24h {outlook.prob_24}% · 48h {second}"
-
-
-def card_lines(outlook: ResetOutlook | None, remaining: float | None, now: float) -> tuple[str, list[str]]:
-    """(banner, notes) for the Codex card.  The banner is only set when a
-    global reset looks likely within 24 hours."""
-    if outlook is None:
-        return "", []
-    level = outlook.level(now)
-    if level == "unknown":
-        return "", [f"社区重置预测暂不可用（{outlook.source}，{ago_text(outlook.fetched_at, now)}）"]
-    banner = ""
-    if level == "high":
-        banner = f"Codex 可能即将全局重置：24 小时内概率 {outlook.prob_24}%"
-        if remaining is not None and remaining < 30:
-            banner += f"；当前仅剩 {remaining:.0f}%，可考虑等重置后再大量使用"
-    notes = [f"社区重置预测（{outlook.source}）：24 小时 {outlook.prob_24}% · 48 小时 {outlook.prob_48 if outlook.prob_48 is not None else '—'}%",
-             f"上次全局重置：{ago_text(outlook.last_reset_at, now)}" + (f"（{outlook.last_reset_text}）" if outlook.last_reset_text else "")]
-    if outlook.promise:
-        notes.append(f"@thsottiaux 最新信号：“{outlook.promise}”")
-    notes.append("社区估计，非 OpenAI 官方时间表")
-    return banner, notes

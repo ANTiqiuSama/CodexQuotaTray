@@ -59,15 +59,6 @@ class BubbleModel:
 
 
 @dataclass(frozen=True)
-class ScheduleChip:
-    key: str
-    title: str
-    running: bool
-    letter: str = ""
-    when: str = ""             # e.g. "上次 14:05" while idle
-
-
-@dataclass(frozen=True)
 class ResetColumn:
     provider: str
     letter: str
@@ -99,7 +90,7 @@ class PanelModel:
         TPS are animated per frame; upcoming reset columns are cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], "") for item in self.quota[:3]), self.banner,
-                (self.forecast, self.forecast_tone), not self.bubbles, self.provider == "mimo", self.upcoming_resets[:3])
+                (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3])
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
@@ -196,30 +187,68 @@ class Spring:
         return abs(self.target - self.value) < 0.002 and abs(self.velocity) < 0.01
 
 
+class Follow:
+    """Critically damped follower, solved exactly: no overshoot, stable for any
+    frame time, and it snaps onto the target once it is closer than `epsilon`."""
+
+    def __init__(self, value: float, omega=13.0, epsilon=0.05):
+        self.value, self.target, self.velocity = value, value, 0.0
+        self.omega, self.epsilon = omega, epsilon
+
+    def step(self, dt: float) -> float:
+        w, d = self.omega, self.value - self.target
+        decay = math.exp(-w * dt)
+        drift = self.velocity + w * d
+        self.value = self.target + (d + drift * dt) * decay
+        self.velocity = (self.velocity - w * drift * dt) * decay
+        if abs(self.value - self.target) < self.epsilon and abs(self.velocity) < 10 * self.epsilon:
+            self.value, self.velocity = self.target, 0.0
+        return self.value
+
+    @property
+    def settled(self) -> bool:
+        return self.value == self.target and self.velocity == 0.0
+
+
 @dataclass
 class Body:
     model: BubbleModel
-    x: float
-    y: float
+    px: Follow
+    py: Follow
     born: float
     phase: float = field(default_factory=lambda: random.uniform(0, math.tau))
-    vx: float = 0.0
-    vy: float = 0.0
     scale: Spring = field(default_factory=lambda: Spring(0.0))
     radius: Spring = field(default_factory=lambda: Spring(BASE_RADIUS, 150.0, 13.0))
     hover: Spring = field(default_factory=lambda: Spring(0.0, 260.0, 26.0))
     glow: Spring = field(default_factory=lambda: Spring(0.0, 260.0, 26.0))
-    still: Spring = field(default_factory=lambda: Spring(1.0, 120.0, 22.0))   # 0 while dragged: no floating
+    lift: Spring = field(default_factory=lambda: Spring(0.0, 260.0, 26.0))    # 1 while dragged
 
-    def box(self) -> tuple[float, float, float, float]:
-        grow = max(0.3, self.scale.value)
-        r, half = self.radius.value * grow, self.model.half_width * grow
-        return self.x - half, self.y - r - GAP / 2, self.x + half, self.y + r + LABEL + GAP / 2
+    @classmethod
+    def at(cls, model: BubbleModel, x: float, y: float, born: float) -> "Body":
+        return cls(model, Follow(x), Follow(y), born)
+
+    @property
+    def x(self) -> float:
+        return self.px.value
+
+    @property
+    def y(self) -> float:
+        return self.py.value
+
+    def place(self, x: float, y: float):
+        """Move without animation (dragging): the follower forgets its momentum."""
+        self.px.value, self.py.value = x, y
+        self.px.velocity = self.py.velocity = 0.0
+
+    @property
+    def springs(self) -> tuple:
+        return self.px, self.py, self.scale, self.radius, self.hover, self.glow, self.lift
 
     @property
     def size(self) -> float:
-        lift = 0.07 * (1 - self.still.value)        # picked up: slightly larger, closer to the viewer
-        return self.radius.value * max(0.0, self.scale.value) * (1 + 0.05 * self.hover.value + 0.1 * self.glow.value + lift)
+        # Picked up: slightly larger, closer to the viewer.
+        return self.radius.value * max(0.0, self.scale.value) * (1 + 0.05 * self.hover.value + 0.1 * self.glow.value
+                                                                  + 0.07 * self.lift.value)
 
 
 @dataclass
@@ -248,12 +277,16 @@ class Ripple:
 
 
 class Scene:
+    """Bubbles sit on shelf slots (pack) and glide to them on critically damped
+    followers: no collision pass, no idle drift, so a steady panel is pixel-still
+    and every change is one smooth move. New bubbles pop in on their own slot."""
+
     def __init__(self):
         self.model: PanelModel | None = None
         self.bodies: dict[str, Body] = {}
         self.ghosts: list[Ghost] = []
         self.ripples: list[Ripple] = []
-        self.field = Spring(field_height(()), 120.0, 20.0)
+        self.field = Follow(field_height(()), 11.0, 0.1)
         self.time = 0.0
         self.last = None
         self.press = None           # (key, dx, dy, x, y)
@@ -272,11 +305,12 @@ class Scene:
         self.order: list[str] = []              # first-seen order: bubbles keep their slots
         self.live_since: dict[str, tuple[bool, float]] = {}
         self.gear_press = False
+        self.dirty = True                       # something changed that the next frame must show
 
     def over_gear(self, pointer) -> bool:
         if pointer is None or self.model is None:
             return False
-        cx, cy = gear_center(self.model, round(self.field.value / 2) * 2)
+        cx, cy = gear_center(self.model, self.field.value)
         return math.hypot(pointer[0] - cx, pointer[1] - cy) <= GEAR_HIT
 
     # ----- geometry --------------------------------------------------------
@@ -289,22 +323,6 @@ class Scene:
     def height(self) -> float:
         return panel_height(self.model, self.field.value) if self.model else field_top(None) + self.field.value
 
-    def _free_spot(self, radius: float) -> tuple[float, float]:
-        x0, y0, x1, y1 = self.bounds
-        y1 = y0 + self.field.target
-        best, best_score = ((x0 + x1) / 2, (y0 + y1) / 2), -1e9
-        for index in range(48):
-            angle, distance = index * 2.399963, 9 * math.sqrt(index)   # golden-angle spiral from the centre
-            x = (x0 + x1) / 2 + math.cos(angle) * distance * 2.2
-            y = (y0 + y1) / 2 + math.sin(angle) * distance
-            if not (x0 + radius <= x <= x1 - radius and y0 + radius <= y <= y1 - radius - 14):
-                continue
-            gaps = [math.hypot(x - b.x, y - b.y) - b.radius.target - radius for b in self.bodies.values()]
-            score = min(gaps, default=200) - 0.05 * distance
-            if score > best_score:
-                best, best_score = (x, y), score
-        return best
-
     def body_at(self, x: float, y: float) -> str | None:
         order = sorted(self.bodies.items(), key=lambda item: item[0] == self.dragging, reverse=True)
         for key, body in order:
@@ -315,6 +333,8 @@ class Scene:
     # ----- model -----------------------------------------------------------
     def set_model(self, model: PanelModel, now: float):
         first = self.model is None
+        if model != self.model:
+            self.dirty = True
         self.model = model
         if first:
             self.opened = now
@@ -334,6 +354,7 @@ class Scene:
         if self.dragging in removed:
             self.dragging = self.target = self.press = None
         for index, bubble in enumerate(bubbles):
+            home = self.homes[bubble.key]
             body = self.bodies.get(bubble.key)
             if body is None and bubble.key not in self.origins:
                 # The same agents regrouped by the client (e.g. a sub-agent spawned): keep the bubble.
@@ -346,13 +367,14 @@ class Scene:
             if body is None:
                 origin = self.origins.pop(bubble.key, None)
                 if origin:
+                    # Split: members leave the burst point outward, then settle on their slots.
                     x, y, angle = origin
-                    body = Body(bubble, x, y, now)
-                    body.vx, body.vy = math.cos(angle) * 260, math.sin(angle) * 260
+                    body = Body.at(bubble, x, y, now)
+                    body.px.velocity, body.py.velocity = math.cos(angle) * 220, math.sin(angle) * 220
                     body.scale.value = 0.35
                 else:
-                    x, y = self.homes[bubble.key] if first else self._free_spot(bubble.radius)
-                    body = Body(bubble, x, y, now + (index * 0.05 if first else 0.0))
+                    # Pop in on the bubble's own slot; neighbours glide aside meanwhile.
+                    body = Body.at(bubble, *home, now + (index * 0.04 if first else 0.0))
                 body.radius.value = body.radius.target = bubble.radius
                 self.bodies[bubble.key] = body
             if body.model.live != bubble.live and not first and bubble.live:
@@ -360,7 +382,7 @@ class Scene:
                 self.ripples.append(Ripple(body.x, body.y, body.size, now, bubble.letter, 0.7, bubble.key))
             body.model = bubble
             body.radius.target = bubble.radius
-            body.scale.target = 1.0
+            body.px.target, body.py.target = home
         for body in removed.values():
             self.ghosts.append(Ghost(body.model, body.x, body.y, body.size, now, "fade", duration=0.28))
 
@@ -434,21 +456,21 @@ class Scene:
         if self.dragging and self.dragging in self.bodies and pointer:
             body = self.bodies[self.dragging]
             follow = 1 - math.exp(-dt * 32)
-            body.x += (pointer[0] - self.press[1] - body.x) * follow
-            body.y += (pointer[1] - self.press[2] - body.y) * follow
-            body.vx = body.vy = 0.0
+            x = body.x + (pointer[0] - self.press[1] - body.x) * follow
+            y = body.y + (pointer[1] - self.press[2] - body.y) * follow
             self.target = None
             best = 1e9
             for key, other in self.bodies.items():
                 if key == self.dragging:
                     continue
-                distance = math.hypot(other.x - body.x, other.y - body.y)
+                distance = math.hypot(other.x - x, other.y - y)
                 if distance < other.size * 0.95 + body.size * 0.4 and distance < best:
                     self.target, best = key, distance
             if self.target:         # gentle magnet toward the bubble it would join
                 other = self.bodies[self.target]
-                body.x += (other.x - body.x) * min(1.0, dt * 6) * 0.35
-                body.y += (other.y - body.y) * min(1.0, dt * 6) * 0.35
+                pull = min(1.0, dt * 6) * 0.35
+                x, y = x + (other.x - x) * pull, y + (other.y - y) * pull
+            body.place(x, y)
         if not left and self.left:
             if self.dragging and self.target:
                 events.append(("merge", self.dragging, self.target))
@@ -470,76 +492,59 @@ class Scene:
         self.rate.step(dt)
         self.today_usage.step(dt)
         x0, y0, x1, y1 = self.bounds
-        bodies = list(self.bodies.items())
-        for key, body in bodies:
-            body.scale.target = 1.0 if now >= body.born else 0.0
-            body.scale.step(dt)
-            body.radius.step(dt)
+        for key, body in self.bodies.items():
+            # A new bubble on a new row waits until the growing field reaches its
+            # slot; otherwise it pops in over the footer below the field.
+            fits = body.py.target + body.model.radius + LABEL <= y1 + 2 or body.scale.value > 0.05
+            body.scale.target = 1.0 if now >= body.born and fits else 0.0
             body.hover.target = 1.0 if key == self.hovered else 0.0
             body.glow.target = 1.0 if key == self.target else 0.0
-            body.still.target = 0.0 if key == self.dragging else 1.0
-            for spring in (body.hover, body.glow, body.still):
+            body.lift.target = 1.0 if key == self.dragging else 0.0
+            for spring in (body.scale, body.radius, body.hover, body.glow, body.lift):
                 spring.step(dt)
             if key == self.dragging:
+                # Keep the picked-up bubble inside the field so it never leaves the window.
+                r = body.radius.value
+                body.place(min(max(body.x, x0 + r), x1 - r), min(max(body.y, y0 + r), max(y0 + r, y1 - r)))
                 continue
-            hx, hy = self.homes.get(key, (body.x, body.y))
-            pull = 1 - math.exp(-dt * 4.5)
-            body.x += (hx - body.x) * pull + body.vx * dt
-            body.y += (hy - body.y) * pull + body.vy * dt
-            decay = math.exp(-dt * 7)
-            body.vx, body.vy = body.vx * decay, body.vy * decay
-        for index, (key, body) in enumerate(bodies):
-            for other_key, other in bodies[index + 1:]:
-                if self.dragging in (key, other_key):
-                    continue        # the dragged bubble floats above the rest
-                # Footprints are boxes (bubble + caption) so captions never collide.
-                a, b = body.box(), other.box()
-                overlap_x = min(a[2], b[2]) - max(a[0], b[0])
-                overlap_y = min(a[3], b[3]) - max(a[1], b[1])
-                if overlap_x <= 0 or overlap_y <= 0:
-                    continue
-                rate = min(1.0, dt * 14)
-                share = 0.5
-                if overlap_x * 0.8 < overlap_y:
-                    sign = 1 if other.x > body.x or (other.x == body.x and index % 2) else -1
-                    body.x -= sign * overlap_x * rate * share
-                    other.x += sign * overlap_x * rate * (1 - share)
-                else:
-                    sign = 1 if other.y >= body.y else -1
-                    body.y -= sign * overlap_y * rate * share
-                    other.y += sign * overlap_y * rate * (1 - share)
-        for key, body in bodies:
-            r = body.radius.value * max(body.scale.value, 0.3)
-            half = min(body.model.half_width - GAP / 2, (x1 - x0) / 2)
-            body.x = min(max(body.x, x0 + half), x1 - half)
-            body.y = min(max(body.y, y0 + r + 6), max(y0 + r + 6, y1 - r - LABEL))
+            body.px.step(dt)
+            body.py.step(dt)
         self.ghosts = [g for g in self.ghosts if now - g.start < g.duration]
         self.ripples = [r for r in self.ripples if now - r.start < r.duration]
         return events
 
     @property
     def animating(self) -> bool:
+        """Something is moving: draw every frame until it rests."""
         return bool(self.dragging or self.ghosts or self.ripples or not self.field.settled or not self.rate.settled
-                    or not self.gear.settled or self.gear.value > 0.01 or not self.today_usage.settled
-                    or any(not spring.settled for spring in self.meters) or any(
-            not (b.scale.settled and b.radius.settled and b.hover.settled and b.glow.settled) for b in self.bodies.values()))
+                    or not self.gear.settled or not self.today_usage.settled
+                    or any(not spring.settled for spring in self.meters)
+                    or any(not spring.settled for body in self.bodies.values() for spring in body.springs))
 
-    def float_offset(self, body: Body) -> tuple[float, float]:
-        t, still = self.time, body.still.value
-        return (1.2 * math.sin(t * 0.7 + body.phase) * still,
-                1.8 * math.sin(t * 0.9 + body.phase * 1.7) * still)
+    @property
+    def ambient(self) -> bool:
+        """Slow looping decoration (pulse rings, orbiting members, spinners):
+        worth a lower frame rate while nothing else moves."""
+        model = self.model
+        if model is None:
+            return False
+        return (model.status_tone == "live" or not model.bubbles
+                or any(b.model.live or b.model.members or b.model.busy for b in self.bodies.values()))
 
     # ----- drawing ---------------------------------------------------------
     def render(self, scale: float) -> Image.Image:
         model = self.model
-        field_h = round(self.field.value / 2) * 2
-        frame = background(model.header, field_h, scale).copy()
+        self.dirty = False
+        field_h = self.field.value
+        frame = background(model.header, round(field_h * scale), scale).copy()
         origin = round(MARGIN * scale)
 
         def at(value):
             return origin + value * scale
 
         self._header(frame, model, field_h, scale, at)
+        if not model.bubbles:
+            blit(frame, empty_note(scale), at(WIDTH / 2), at(field_top(model) + field_h / 2))
         cx, cy = gear_center(model, field_h)
         level = self.gear.value
         tint = tuple(round(a + (b - a) * level) for a, b in zip(MUTED_TEXT[:3], accent(model.letter)[:3])) + (255,)
@@ -569,8 +574,7 @@ class Scene:
             self._bubble(frame, ghost.model, at(x), at(y), r, scale, alpha, label=False)
         order = sorted(self.bodies.items(), key=lambda item: (item[0] == self.dragging, item[0] == self.hovered))
         for key, body in order:
-            ox, oy = self.float_offset(body)
-            x, y, r = at(body.x + ox), at(body.y + oy), body.size
+            x, y, r = at(body.x), at(body.y), body.size
             if r <= 0.5:
                 continue
             m = body.model
@@ -581,8 +585,9 @@ class Scene:
                                   0.5 * (1 - p) ** 2 * (1 if m.focus else 0.5)), x, y)
             if body.glow.value > 0.02:
                 blit(frame, faded(halo(round((r + 4) * scale), m.letter), min(1.0, body.glow.value)), x, y)
+            resting = body.scale.settled and body.hover.settled and body.glow.settled and body.lift.settled
             self._bubble(frame, m, x, y, r, scale, min(1.0, max(0.0, body.scale.value)), label=key != self.dragging,
-                         expanded=body.hover.value > 0.5)
+                         expanded=body.hover.value > 0.5, crisp=resting)
             if m.members:
                 count = min(6, len(m.members))
                 for index, (letter, live) in enumerate(m.members[:count]):
@@ -637,19 +642,27 @@ class Scene:
     def time_since(self, moment: float) -> float:
         return max(0.0, (self.last or moment) - moment)
 
-    def _bubble(self, frame, m: BubbleModel, x, y, r, scale, alpha, label=True, expanded=False):
-        base = bubble(m.title, m.letter, m.live, m.focus, round(m.radius * scale), scale)
-        factor = r / m.radius
-        # Spring overshoot hovers around 1.0; switching between the crisp sprite and a
-        # resampled one at that point flickers, so only resize clearly scaled bubbles.
-        if abs(factor - 1) > 0.025:
-            size = max(2, round(base.width * factor))
-            base = base.resize((size, size), Image.BILINEAR)
+    def _bubble(self, frame, m: BubbleModel, x, y, r, scale, alpha, label=True, expanded=False, crisp=False):
+        layout = round(m.radius * scale)
+        drawn = max(1, round(r * scale))
+        if crisp:
+            # At rest (also hovered/picked up) draw the exact size, so the title stays sharp.
+            base = bubble(m.title, m.letter, m.live, m.focus, layout, scale, drawn)
+        else:
+            # Mid-animation: resample the resting sprite (a fresh one per size would cost ms
+            # per frame). Within a pixel of it, keep the sprite as is: alternating between
+            # sharp and resampled frames while a spring settles reads as flicker.
+            base = bubble(m.title, m.letter, m.live, m.focus, layout, scale, layout)
+            if abs(drawn - layout) > 1:
+                size = max(2, round(base.width * r * scale / layout))
+                base = base.resize((size, size), Image.BILINEAR)
         blit(frame, faded(base, alpha), x, y)
-        if label and alpha > 0.3:
+        # The caption follows only the end of a pop-in, so a tiny bubble never carries a full-size label.
+        text_alpha = min(1.0, max(0.0, (alpha - 0.6) / 0.35))
+        if label and text_alpha > 0.02:
             text = m.detail if expanded and m.detail and m.detail != m.title else m.doing
             tag = caption(text, m.letter if m.live else "", round(m.radius * 2 + CAPTION_SPARE), expanded, scale)
-            blit(frame, faded(tag, alpha * (1 if m.focus or expanded else 0.75)), x, y + (r + 4) * scale + tag.height / 2)
+            blit(frame, faded(tag, text_alpha * (1 if m.focus or expanded else 0.75)), x, y + (r + 4) * scale + tag.height / 2)
 
 
 # ----- sprites -----------------------------------------------------------------
@@ -709,9 +722,12 @@ def _radial():
     return Image.radial_gradient("L")      # 0 at the centre, 181 at the inscribed circle
 
 
-@lru_cache(maxsize=128)
-def bubble(title: str, letter: str, live: bool, focus: bool, radius: int, scale: float) -> Image.Image:
-    """Glass bubble: tinted rim-heavy fill, hairline rim, specular highlight, title."""
+@lru_cache(maxsize=160)
+def bubble(title: str, letter: str, live: bool, focus: bool, radius: int, scale: float, drawn: int | None = None) -> Image.Image:
+    """Glass bubble: tinted rim-heavy fill, hairline rim, specular highlight, title.
+    `radius` lays out the title; the glass is drawn at `drawn` (hover/lift
+    enlarge the glass without reflowing the text)."""
+    text_radius, radius = radius, drawn or radius
     pad = max(4, round(9 * scale))
     size = 2 * (radius + pad)
     color = accent(letter)
@@ -737,12 +753,12 @@ def bubble(title: str, letter: str, live: bool, focus: bool, radius: int, scale:
     image.alpha_composite(body.resize((2 * radius, 2 * radius), Image.LANCZOS), (pad, pad))
 
     weight = "bold"
-    face = ui_font(max(6, round((12.5 if radius > 34 * scale else 11.5) * scale)), weight)
+    face = ui_font(max(6, round((12.5 if text_radius > 34 * scale else 11.5) * scale)), weight)
     draw = ImageDraw.Draw(image)
-    lines = _wrap(draw, title, face, radius * 1.52)
+    lines = _wrap(draw, title, face, text_radius * 1.52)
     if len(lines) > 2:
         lines = lines[:2]
-        while lines[1] and draw.textlength(lines[1] + "…", font=face) > radius * 1.45:
+        while lines[1] and draw.textlength(lines[1] + "…", font=face) > text_radius * 1.45:
             lines[1] = lines[1][:-1]
         lines[1] += "…"
     top, bottom = face.getbbox("国Ag")[1::2]
@@ -760,7 +776,7 @@ def bubble(title: str, letter: str, live: bool, focus: bool, radius: int, scale:
 def caption(text: str, letter: str, max_width: int, expanded: bool, scale: float) -> Image.Image:
     face = ui_font(max(6, round(10.5 * scale)))
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    limit = max_width * scale if not expanded else 200 * scale
+    limit = max_width * scale if not expanded else max(max_width, 120) * scale
     lines = _wrap(probe, text, face, limit)
     keep = 2 if expanded else 1
     if len(lines) > keep:
@@ -773,17 +789,27 @@ def caption(text: str, letter: str, max_width: int, expanded: bool, scale: float
     width = max(2, round(max(probe.textlength(line, font=face) for line in lines)) + 4 + (round(10 * scale) if letter else 0))
     image = Image.new("RGBA", (width, step * len(lines) + 2), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    x = 2
+    if expanded:
+        # Hovered: a wider detail line drawn above its neighbours on the panel colour.
+        plate = Image.new("RGBA", (width + 2 * round(6 * scale), image.height + 2 * round(3 * scale)), (0, 0, 0, 0))
+        ImageDraw.Draw(plate).rounded_rectangle((0, 0, plate.width - 1, plate.height - 1), radius=round(6 * scale),
+                                                fill=(44, 43, 39, 245), outline=(240, 238, 230, 24))
+        plate.alpha_composite(image, (round(6 * scale), round(3 * scale)))
+        image, draw = plate, ImageDraw.Draw(plate)
+        offset = (round(6 * scale), round(3 * scale))
+    else:
+        offset = (0, 0)
+    x = 2 + offset[0]
     if letter:
         d = round(5 * scale)
-        draw.ellipse((x, step / 2 - d / 2, x + d, step / 2 + d / 2), fill=accent(letter))
+        draw.ellipse((x, offset[1] + step / 2 - d / 2, x + d, offset[1] + step / 2 + d / 2), fill=accent(letter))
         x += round(10 * scale)
     for index, line in enumerate(lines):
-        draw.text((x, step * index + step / 2), line, font=face, fill=TEXT if expanded else SECONDARY_TEXT, anchor="lm")
+        draw.text((x, offset[1] + step * index + step / 2), line, font=face, fill=TEXT if expanded else SECONDARY_TEXT, anchor="lm")
     return image
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=512)
 def ring(radius: int, stroke: int, letter: str) -> Image.Image:
     big = (radius + stroke + 1) * 2 * SUPERSAMPLE
     image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
@@ -904,11 +930,57 @@ def compact_usage(value: float | None) -> tuple[str, str]:
     return number, units[index]
 
 
-@lru_cache(maxsize=24)
-def background(header: tuple, field_h: int, scale: float) -> Image.Image:
-    letter, title, status, tone, meters, banner, forecast, empty, daily, resets = header
-    model = PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (), tone, banner,
-                       forecast[0], forecast[1], upcoming_resets=resets)
+REFERENCE_FIELD = 160       # Field height the background slices are cut from.
+SLICE_INSET = 20            # Cut this far inside the field: past every rounded corner.
+
+
+@lru_cache(maxsize=12)
+def _slices(header: tuple, scale: float) -> tuple[Image.Image, Image.Image, Image.Image, int]:
+    """Top (header, resets, field top), one uniform field row, bottom (field
+    bottom, forecast, shadow), and the rows between them at the reference
+    height. Any field height is top + row stretched + bottom, so a resizing
+    panel never re-renders or re-blurs its card."""
+    full = _background(header, REFERENCE_FIELD, scale)
+    model = _header_model(header)
+    origin = round(MARGIN * scale)
+    cut_top = origin + round((field_top(model) + SLICE_INSET) * scale)
+    cut_bottom = origin + round((field_top(model) + REFERENCE_FIELD - SLICE_INSET) * scale)
+    return (full.crop((0, 0, full.width, cut_top)), full.crop((0, cut_top, full.width, cut_top + 1)),
+            full.crop((0, cut_bottom, full.width, full.height)), cut_bottom - cut_top)
+
+
+@lru_cache(maxsize=4)
+def background(header: tuple, field_px: int, scale: float) -> Image.Image:
+    """The static card for a field `field_px` device pixels tall."""
+    top, row, bottom, rows = _slices(header, scale)
+    middle = max(1, rows + field_px - round(REFERENCE_FIELD * scale))
+    image = Image.new("RGBA", (top.width, top.height + middle + bottom.height), (0, 0, 0, 0))
+    image.paste(top, (0, 0))
+    image.paste(row.resize((row.width, middle), Image.NEAREST), (0, top.height))
+    image.paste(bottom, (0, top.height + middle))
+    return image
+
+
+def _header_model(header: tuple) -> PanelModel:
+    letter, title, status, tone, meters, banner, forecast, daily, resets = header
+    return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (),
+                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets)
+
+
+@lru_cache(maxsize=8)
+def empty_note(scale: float) -> Image.Image:
+    face = ui_font(round(11 * scale))
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    text = "暂无工作中的 agent"
+    image = Image.new("RGBA", (round(probe.textlength(text, font=face)) + 4, round(18 * scale)), (0, 0, 0, 0))
+    ImageDraw.Draw(image).text((image.width / 2, image.height / 2), text, font=face, fill=MUTED_TEXT, anchor="mm")
+    return image
+
+
+@lru_cache(maxsize=12)
+def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
+    model = _header_model(header)
+    letter, title, status, tone, meters, banner, _, daily, resets = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -946,8 +1018,6 @@ def background(header: tuple, field_h: int, scale: float) -> Image.Image:
         draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=ui_font(px(11), "bold"), fill=RESET_BLUE, anchor="lm")
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
-    if empty:
-        draw.text((px(WIDTH / 2), px(top + field_h / 2)), "暂无工作中的 agent", font=ui_font(px(11)), fill=MUTED_TEXT, anchor="mm")
     reset_y = reset_top(model)
     gap = 8
     column_left = PAD - 6   # Same outer edges as the bubble field above.

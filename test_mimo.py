@@ -6,7 +6,6 @@ import tempfile
 import threading
 import time
 import unittest
-import uuid
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch

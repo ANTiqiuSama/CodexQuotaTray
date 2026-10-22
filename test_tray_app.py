@@ -664,6 +664,12 @@ class HoverRecoveryTests(unittest.TestCase):
                 clock[0] += 0.1
                 return clock[0] > seconds
 
+            def is_set(self):
+                return clock[0] > seconds
+
+        def sleep(_delay):
+            clock[0] += 0.1
+
         icon = SimpleNamespace(_version4=True, hover_open=True, suppress_hover=False)
         agents = SimpleNamespace(panel=Mock(return_value=object()), settings_requested=threading.Event())
         hover = HoverDetails({'codex': icon}, lambda _: 'temporary tooltip', Stop(), agents)
@@ -676,6 +682,7 @@ class HoverRecoveryTests(unittest.TestCase):
                 patch('hover_details.user.GetCursorPos', return_value=True), \
                 patch('hover_details.user.GetAsyncKeyState', return_value=0), \
                 patch('hover_details.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('hover_details.time.sleep', side_effect=sleep), \
                 self.assertLogs('hover_details', level='ERROR'):
             hover.run()
         return create, tips, tooltip
@@ -715,3 +722,86 @@ class HoverRecoveryTests(unittest.TestCase):
         self.assertGreaterEqual(create.call_count, 2)
         self.assertLessEqual(create.call_count, 3)
         self.assertEqual(tips.call_count, 1)
+
+
+
+class PanelPacingTests(unittest.TestCase):
+    """The window draws only when the scene changes and reuses one bitmap."""
+
+    def window(self, scene):
+        import hover_details
+        window = hover_details.AgentPanelWindow.__new__(hover_details.AgentPanelWindow)
+        window.hwnd, window.surface, window.scene = 1, Mock(), scene
+        window.provider, window.anchor, window.work, window.scale = "codex", (900, 1040, 924, 1064), (0, 0, 1920, 1040), 1.0
+        window.rect = window.closing_at = window.image = window.placed = None
+        window.opened_at, window.shown, window.checked_at, window.drawn_at = 0.0, True, 0.0, 0.0
+        return window
+
+    @staticmethod
+    def scene(**state):
+        scene = Mock(dragging=None, press=None, bodies={}, **state)
+        scene.step.return_value = []
+        scene.render.return_value = Image.new("RGBA", (448, 400))
+        return scene
+
+    def test_resting_panel_is_not_redrawn(self):
+        scene = self.scene(dirty=False, animating=False, ambient=False)
+        window = self.window(scene)
+        with patch("hover_details.is_window_covered", return_value=False):
+            for index in range(60):
+                window.frame(None, False, False, 1.0 + index / 60)
+        self.assertEqual(scene.render.call_count, 1)                 # the first frame only
+        self.assertEqual(window.surface.present.call_count, 1)
+        window.surface.move.assert_not_called()                      # same place, same opacity
+
+    def test_moving_scene_draws_every_tick_and_ambient_at_thirty_fps(self):
+        scene = self.scene(dirty=False, animating=True, ambient=True)
+        window = self.window(scene)
+        with patch("hover_details.is_window_covered", return_value=False):
+            for index in range(30):
+                window.frame(None, False, False, 1.0 + index / 60)
+            self.assertEqual(scene.render.call_count, 30)
+            scene.animating = False
+            scene.render.reset_mock()
+            for index in range(60):
+                window.frame(None, False, False, 2.0 + index / 60)
+        self.assertIn(scene.render.call_count, range(28, 33))
+
+    def test_opening_fade_moves_without_rerendering(self):
+        scene = self.scene(dirty=False, animating=False, ambient=False)
+        window = self.window(scene)
+        window.opened_at = 1.0
+        with patch("hover_details.is_window_covered", return_value=False):
+            for index in range(15):
+                window.frame(None, False, False, 1.0 + index / 60)
+        self.assertEqual(scene.render.call_count, 1)
+        alphas = [c.args[3] for c in window.surface.move.call_args_list]
+        self.assertTrue(alphas and alphas == sorted(alphas) and alphas[-1] == 255)
+
+    def test_surface_reuses_one_bitmap_between_frames(self):
+        import hover_details
+        created = []
+
+        def dib(_dc, _header, _usage, bits, *_):
+            bits._obj.value = 1
+            created.append(len(created) + 100)
+            return created[-1]
+        with patch("hover_details.gdi.CreateCompatibleDC", return_value=5), \
+                patch("hover_details.gdi.CreateDIBSection", side_effect=dib), \
+                patch("hover_details.gdi.SelectObject", return_value=7) as select, \
+                patch("hover_details.gdi.DeleteObject") as delete, \
+                patch("hover_details.gdi.DeleteDC") as delete_dc, \
+                patch("hover_details.ctypes.memmove"), \
+                patch("hover_details.user.UpdateLayeredWindow", return_value=True) as update:
+            surface = hover_details.LayeredSurface()
+            for height in (400, 380, 400, 400):
+                surface.present(1, Image.new("RGBA", (448, height)), 10, 20)
+            surface.move(1, 10, 18, 128)
+            self.assertEqual(created, [100])
+            surface.present(1, Image.new("RGBA", (448, 520)), 10, 20)    # taller: one new bitmap
+            self.assertEqual(created, [100, 101])
+            delete.assert_called_once_with(100)
+            surface.close()
+        self.assertEqual(update.call_count, 6)
+        self.assertEqual(select.call_args_list[-1], call(5, 7))          # original bitmap restored
+        delete_dc.assert_called_once_with(5)

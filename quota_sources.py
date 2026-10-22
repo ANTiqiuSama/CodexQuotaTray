@@ -14,7 +14,7 @@ from typing import Any
 
 import providers
 import cli_quota
-from cli_usage import CLAUDE_ARGS, CLAUDE_PROBE, parse_claude_usage, parse_grok_usage, run_agy_usage, run_temporary_usage
+from cli_usage import run_agy_usage
 
 
 CACHE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "CodexQuotaTray" / "state.json"
