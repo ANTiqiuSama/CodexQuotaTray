@@ -417,6 +417,10 @@ class AgentNotes:
             schedule = match_schedule(note, schedules)
             if schedule and not live:
                 continue
+            if not live and not (note.prompt or note.title or note.request or action or note.parent):
+                # A session that only started and ended (the tray's own Grok /usage
+                # read every 30 min, a CLI opened and closed) is not a task.
+                continue
             result.append({
                 "key": key, "provider": provider, "source": source, "model": str(info.get("model") or ""),
                 "title": note.prompt or note.title or "", "thread_title": note.title, "request": note.request or note.title,

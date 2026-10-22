@@ -89,6 +89,18 @@ class NotesTests(unittest.TestCase):
         self.assertEqual([(item["key"], item["live"], item["doing"]) for item in later if item["key"] == "agent-1"], [("agent-1", False, "刚完成")])
         self.assertEqual(notes.export({}, context, {}, 101 + agent_tasks.RECENT_SECONDS + 5), [])
 
+    def test_grok_session_that_only_started_is_not_a_bubble(self):
+        notes = AgentNotes()
+        start = {"timestamp": stamp(100), "params": {"update": {"sessionUpdate": "hook_execution", "event_name": "session_start"}}}
+        context = {key: {"source": "Grok CLI", "model": "grok"} for key in ("probe", "real")}
+        notes.grok("probe", start)                          # the tray's own /usage read
+        notes.grok("real", start)
+        notes.grok("real", {"timestamp": stamp(101), "params": {"update": {"sessionUpdate": "user_message_chunk",
+                                                                          "content": {"type": "text", "text": "修复图表配色"}}}})
+        notes.grok("real", {"timestamp": stamp(102), "params": {"update": {"sessionUpdate": "agent_message_chunk"}}})
+        keys = [item["key"] for item in notes.export({}, context, {}, 110, lambda model: "grok")]
+        self.assertEqual(keys, ["real"])
+
     def test_grok_prompt_chunks_are_joined(self):
         notes = AgentNotes()
         for text in ("修复 Grok ", "重置时间解析"):

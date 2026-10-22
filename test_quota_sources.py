@@ -131,7 +131,8 @@ class QuotaTests(unittest.TestCase):
             "codex", "Codex", None, "read failed"
         )
         try:
-            result = quota_sources.collect_all({"codex": old})["codex"]
+            # Only Codex: collect_all would also start the real Grok/Claude CLIs.
+            result = quota_sources.collect(["codex"], {"codex": old})["codex"]
         finally:
             quota_sources.get_codex_quota = original_codex
         self.assertEqual(result.remaining_percent, 42)
