@@ -409,6 +409,72 @@ class CodexLocalLimitTests(unittest.TestCase):
 
 
 class AgentPanelTests(unittest.TestCase):
+    def test_burn_chart_shows_every_window_being_consumed(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = 1_800_000_000.0
+        history = QuotaHistory(Path(self.folder.name) / "burn.json")
+        five_reset, week_reset = int(now + 2 * 3600), int(now + 4 * 86400)
+        for index in range(13):                          # one reading every 10 minutes for 2 hours
+            at = now - 7200 + index * 600
+            history.add("codex", at, 10 + index, five_reset)                 # 5 h: slow, 78 % left
+            history.add("codex:secondary", at, 60 + 2.5 * index, week_reset)  # weekly: fast, 10 % left
+        snapshot = QuotaSnapshot("codex", "Codex", 300, 22, 78, five_reset, now, False, None, 10080, 90, 10, week_reset)
+        self.tray.snapshots["codex"], self.tray.history = snapshot, history
+        chart = self.tray.burn_chart("codex", now)
+        self.assertEqual([(s.label, s.slot) for s in chart.series], [("5 小时", 0), ("每周", 1)])   # header column order
+        weekly = chart.series[1]
+        self.assertAlmostEqual(weekly.points[-1][1], 10, delta=0.01)
+        self.assertAlmostEqual(weekly.rate, 15.0, delta=0.5)                  # 2.5 % per 10 min
+        self.assertLessEqual(chart.start, chart.series[0].points[0][0])
+        self.assertGreater(chart.end, now)                                   # room for the projection
+        self.assertLess(chart.end, week_reset)                               # not squeezed into a week-long axis
+        self.assertIsNotNone(agent_panel.burn_points(weekly, chart)[2])
+        self.tray.history = None
+        self.assertIsNone(self.tray.burn_chart("codex", now))
+
+    def test_gemini_pools_in_use_share_the_chart_and_an_idle_one_stays_out(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = 1_800_000_000.0
+        history = QuotaHistory(Path(self.folder.name) / "pools.json")
+        reset = int(now + 3 * 86400)
+        for index in range(13):
+            at = now - 7200 + index * 600
+            pools = [{"key": "argon", "label": "Argon", "used_percent": 50 + 2 * index, "remaining_percent": 50 - 2 * index,
+                      "resets_at": reset, "window_minutes": 10080},
+                     {"key": "claude_gpt", "label": "Claude/GPT", "used_percent": 20.0, "remaining_percent": 80.0,
+                      "resets_at": reset, "window_minutes": 10080},
+                     {"key": "gemini", "label": "Gemini", "used_percent": 10 + index, "remaining_percent": 90 - index,
+                      "resets_at": reset, "window_minutes": 10080}]
+            snapshot = QuotaSnapshot("gemini", "Gemini", 10080, pools[0]["used_percent"], pools[0]["remaining_percent"], reset,
+                                     at, False, None, pools=pools)
+            history.record(snapshot)
+        self.tray.snapshots["gemini"], self.tray.history = snapshot, history
+        chart = self.tray.burn_chart("gemini", now)
+        self.assertEqual([(s.label, s.slot) for s in chart.series], [("Argon", 0), ("Gemini", 2)])
+        self.assertEqual([round(s.points[-1][1]) for s in chart.series], [26, 78])
+        model = self.tray.panel("gemini")
+        self.assertEqual([q[0] for q in model.quota], ["Argon", "Claude/GPT", "Gemini"])
+        self.assertEqual(len(model.burn.series), 2)
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0.0)
+        self.assertIsNotNone(scene.render(1.25))
+
+    def test_idle_windows_show_only_the_most_urgent(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = 1_800_000_000.0
+        history = QuotaHistory(Path(self.folder.name) / "idle.json")
+        reset = int(now + 3600)
+        for index in range(13):
+            history.add("codex", now - 7200 + index * 600, 30, reset)
+            history.add("codex:secondary", now - 7200 + index * 600, 95, reset + 86400)
+        self.tray.snapshots["codex"] = QuotaSnapshot("codex", "Codex", 300, 30, 70, reset, now, False, None, 10080, 95, 5, reset + 86400)
+        self.tray.history = history
+        chart = self.tray.burn_chart("codex", now)
+        self.assertEqual([s.label for s in chart.series], ["每周"])          # lower remaining wins among idle windows
+
     def test_mimo_today_stat_uses_current_cache_and_never_yesterdays_total(self):
         from datetime import datetime
         snapshot = tray_app.placeholder("mimo")

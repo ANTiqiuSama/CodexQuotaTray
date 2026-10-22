@@ -18,6 +18,7 @@ from PIL import Image
 
 import agent_panel
 import agent_tasks
+import forecast as forecast_module
 from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
 from icon_art import live_icon, quota_icon
@@ -312,6 +313,75 @@ class QuotaTray:
         text, _ = self.headline_forecast(provider)
         return f"预测：{text}" if text else ""
 
+    CHART_VIEW_MAX = 8 * 86400       # Longer windows (MiMo's year): only the last 8 days of readings.
+    CHART_POINTS = 160
+    RUNNING_TONES = ("danger", "warn", "ok")     # forecast tones of a window that is being consumed
+
+    def quota_windows(self, provider: str) -> list[tuple]:
+        """(label, remaining, resets_at, window minutes, history names) in the
+        order of the panel's header columns, so a line and its bar share a slot."""
+        snapshot = self.snapshots[provider]
+        if provider == "mimo":
+            return [("套餐额度", snapshot.display_remaining, snapshot.resets_at, snapshot.window_minutes, (provider,))]
+        if snapshot.pools and len(snapshot.pools) > 1:
+            return [(pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"), pool.get("resets_at"),
+                     pool.get("window_minutes"), (f"{provider}:pool:{pool.get('key')}",) + ((provider,) if index == 0 else ()))
+                    for index, pool in enumerate(snapshot.pools[:3])]
+        windows = [(window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent, snapshot.resets_at,
+                    snapshot.window_minutes, (provider,))]
+        if snapshot.secondary_window_minutes or snapshot.secondary_remaining_percent is not None:
+            windows.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent,
+                            snapshot.secondary_resets_at, snapshot.secondary_window_minutes, (provider + ":secondary",)))
+        return windows
+
+    def burn_chart(self, provider: str, now: float) -> "agent_panel.BurnChart | None":
+        """Every quota window currently being consumed (Gemini's pools, Codex's
+        5 h and weekly), or the most urgent one when none is, as remaining % over time."""
+        snapshot = self.snapshots.get(provider)
+        if snapshot is None or self.history is None:
+            return None
+        rank = {"danger": 0, "warn": 1, "ok": 2, "idle": 3, "unknown": 4}
+        candidates = []
+        for slot, (label, remaining, resets_at, minutes, names) in enumerate(self.quota_windows(provider)):
+            if remaining is None:
+                continue
+            # A new pool series starts empty; the first pool falls back to the provider's older series.
+            samples = max((forecast_module.current_window(self.history.samples(name), resets_at) for name in names), key=len)
+            outlook = forecast_module.forecast(samples, now, remaining, resets_at)
+            rate = outlook.rate_per_hour
+            if provider == "mimo":
+                view = mimo_tracker().view(now)
+                rate = view.pace_daily / view.total * 100 / 24 if view.pace_daily and view.total else rate
+            floor = max(resets_at - minutes * 60 if resets_at and minutes else 0, now - self.CHART_VIEW_MAX)
+            points = [(s.at, 100.0 - s.used) for s in samples if floor <= s.at <= now]
+            updated = snapshot.updated_at
+            if not points or (updated and points[-1][0] + 1 < updated <= now):
+                points.append((float(min(now, updated or now)), float(remaining)))
+            if len(points) > self.CHART_POINTS:
+                stride = len(points) / self.CHART_POINTS
+                points = [points[int(i * stride)] for i in range(self.CHART_POINTS - 1)] + [points[-1]]
+            series = agent_panel.BurnSeries(label, slot, tuple((round(t, 1), round(r, 2)) for t, r in points),
+                                            None if rate is None else round(rate, 3), float(resets_at) if resets_at else None)
+            candidates.append((rank[outlook.tone], remaining, series, outlook))
+        if not candidates:
+            return None
+        running = [c for c in candidates if c[3].tone in self.RUNNING_TONES and (c[2].rate or 0) > 0]
+        chosen = sorted(running, key=lambda c: c[2].slot) if len(running) > 1 else [min(candidates, key=lambda c: c[:2])]
+        series = tuple(c[2] for c in chosen)
+        # The view starts at the earliest reading shown and runs a little past
+        # now (past the first projected exhaustion), at most to a near reset: a
+        # week-long axis with two days of data squeezed the lines into a corner.
+        back = max(3600.0, now - min(s.points[0][0] for s in series))
+        start, end = now - back, now + 0.6 * back
+        exhausts = [c[3].exhausts_at for c in chosen if c[3].exhausts_at and (not c[2].reset_at or c[3].exhausts_at < c[2].reset_at)]
+        if exhausts:
+            end = max(end, min(exhausts) + 0.15 * back)
+        near = [s.reset_at for s in series if s.reset_at and (s.reset_at <= end or s.reset_at - now <= 1.2 * back)]
+        if near:
+            end = max(now + 0.2 * back, max(near))          # a reset is near: show it
+        # Quantised "now": the cached chart is redrawn every 30 s, not every frame.
+        return agent_panel.BurnChart(float(start), float(end), float(round(now / 30) * 30), series)
+
     def hover_text(self, provider: str) -> str:
         snapshot = self.snapshots[provider]
         data = self.performance["providers"][provider]
@@ -466,7 +536,8 @@ class QuotaTray:
                           else mimo_tracker().view(now).today_used)
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
-                                      tone, banner, forecast, forecast_tone, today_used, self.upcoming_resets(now))
+                                      tone, banner, forecast, forecast_tone, today_used, self.upcoming_resets(now),
+                                      self.burn_chart(provider, now))
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)

@@ -170,6 +170,11 @@ class QuotaHistory:
         if getattr(snapshot, "secondary_used_percent", None) is not None:
             changed |= self.add(f"{snapshot.provider}:secondary", snapshot.updated_at,
                                 snapshot.secondary_used_percent, snapshot.secondary_resets_at)
+        for pool in getattr(snapshot, "pools", None) or []:
+            # Independent model pools (Antigravity) each get their own series for the chart.
+            if pool.get("key") and pool.get("used_percent") is not None:
+                changed |= self.add(f"{snapshot.provider}:pool:{pool['key']}", snapshot.updated_at,
+                                    pool["used_percent"], pool.get("resets_at"))
         return changed
 
     def samples(self, name: str) -> list[Sample]:

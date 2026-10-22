@@ -330,12 +330,15 @@ def panel(*bubbles):
 
 
 class SceneTests(unittest.TestCase):
-    def test_countdown_cards_precede_bubbles_and_footer_follows_them(self):
+    def test_burn_chart_sits_between_bubbles_and_footer(self):
         model = panel(bubble("a"), bubble("b"))
         scene = agent_panel.Scene()
         scene.set_model(model, 0)
-        self.assertLess(agent_panel.reset_top(model) + 42, agent_panel.field_top(model) - 6)
-        self.assertGreater(agent_panel.footer_middle(model, scene.field.value), agent_panel.field_top(model) + scene.field.value)
+        field = scene.field.value
+        self.assertGreater(agent_panel.chart_top(model, field), agent_panel.field_top(model) + field)
+        self.assertLess(agent_panel.chart_top(model, field) + agent_panel.CHART_H, agent_panel.resets_middle(model, field) - 5)
+        self.assertGreater(agent_panel.footer_middle(model, field) - 8, agent_panel.resets_middle(model, field) + 5)
+        self.assertLess(agent_panel.footer_middle(model, field) + 10, agent_panel.panel_height(model, field))
         for scale in (1, 1.25, 1.5):
             self.assertIsNotNone(scene.render(scale))
 
@@ -527,6 +530,49 @@ class SteadyBubbleTests(unittest.TestCase):
         self.run_frames(scene, moment, 120)
         self.assertEqual(scene.order[:3], ["a", "b", "c"])
         self.assertEqual({key: (round(b.x), round(b.y)) for key, b in scene.bodies.items()}, before)
+
+    def test_burn_projection_stops_at_zero_or_its_reset(self):
+        Series, Chart = agent_panel.BurnSeries, agent_panel.BurnChart
+        fast = Series("5 小时", 0, ((0, 100), (1800, 80), (3600, 60)), 40.0, 5 * 3600)
+        chart = Chart(0, 5 * 3600, 3600, (fast,))
+        history, projection, exhausts = agent_panel.burn_points(fast, chart)
+        self.assertEqual(history[-1], (3600, 60))
+        self.assertAlmostEqual(exhausts, 3600 + 1.5 * 3600)
+        self.assertEqual(projection[-1], (exhausts, 0.0))
+        slow = Series("Gemini", 1, ((0, 100), (3600, 95)), 5.0, 2 * 3600)          # resets before it runs out
+        _, projection, exhausts = agent_panel.burn_points(slow, Chart(0, 5 * 3600, 3600, (slow,)))
+        self.assertIsNone(exhausts)
+        self.assertEqual(projection[-1][0], 2 * 3600)
+        for chart in (chart, Chart(0, 5 * 3600, 3600, (fast, slow)), None, Chart(0, 10, 5, (Series("x", 0, ((5, 50),)),))):
+            for scale in (1.0, 1.5):
+                colors = tuple(agent_panel.accent("G") for _ in (chart.series if chart else ()))
+                sprite = agent_panel.burn_sprite(chart, colors, scale)
+                self.assertEqual(sprite.size, (round(agent_panel.CHART_WIDTH * scale), round(agent_panel.CHART_H * scale)))
+
+    def test_lines_use_the_colour_of_their_header_bar(self):
+        shade = agent_panel.quota_shade
+        pools = {shade("G", slot, 40.0, True) for slot in range(3)}
+        self.assertEqual(len(pools), 3)                                   # Gemini pools stay apart
+        self.assertEqual(shade("G", 0, 40.0, True), agent_panel.accent("G"))
+        self.assertEqual(shade("C", 1, 11.0, False), agent_panel.ring_color(11.0, "C"))   # low Codex window: red, like its bar
+        model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),
+                                       0.0, (), "live")
+        self.assertTrue(agent_panel.pooled(model))
+        self.assertFalse(agent_panel.pooled(panel()))
+
+    def test_chart_draws_in_on_opening_then_rests(self):
+        chart = agent_panel.BurnChart(0, 5 * 3600, 3600, (agent_panel.BurnSeries("5 小时", 0, ((0, 100), (3600, 60)), 40.0, 5 * 3600),))
+        model = agent_panel.PanelModel("codex", "C", "Codex", "空闲", (("5 小时", 60.0),), 0.0,
+                                       (agent_panel.BubbleModel("a", "任务", "完成", "C", False),), "idle", burn=chart)
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0.0)
+        moment = self.run_frames(scene, 0.0, 10)
+        self.assertLess(scene.chart_progress, 1)
+        self.assertTrue(scene.animating)
+        self.assertIsNotNone(scene.render(1.25))
+        self.run_frames(scene, moment, 240)
+        self.assertEqual(scene.chart_progress, 1)
+        self.assertFalse(scene.animating)
 
     def test_footprint_does_not_depend_on_caption(self):
         self.assertEqual(bubble("a", doing="思考中").half_width, bubble("a", doing="编辑 a_very_long_file_name.py").half_width)

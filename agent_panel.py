@@ -19,7 +19,7 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from icon_art import AMBER, CLAY, RESET_BLUE, UNIFORM_LETTERS, accent, ring_color
+from icon_art import AMBER, CLAY, IVORY, RESET_BLUE, UNIFORM_LETTERS, accent, ring_color
 
 WIDTH = 420
 PAD = 18
@@ -69,6 +69,41 @@ class ResetColumn:
 
 
 @dataclass(frozen=True)
+class BurnSeries:
+    """Remaining quota of one window over time. `slot` is the header column
+    showing the same window, so both use one colour. `rate` is the pace in %
+    per hour (the forecast's slope)."""
+    label: str
+    slot: int
+    points: tuple[tuple[float, float], ...]     # (time, remaining %), oldest first
+    rate: float | None = None
+    reset_at: float | None = None
+
+
+@dataclass(frozen=True)
+class BurnChart:
+    start: float
+    end: float
+    now: float
+    series: tuple[BurnSeries, ...]
+
+
+def quota_shade(letter: str, slot: int, value: float | None, pooled: bool) -> tuple[int, int, int, int]:
+    """Colour of one quota window: its header bar and its chart line use this.
+    Sources drawn in one colour (Gemini) get one shade per pool when they show
+    several, so the lines stay apart and still match their bars."""
+    if pooled and letter in UNIFORM_LETTERS and value is not None:
+        base = accent(letter)
+        mix, toward = ((0.0, IVORY), (0.42, IVORY), (0.38, (78, 70, 150, 255)))[slot % 3]
+        return tuple(round(a + (b - a) * mix) for a, b in zip(base[:3], toward[:3])) + (255,)
+    return ring_color(value, letter)
+
+
+def pooled(model: "PanelModel") -> bool:
+    return len(model.quota) > 1 and model.provider not in ("codex", "claude")
+
+
+@dataclass(frozen=True)
 class PanelModel:
     provider: str
     letter: str
@@ -83,11 +118,12 @@ class PanelModel:
     forecast_tone: str = "unknown"              # danger | warn | ok | idle | unknown
     today_used: float | None = None              # MiMo Credits used today
     upcoming_resets: tuple[ResetColumn, ...] = ()
+    burn: BurnChart | None = None
 
     @property
     def header(self) -> tuple:
-        """Static part of the panel (cached background). Quota figures, bars and
-        TPS are animated per frame; upcoming reset columns are cached here."""
+        """Static part of the panel (cached background). Quota figures, bars,
+        TPS and the burn chart are drawn per frame; the reset line is cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], "") for item in self.quota[:3]), self.banner,
                 (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3])
@@ -95,7 +131,10 @@ class PanelModel:
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-RESET_HEIGHT = 54           # Countdown cards above the task field, with a 12 px gap.
+CHART = 88                  # Burn chart under the task field, plus the upcoming-resets line.
+CHART_TOP = 10              # Gap between the task field and the chart.
+CHART_H = 64                # Chart sprite: label row and plot.
+CHART_LABEL = 15            # Label row inside the sprite.
 GEAR_RADIUS = 7.5
 GEAR_HIT = 17.0
 
@@ -107,8 +146,16 @@ def meter_columns(count: int) -> list[tuple[float, float]]:
     return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in range(count + 1)]
 
 
+def chart_top(model, field_h: float) -> float:
+    return field_top(model) + field_h + CHART_TOP
+
+
+def resets_middle(model, field_h: float) -> float:
+    return chart_top(model, field_h) + CHART_H + 10
+
+
 def footer_middle(model, field_h: float) -> float:
-    return field_top(model) + field_h + 32
+    return field_top(model) + field_h + CHART + 30
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
@@ -123,11 +170,7 @@ def field_top(model: PanelModel | None) -> float:
     if model is None:
         return FIELD_TOP
     # Reserve the subtitle row (e.g. MiMo Credits) to keep every source the same height.
-    return FIELD_TOP + 6 + header_offset(model) + RESET_HEIGHT
-
-
-def reset_top(model: PanelModel) -> float:
-    return FIELD_TOP + header_offset(model)
+    return FIELD_TOP + 6 + header_offset(model)
 
 
 def pack(bubbles, top: float = FIELD_TOP) -> tuple[dict[str, tuple[float, float]], float]:
@@ -157,7 +200,7 @@ def field_height(bubbles) -> float:
 
 
 def panel_height(model: PanelModel, field: float) -> float:
-    return field_top(model) + field + FOOTER + 8
+    return field_top(model) + field + CHART + FOOTER + 8
 
 
 # ----- motion helpers ------------------------------------------------------------
@@ -517,7 +560,7 @@ class Scene:
     def animating(self) -> bool:
         """Something is moving: draw every frame until it rests."""
         return bool(self.dragging or self.ghosts or self.ripples or not self.field.settled or not self.rate.settled
-                    or not self.gear.settled or not self.today_usage.settled
+                    or not self.gear.settled or not self.today_usage.settled or self.chart_progress < 1
                     or any(not spring.settled for spring in self.meters)
                     or any(not spring.settled for body in self.bodies.values() for spring in body.springs))
 
@@ -543,6 +586,7 @@ class Scene:
             return origin + value * scale
 
         self._header(frame, model, field_h, scale, at)
+        self._chart(frame, model, field_h, scale, at)
         if not model.bubbles:
             blit(frame, empty_note(scale), at(WIDTH / 2), at(field_top(model) + field_h / 2))
         cx, cy = gear_center(model, field_h)
@@ -606,14 +650,14 @@ class Scene:
         draw = ImageDraw.Draw(frame)
         meter_top = METER_TOP + header_offset(model)
         columns = meter_columns(len(self.meters) + (model.provider == "mimo"))
-        for (x, end), spring, item in zip(columns, self.meters, model.quota[:3]):
+        for slot, ((x, end), spring, item) in enumerate(zip(columns, self.meters, model.quota[:3])):
             value = item[1]
             shade = TEXT if value is None or value >= 50 or model.letter in UNIFORM_LETTERS else ring_color(value, model.letter)
             shown = None if value is None else spring.value
             blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
                                   shade, shade, scale), at(x), at(meter_top + 38))
             if shown and shown > 0.3:
-                fill = ring_color(value, model.letter)
+                fill = quota_shade(model.letter, slot, value, pooled(model))
                 draw.rounded_rectangle((round(at(x)), round(at(meter_top + 45)),
                                         round(at(x + max(4.0, (end - x) * min(100.0, shown) / 100))), round(at(meter_top + 49))),
                                        radius=max(1, round(2 * scale)), fill=fill)
@@ -641,6 +685,29 @@ class Scene:
 
     def time_since(self, moment: float) -> float:
         return max(0.0, (self.last or moment) - moment)
+
+    CHART_DELAY, CHART_REVEAL = 0.12, 0.5
+
+    @property
+    def chart_progress(self) -> float:
+        return ease_out_cubic((self.time_since(self.opened) - self.CHART_DELAY) / self.CHART_REVEAL)
+
+    def _chart(self, frame, model, field_h, scale, at):
+        """Burn chart below the task field; the plot draws itself left to right on opening."""
+        chart = model.burn
+        colors = tuple(quota_shade(model.letter, s.slot, s.points[-1][1] if s.points else None, pooled(model))
+                       for s in chart.series) if chart else ()
+        sprite = burn_sprite(chart, colors, scale)
+        left, top = round(at(PAD - 6)), round(at(chart_top(model, field_h)))
+        label = round(CHART_LABEL * scale)
+        progress = self.chart_progress
+        if progress >= 1:
+            frame.alpha_composite(sprite, (left, top))
+            return
+        frame.alpha_composite(sprite.crop((0, 0, sprite.width, label)), (left, top))
+        width = round(sprite.width * progress)
+        if width > 0:
+            frame.alpha_composite(sprite.crop((0, label, width, sprite.height)), (left, top + label))
 
     def _bubble(self, frame, m: BubbleModel, x, y, r, scale, alpha, label=True, expanded=False, crisp=False):
         layout = round(m.radius * scale)
@@ -880,6 +947,130 @@ def gear(radius: int, color: tuple) -> Image.Image:
 
 
 FORECAST_TONES = {"danger": CLAY, "warn": AMBER, "ok": SECONDARY_TEXT}
+CHART_WIDTH = WIDTH - 2 * PAD + 12          # Same outer edges as the task field.
+
+
+def _clock(moment: float, now: float) -> str:
+    """"14:30" within the next/last day, otherwise "10-27 14:30"."""
+    from datetime import datetime
+    stamp = datetime.fromtimestamp(moment)
+    same_day = abs(moment - now) < 20 * 3600 and stamp.date() == datetime.fromtimestamp(now).date()
+    return stamp.strftime("%H:%M" if same_day else "%m-%d %H:%M")
+
+
+def burn_points(series: BurnSeries, chart: BurnChart) -> tuple[list[tuple[float, float]], list[tuple[float, float]], float | None]:
+    """(history, projection, exhausts_at) of one series in data space. The
+    projection runs from the last reading at `rate` until the quota reaches
+    zero, the window resets, or the view ends."""
+    history = [(t, max(0.0, min(100.0, r))) for t, r in series.points if chart.start <= t <= chart.end]
+    if not history or not series.rate or series.rate <= 0:
+        return history, [], None
+    t0, r0 = history[-1]
+    t0 = max(t0, min(chart.now, chart.end))
+    exhausts = t0 + r0 / series.rate * 3600
+    limit = min(chart.end, series.reset_at or chart.end)
+    stop = min(limit, exhausts)
+    seen = exhausts if exhausts <= limit else None
+    if stop <= t0:
+        return history, [], seen
+    return history, [(t0, r0), (stop, max(0.0, r0 - series.rate * (stop - t0) / 3600))], seen
+
+
+def _dashed(pen, start, end, color, width, dash, gap):
+    (x0, y0), (x1, y1) = start, end
+    length = math.hypot(x1 - x0, y1 - y0)
+    position = 0.0
+    while position < length:
+        a, b = position / length, min(length, position + dash) / length
+        pen.line((x0 + (x1 - x0) * a, y0 + (y1 - y0) * a, x0 + (x1 - x0) * b, y0 + (y1 - y0) * b), fill=color, width=width)
+        position += dash + gap
+
+
+@lru_cache(maxsize=8)
+def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.Image:
+    """Burn-down chart: remaining % of each quota window in use, each in the
+    colour of its header bar, the forecast as a dashed line of the same colour,
+    resets as blue markers."""
+    px = lambda value: round(value * scale)  # noqa: E731
+    width, height = px(CHART_WIDTH), px(CHART_H)
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    small = ui_font(px(10))
+    if chart is None or not chart.series:
+        draw.text((width / 2, height / 2), "暂无可绘制的额度窗口", font=small, fill=MUTED_TEXT, anchor="mm")
+        return image
+    span = max(1.0, chart.end - chart.start)
+    # Label row: a legend (one entry per line) and the next reset in view.
+    x = px(10)
+    single = len(chart.series) == 1
+    for series, color in zip(chart.series, colors):
+        text = f"{series.label} · 剩余额度" if single else series.label
+        if not single:
+            draw.ellipse((x, px(CHART_LABEL / 2 + 1) - px(2.5), x + px(5), px(CHART_LABEL / 2 + 1) + px(2.5)), fill=color)
+            x += px(8)
+        draw.text((x, px(CHART_LABEL / 2 + 1)), text, font=small, fill=MUTED_TEXT if single else color, anchor="lm")
+        x += draw.textlength(text, font=small) + px(12)
+    resets = sorted(s.reset_at for s in chart.series if s.reset_at)
+    drawn = [(series, color, *burn_points(series, chart)) for series, color in zip(chart.series, colors)]
+    exhausting = [(exhausts, series, color) for series, color, _, _, exhausts in drawn if exhausts is not None]
+    first = min(exhausting, key=lambda item: item[0]) if exhausting else None
+    row = px(CHART_LABEL / 2 + 1)
+    if first is not None:
+        # The earliest exhaustion is named in the label row, where no line runs;
+        # the reset stays visible as its blue marker.
+        tag = ("" if single else first[1].label + " ") + f"约 {_clock(first[0], chart.now)} 用完"
+        draw.text((width - px(10), row), tag, font=small, fill=first[2], anchor="rm")
+    elif resets:
+        prefix = "重置" if single else "最近重置"
+        draw.text((width - px(10), row), f"{prefix} {_clock(resets[0], chart.now)}", font=small, fill=MUTED_TEXT, anchor="rm")
+
+    k = SUPERSAMPLE
+    left, top, right, bottom = 10, CHART_LABEL + 4, CHART_WIDTH - 10, CHART_H - 6
+    big = Image.new("RGBA", (width * k, height * k), (0, 0, 0, 0))
+    pen = ImageDraw.Draw(big)
+    X = lambda t: (left + (right - left) * (t - chart.start) / span) * scale * k  # noqa: E731
+    Y = lambda r: (bottom - (bottom - top) * r / 100) * scale * k  # noqa: E731
+    hair = max(1, round(scale * k))
+    for level in (0, 50, 100):          # baseline, half, full
+        pen.line((X(chart.start), Y(level), X(chart.end), Y(level)), fill=(240, 238, 230, 34 if level == 0 else 16), width=hair)
+    for reset in set(resets):
+        if chart.start <= reset <= chart.end:
+            for y in range(round(Y(100)), round(Y(0)), 4 * k):
+                pen.line((X(reset), y, X(reset), min(Y(0), y + 2 * k)), fill=_with_alpha(RESET_BLUE, 150), width=hair)
+    # Fills first (lighter when several overlap), then every line above all fills.
+    for series, color, history, _, _ in drawn:
+        if len(history) >= 2:
+            line = [(X(t), Y(r)) for t, r in history]
+            area = Image.new("L", big.size, 0)
+            ImageDraw.Draw(area).polygon(line + [(line[-1][0], Y(0)), (line[0][0], Y(0))], fill=46 if single else 22)
+            fill = Image.new("RGBA", big.size, tuple(color[:3]) + (0,))
+            fill.putalpha(area)
+            big.alpha_composite(fill)
+    for series, color, history, projection, _ in drawn:
+        if len(history) >= 2:
+            pen.line([(X(t), Y(r)) for t, r in history], fill=color, width=max(2, round(1.6 * scale * k)), joint="curve")
+        if projection:
+            _dashed(pen, *[(X(t), Y(r)) for t, r in projection], _with_alpha(color, 200),
+                    max(2, round(1.3 * scale * k)), 5 * scale * k, 4 * scale * k)
+    image.alpha_composite(big.resize((width, height), Image.LANCZOS))
+    draw = ImageDraw.Draw(image)
+    if all(len(history) < 2 for _, _, history, _, _ in drawn):
+        draw.text((width / 2, px((top + bottom) / 2)), "正在积累用量记录", font=small, fill=MUTED_TEXT, anchor="mm")
+    base, ceiling = Y(0) / k, Y(100) / k
+    for series, color, history, _, exhausts in drawn:
+        if history:
+            cx, cy = X(history[-1][0]) / k, Y(history[-1][1]) / k
+            r = px(3)
+            draw.ellipse((cx - r - px(1.5), cy - r - px(1.5), cx + r + px(1.5), cy + r + px(1.5)), fill=(36, 35, 32, 255))
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
+        if exhausts is not None:
+            ex = X(exhausts) / k
+            draw.ellipse((ex - px(3), base - px(3), ex + px(3), base + px(3)), fill=color)
+    if first is not None:
+        ex, color = X(first[0]) / k, first[2]
+        for y in range(round(ceiling), round(base), max(2, px(4))):
+            draw.line((ex, y, ex, min(base, y + px(2))), fill=_with_alpha(color, 140), width=max(1, round(scale)))
+    return image
 
 
 def forecast_text(text: str, limit: float, face, probe) -> str:
@@ -1018,23 +1209,28 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
         draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=ui_font(px(11), "bold"), fill=RESET_BLUE, anchor="lm")
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
-    reset_y = reset_top(model)
-    gap = 8
-    column_left = PAD - 6   # Same outer edges as the bubble field above.
-    column_w = (WIDTH - 2 * column_left - 2 * gap) / 3
-    for index in range(3):
-        x = column_left + index * (column_w + gap)
-        y = reset_y
-        draw.rounded_rectangle((px(x), px(y), px(x + column_w), px(y + 42)), radius=px(8),
-                               fill=(240, 238, 230, 8), outline=(240, 238, 230, 18), width=max(1, round(s)))
-        if index >= len(resets):
-            draw.text((px(x + column_w / 2), px(y + 21)), "暂无已知重置", font=ui_font(px(10)), fill=MUTED_TEXT, anchor="mm")
-            continue
-        item = resets[index]
-        face = ui_font(px(11), "bold")
-        name = forecast_text(item.name, px(column_w - 16), face, draw)
-        draw.text((px(x + 8), px(y + 6)), name, font=face, fill=accent(item.letter), anchor="lt")
-        draw.text((px(x + 8), px(y + 25)), item.countdown, font=ui_font(px(10)), fill=TEXT, anchor="lt")
+    chart_y = chart_top(model, field_h)
+    draw.rounded_rectangle((px(PAD - 6), px(chart_y - 4), px(right + 6), px(chart_y + CHART_H + 2)), radius=px(10),
+                           fill=(240, 238, 230, 6), outline=(240, 238, 230, 12), width=max(1, round(s)))
+    # Upcoming resets of every source on one line: coloured dot, name, countdown.
+    line_y, x = resets_middle(model, field_h), PAD
+    small, bold = ui_font(px(10)), ui_font(px(10), "bold")
+    if not resets:
+        draw.text((px(x), px(line_y)), "暂无已知重置", font=small, fill=MUTED_TEXT, anchor="lm")
+    for index, item in enumerate(resets):
+        room = right - x
+        if room < 40:
+            break
+        name, when = item.name, " " + item.countdown
+        need = (draw.textlength(name, font=bold) + draw.textlength(when, font=small)) / s + 10
+        if need > room:
+            name = forecast_text(name, px(room - 10) - draw.textlength(when, font=small), bold, draw)
+        draw.ellipse((px(x), px(line_y - 2.5), px(x + 5), px(line_y + 2.5)), fill=accent(item.letter))
+        x += 8
+        draw.text((px(x), px(line_y)), name, font=bold, fill=accent(item.letter), anchor="lm")
+        x += draw.textlength(name, font=bold) / s
+        draw.text((px(x), px(line_y)), when, font=small, fill=SECONDARY_TEXT, anchor="lm")
+        x += draw.textlength(when, font=small) / s + 14
     middle = footer_middle(model, field_h)
     tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
     _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))
