@@ -41,6 +41,10 @@ def _on_disk_name(path: str) -> str:
     return path
 
 POLL_SECONDS = 2.5
+QUIET_POLL_SECONDS = 10.0   # herdr runs but has no agent panes
+IDLE_POLL_SECONDS = 30.0    # herdr installed but its server is not running / unreadable
+# Every poll starts a process (plus its job and pipe readers); polling an idle
+# or stopped herdr every 2.5 s was ~35 000 process launches a day for nothing.
 LOOKUP_SECONDS = 60.0       # how often to look for a newly installed herdr
 DONE_SECONDS = 20.0         # a pane that just finished keeps a "刚完成" bubble this long
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
@@ -102,6 +106,7 @@ class Herdr:
         self.runner = runner or process_jail.run
         self.rows: list[dict[str, Any]] = []
         self.polled_at = 0.0
+        self.interval = POLL_SECONDS
         self.looked_at = 0.0
         self.status = "未启用" if not enabled else "未发现"
         self.finished: dict[str, float] = {}       # pane -> when herdr last saw it working/blocked
@@ -126,7 +131,7 @@ class Herdr:
 
     def poll(self, now: float | None = None) -> list[dict[str, Any]]:
         now = now or time.time()
-        if not self.enabled or now - self.polled_at < POLL_SECONDS:
+        if not self.enabled or now - self.polled_at < self.interval:
             return self.rows
         self.polled_at = now
         exe = self._locate(now)
@@ -141,13 +146,14 @@ class Herdr:
             self.exe, self.rows, self.status = None, [], "未发现"
             return self.rows
         except (OSError, subprocess.SubprocessError):
-            self.rows, self.status = [], "读取失败"
+            self.rows, self.status, self.interval = [], "读取失败", IDLE_POLL_SECONDS
             return self.rows
         if result.returncode != 0:
-            self.rows, self.status = [], "服务未运行"    # installed, no server running
+            self.rows, self.status, self.interval = [], "服务未运行", IDLE_POLL_SECONDS    # installed, no server running
             return self.rows
         self.rows = parse_agents(result.stdout)
         self.status = "已接入"
+        self.interval = POLL_SECONDS if self.rows else QUIET_POLL_SECONDS
         return self.rows
 
     def working(self, provider: str, known: set) -> int:

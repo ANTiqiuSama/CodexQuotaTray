@@ -861,7 +861,11 @@ def login(interactive: bool = True, timeout: float = 600.0, raw: dict | None = N
             "--no-first-run", "--no-default-browser-check", "--disable-sync"]
     args += [f"--app={CONSOLE_URL}", "--window-size=1100,820"] if interactive else ["--headless=new", CONSOLE_URL]
     _log(f"start {'interactive' if interactive else 'headless'} {os.path.basename(browser)}")
-    process = subprocess.Popen(args, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if not interactive else 0)
+    # Edge/Chrome start GPU, network and renderer processes; run the whole tree
+    # in a job so a crashed or timed-out read cannot leave any of them behind
+    # (the headless renewal runs unattended).
+    import process_jail
+    process = process_jail.popen(args, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if not interactive else 0)
     socket_ = None
     deadline = time.monotonic() + (timeout if interactive else 45.0)
     last = ""
@@ -924,7 +928,8 @@ def login(interactive: bool = True, timeout: float = 600.0, raw: dict | None = N
         try:
             process.wait(timeout=5)
         except Exception:
-            process.kill()
+            pass
+        process_jail.stop(process)        # ends anything of the browser still running
 
 
 _browser_lock = threading.Lock()

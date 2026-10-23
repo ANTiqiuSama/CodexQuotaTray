@@ -419,6 +419,23 @@ class TpsTests(unittest.TestCase):
             self.monitor.discover(self.now + 31)
         self.assertEqual(scan.call_count, 2)
 
+    def test_old_events_keep_their_source_but_not_rates_and_session_maps_are_pruned(self):
+        from tps_sources import Observation, FORGET_SECONDS
+        self.monitor.add(Observation("old", "Claude Code", "a", "claude", "m", self.now - 7200, 500, 10.0, "b", True, 50.0), self.now)
+        self.monitor.add(Observation("new", "Codex", "s", "codex", "m", self.now - 5, 300, 3.0, "b", True, 100.0), self.now)
+        data = self.monitor.snapshot(self.now)["providers"]
+        self.assertEqual(["Claude Code"], data["claude"]["sources"])
+        self.assertEqual(0, data["claude"]["output_tokens_60"])
+        self.assertIsNone(data["claude"]["generation_tps"])
+        self.assertEqual(300, data["codex"]["output_tokens_60"])
+        self.assertEqual(100.0, data["codex"]["generation_tps"])
+        self.assertEqual(2, self.monitor.added_total)
+        self.monitor.claude_last_input["gone"] = self.now - FORGET_SECONDS - 10
+        self.monitor.grok_counters[("gone", "grok")] = 5
+        self.monitor._forget_idle(self.now)
+        self.assertNotIn("gone", self.monitor.claude_last_input)
+        self.assertNotIn(("gone", "grok"), self.monitor.grok_counters)
+
     def test_snapshot_does_not_persist_private_message_or_request_id(self):
         value = self.event(response="private-response-id")
         value["payload"]["response"] = "PRIVATE_PROMPT_CANARY"

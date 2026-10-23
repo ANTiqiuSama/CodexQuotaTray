@@ -1,5 +1,4 @@
 """Quota reads must never leave processes behind (they once accumulated by the hundreds)."""
-import json
 import subprocess
 import sys
 import tempfile

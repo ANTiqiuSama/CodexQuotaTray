@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import itertools
 import json
 import logging
 import logging.handlers
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,13 +72,31 @@ def pace_marker(snapshot: QuotaSnapshot, now: float | None = None) -> float | No
     return max(0.0, min(100.0, 100.0 * (ends - now) / (minutes * 60)))
 
 
+# The TPS loop asks for all five icons every second, almost always with the
+# same figures; drawing each one took ~3 ms. Cached images are shared, so they
+# must never be drawn on afterwards (pystray only serialises them).
+@lru_cache(maxsize=64)
+def _quota_icon(remaining, letter, stale, marker, reset_hint) -> Image.Image:
+    return quota_icon(remaining, letter, stale=stale, marker=marker, reset_hint=reset_hint)
+
+
+@lru_cache(maxsize=64)
+def _live_icon(tps, letter, reset_hint) -> Image.Image:
+    return live_icon(tps, letter, reset_hint=reset_hint)
+
+
+def _rounded(value, digits=1):
+    return None if value is None else round(float(value), digits)
+
+
 def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = False) -> Image.Image:
     # The ring follows the binding window (e.g. Codex weekly when it is lower).
-    return quota_icon(snapshot.display_remaining, letter, stale=snapshot.stale, marker=pace_marker(snapshot), reset_hint=reset_hint)
+    return _quota_icon(_rounded(snapshot.display_remaining), letter, bool(snapshot.stale),
+                       _rounded(pace_marker(snapshot)), bool(reset_hint))
 
 
 def make_tps_icon(performance: dict, letter: str, reset_hint: bool = False) -> Image.Image:
-    return live_icon(performance.get("display_tps", 0) or 0, letter, reset_hint=reset_hint)
+    return _live_icon(_rounded(performance.get("display_tps", 0) or 0), letter, bool(reset_hint))
 
 
 def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, reset_hint: bool = False) -> Image.Image:
@@ -264,6 +284,7 @@ class QuotaTray:
         self.saved_signature: str | None = None
         self.saved_at = 0.0
         self.mimo_view_at = 0.0
+        self.mimo_ingested = 0       # tps_monitor.added_total already handed to the MiMo ledger
         self.shown_order: list[str] = []
         self.reordered_at = 0.0
         self.reset_outlook = reset_watch.load(RESET_PATH) if reset_watch.ENABLED else None
@@ -726,7 +747,7 @@ class QuotaTray:
                                       reset_hint=provider == "codex" and self.reset_level() == "high")
             # Icon assignment always sends NIM_MODIFY, even for identical pixels.
             # Avoid needless Shell redraws; hover detail updates use a separate HWND.
-            if icon.icon != image:
+            if icon.icon is not image and icon.icon != image:
                 icon.icon = image
             icon.title = self.tooltip(provider)
 
@@ -1002,7 +1023,17 @@ class QuotaTray:
     def update_mimo_locally(self, now: float) -> None:
         """Fold new local MiMo token records into the Credits view (no network)."""
         tracker = mimo_tracker()
-        added = tracker.ledger.ingest(self.tps_monitor.events)
+        # Only the observations added since the last second; re-reading the
+        # whole day of events every second was a full pass for nothing.
+        events = self.tps_monitor.events
+        total = getattr(self.tps_monitor, "added_total", None)
+        if total is None:
+            fresh = events
+        else:
+            count = min(len(events), max(0, total - self.mimo_ingested))
+            fresh = list(itertools.islice(reversed(events), count))[::-1] if count else []
+            self.mimo_ingested = total
+        added = tracker.ledger.ingest(fresh) if fresh else 0
         tracker.ledger.save()
         if added or now - self.mimo_view_at >= 60:
             self.mimo_view_at = now

@@ -321,6 +321,34 @@ class IconArtTests(unittest.TestCase):
         self.assertEqual([tps_text(v) for v in (7.4, 143, 2500, 99999)], ["7", "143", "2k", "9k+"])
 
 
+class SteadyStateCostTests(unittest.TestCase):
+    def test_unchanged_icons_are_not_redrawn_every_second(self):
+        snapshot = QuotaSnapshot(provider="codex", label="Codex", window_minutes=300, used_percent=40, remaining_percent=60,
+                                 resets_at=None, updated_at=time.time(), stale=False, error=None)
+        idle = {"active_sessions": 0, "display_tps": None}
+        first = tray_app.make_display_icon(snapshot, "C", idle)
+        self.assertIs(first, tray_app.make_display_icon(snapshot, "C", idle))
+        live = {"active_sessions": 1, "display_tps": 85.04}
+        self.assertIs(tray_app.make_display_icon(snapshot, "C", live), tray_app.make_display_icon(snapshot, "C", dict(live, display_tps=85.01)))
+
+    def test_mimo_ledger_only_sees_new_observations(self):
+        from collections import deque
+        events = deque(SimpleNamespace(identity=str(i), provider="other") for i in range(5))
+        monitor = SimpleNamespace(events=events, added_total=5)
+        seen = []
+        ledger = SimpleNamespace(ingest=lambda items: seen.append([e.identity for e in items]) or 0, save=lambda: None)
+        tracker = SimpleNamespace(ledger=ledger, view=lambda now=None: None)
+        app = SimpleNamespace(tps_monitor=monitor, mimo_ingested=0, mimo_view_at=time.time(),
+                              snapshots={"mimo": SimpleNamespace(remaining_percent=None)})
+        with patch.object(tray_app, "mimo_tracker", return_value=tracker):
+            QuotaTray.update_mimo_locally(app, time.time())
+            events.append(SimpleNamespace(identity="5", provider="mimo"))
+            monitor.added_total = 6
+            QuotaTray.update_mimo_locally(app, time.time())
+            QuotaTray.update_mimo_locally(app, time.time())
+        self.assertEqual([[str(i) for i in range(5)], ["5"]], seen)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -777,6 +777,24 @@ class HerdrAndHelperTests(unittest.TestCase):
         self.assertEqual("服务未运行", herdr.status)
         self.assertEqual([], herdr_source.Herdr(enabled=False).poll(10.0))
 
+    def test_idle_or_stopped_herdr_is_polled_less_often(self):
+        import herdr_source
+        results = {"code": 1, "out": ""}
+        calls = []
+
+        def runner(command, **_):
+            calls.append(command)
+            return type("R", (), {"returncode": results["code"], "stdout": results["out"]})()
+        herdr = herdr_source.Herdr(exe="herdr", runner=runner, enabled=True)
+        herdr.poll(100.0)
+        herdr.poll(100.0 + herdr_source.POLL_SECONDS + 0.1)      # server not running: no new process yet
+        self.assertEqual(1, len(calls))
+        herdr.poll(100.0 + herdr_source.IDLE_POLL_SECONDS + 0.1)
+        self.assertEqual(2, len(calls))
+        results.update(code=0, out='{"result": {"agents": []}}')
+        herdr.poll(200.0)
+        self.assertEqual(herdr_source.QUIET_POLL_SECONDS, herdr.interval)
+
     def test_unmatched_pane_claims_single_same_folder_session(self):
         import herdr_source
         listing = json.dumps({"result": {"agents": [{"pane_id": "p9", "agent": "codex", "agent_status": "working", "foreground_cwd": "C:\\\\work\\\\repo"}]}})

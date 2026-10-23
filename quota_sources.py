@@ -135,6 +135,9 @@ class _JsonRpcProcess:
             self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
             self.process.stdin.flush()
         if not event.wait(timeout):
+            with self._lock:
+                self._events.pop(request_id, None)
+                self._messages.pop(request_id, None)
             raise TimeoutError(f"{method} timed out")
         with self._lock:
             message = self._messages.pop(request_id)
