@@ -359,7 +359,8 @@ class AgentNotes:
         note = self.note(key)
         if kind == "user_message_chunk":
             content = update.get("content") or {}
-            note.buffer += str(content.get("text") or "") if isinstance(content, dict) else ""
+            if len(note.buffer) < 20_000:      # a huge paste arrives in many chunks; only the start is used
+                note.buffer += str(content.get("text") or "") if isinstance(content, dict) else ""
             return
         if note.buffer:
             self.ask(key, note.buffer, moment)

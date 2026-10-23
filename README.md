@@ -307,7 +307,7 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 
 ### herdr 适配
 
-装好 herdr 并运行其服务后无需配置：程序每 2.5 秒执行一次 `herdr agent list`（无窗口子进程，找不到时每分钟重新查找一次 `PATH`）。
+装好 herdr 并运行其服务后无需配置：程序每 2.5 秒执行一次 `herdr agent list`（无窗口子进程，与其子进程一起在作业对象中结束）；herdr 没有 agent 窗格时改为每 10 秒，服务未运行或读取失败时每 30 秒，找不到时每分钟重新查找一次 `PATH`。
 
 - 每个 herdr 窗格对应一个 agent 进程。窗格报告的原生会话 ID（`agent_session`）与本地 Codex 线程、Claude 会话等对应，同窗格的会话归为一个气泡；未安装 herdr 集成插件时，同客户端、同文件夹且唯一的窗格也会对上。建议执行 `herdr integration install codex`、`herdr integration install claude` 等，让 herdr 报告会话 ID。
 - 没有会话 ID 时，agy（Antigravity CLI）等不记录文件夹的客户端：只有一个工作中窗格且只有一个进行中的对话时直接对上，气泡带回该对话的 TPS；herdr 显示工作中的窗格也计入该来源的“在工作”，图标切到 TPS。
