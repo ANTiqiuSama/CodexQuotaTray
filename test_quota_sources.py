@@ -9,7 +9,62 @@ import json
 import subprocess
 import tempfile
 import quota_sources
+import sys
+import psutil
 from cli_usage import parse_agy_usage_json, parse_grok_usage, parse_reset, run_temporary_usage
+
+
+class JsonRpcLifecycleTests(unittest.TestCase):
+    def test_repeated_reads_reap_launcher_descendants_and_reader_threads(self):
+        self._check_tree_cleanup(timeout=False, repeats=3)
+
+    def test_timeout_reaps_launcher_descendants_without_stopping_other_clients(self):
+        self._check_tree_cleanup(timeout=True, repeats=1)
+
+    def _check_tree_cleanup(self, timeout, repeats):
+        # A real launcher -> intermediate -> server chain reproduces Windows
+        # cmd -> Node -> Codex, including the inherited stdout pipe.
+        worker = '''import json, os, subprocess, sys, time
+if len(sys.argv) > 1:
+    child = subprocess.Popen([sys.executable, "-u", __file__, *sys.argv[2:]])
+    child.wait()
+else:
+    for line in sys.stdin:
+        request = json.loads(line)
+        if request["method"] == "hang":
+            time.sleep(60)
+        else:
+            print(json.dumps({"id": request["id"], "result": {"pid": os.getpid()}}), flush=True)
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / "rpc_worker.py"
+            script.write_text(worker, encoding="utf-8")
+            unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            try:
+                for _ in range(repeats):
+                    rpc = quota_sources._JsonRpcProcess([sys.executable, "-u", str(script), "launcher", "intermediate"])
+                    owned = []
+                    try:
+                        leaf_pid = rpc.request("ping", None)["pid"]
+                        owned = psutil.Process(rpc.process.pid).children(recursive=True)
+                        self.assertGreaterEqual(len(owned), 2)
+                        self.assertIn(leaf_pid, [child.pid for child in owned])
+                        if timeout:
+                            with self.assertRaises(TimeoutError):
+                                rpc.request("hang", None, timeout=0.05)
+                    finally:
+                        rpc.close()
+                    _, alive = psutil.wait_procs(owned, timeout=3)
+                    self.assertEqual(alive, [])
+                    self.assertIsNotNone(rpc.process.poll())
+                    self.assertFalse(rpc._reader.is_alive())
+                    self.assertTrue(rpc.process.stdin.closed)
+                    self.assertTrue(rpc.process.stdout.closed)
+                    self.assertIsNone(unrelated.poll())
+            finally:
+                unrelated.kill()
+                unrelated.wait(timeout=3)
 
 
 class GrokIsolationTests(unittest.TestCase):

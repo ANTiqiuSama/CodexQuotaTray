@@ -319,7 +319,8 @@ def parse_agy_usage_json(payload: dict[str, Any]) -> dict[str, Any]:
 def run_agy_usage(executable: str, timeout: float = 10.0) -> dict[str, Any]:
     env = os.environ.copy()
     env["AGY_DISABLE_AUTO_UPDATE"] = "1"
-    process = subprocess.run(
+    import process_jail
+    process = process_jail.run(
         [executable, "--print", "/usage", "--output-format", "json"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,

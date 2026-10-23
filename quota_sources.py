@@ -14,6 +14,7 @@ from typing import Any
 
 import providers
 import cli_quota
+import process_jail
 from cli_usage import run_agy_usage
 
 
@@ -89,7 +90,9 @@ def _codex_executable() -> str | None:
 
 class _JsonRpcProcess:
     def __init__(self, command: list[str]):
-        self.process = subprocess.Popen(
+        # codex.CMD -> cmd.exe -> node -> codex app-server -> MCP servers: the
+        # whole tree runs in one job and ends with close().
+        self.process = process_jail.popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -141,12 +144,13 @@ class _JsonRpcProcess:
         return message.get("result", {})
 
     def close(self) -> None:
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+        # Always, even when the launcher already exited: node, codex and its MCP
+        # servers outlive cmd.exe, and only ending the job reaches them.
+        process_jail.stop(self.process)
+        self._reader.join(timeout=2)
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream is not None:
+                stream.close()
 
 
 def _percent(value: Any) -> float | None:

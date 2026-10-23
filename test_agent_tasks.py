@@ -744,6 +744,31 @@ class HerdrAndHelperTests(unittest.TestCase):
         herdr.attach(native, 101.0)
         self.assertEqual(1, len(calls))                                      # rate limited
 
+    def test_discovered_herdr_is_called_by_its_on_disk_name(self):
+        # shutil.which spells the PATHEXT extension in upper case ("herdr.EXE");
+        # Herdr's managed launcher only runs when invoked as bin/herdr.exe.
+        import herdr_source
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            real = Path(folder) / "bin" / "herdr.exe"
+            real.parent.mkdir()
+            real.write_bytes(b"")
+            calls = []
+
+            def runner(command, **_):
+                calls.append(command[0])
+                ok = Path(command[0]).name == "herdr.exe"
+                return type("R", (), {"returncode": 0 if ok else 1, "stdout": '{"result": {"agents": []}}' if ok else ""})()
+            with patch.object(herdr_source.shutil, "which", return_value=str(real.with_name("herdr.EXE"))), \
+                    patch.object(herdr_source.os, "name", "nt"):
+                herdr = herdr_source.Herdr(runner=runner, enabled=True)
+                herdr.exe = None
+                herdr.poll(1000.0)
+            self.assertEqual(calls, [str(real)])
+            self.assertNotEqual(herdr.status, "服务未运行")
+            explicit = herdr_source.Herdr(exe=str(real.with_name("herdr.EXE")), runner=runner, enabled=True)
+            self.assertEqual(explicit._locate(1000.0), str(real.with_name("herdr.EXE")))   # an override is used as given
+
     def test_herdr_without_server_changes_nothing(self):
         import herdr_source
         herdr = herdr_source.Herdr(exe="herdr", runner=lambda *a, **k: type("R", (), {"returncode": 1, "stdout": ""})(), enabled=True)

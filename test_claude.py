@@ -110,7 +110,7 @@ class ReaderIsolationTests(unittest.TestCase):
     def test_logged_out_account_skips_native_terminal_and_sleeps_twelve_hours(self):
         status = Mock(stdout=json.dumps({"loggedIn": False, "email": "private@example.test"}))
         with patch.object(providers, "find_claude", return_value=Path("claude.exe")), \
-                patch.object(claude_quota.subprocess, "run", return_value=status), \
+                patch.object(claude_quota.process_jail, "run", return_value=status), \
                 patch.object(claude_quota.subprocess, "Popen") as spawn:
             snapshot = quota_sources.get_claude_quota()
         spawn.assert_not_called()
@@ -124,14 +124,14 @@ class ReaderIsolationTests(unittest.TestCase):
     def test_free_and_api_accounts_have_no_subscription_quota(self):
         for fields in ({"loggedIn": True, "subscriptionType": "free"},
                        {"loggedIn": True, "authMethod": "api_key"}):
-            with self.subTest(fields=fields), patch.object(claude_quota.subprocess, "run",
+            with self.subTest(fields=fields), patch.object(claude_quota.process_jail, "run",
                     return_value=Mock(stdout=json.dumps(fields))):
                 self.assertIn("订阅额度", claude_quota.no_quota_reason("claude.exe"))
 
     def test_old_status_command_still_uses_bounded_worker(self):
-        with patch.object(claude_quota.subprocess, "run", return_value=Mock(stdout="unknown command")):
+        with patch.object(claude_quota.process_jail, "run", return_value=Mock(stdout="unknown command")):
             self.assertIsNone(claude_quota.no_quota_reason("claude.exe"))
-        with patch.object(claude_quota.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 10)):
+        with patch.object(claude_quota.process_jail, "run", side_effect=subprocess.TimeoutExpired("claude", 10)):
             self.assertIsNone(claude_quota.no_quota_reason("claude.exe"))
 
     def test_native_terminal_hang_cannot_hold_refresh_thread_forever(self):

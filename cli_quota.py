@@ -11,6 +11,7 @@ import tempfile
 
 import psutil
 
+import process_jail
 from cli_usage import CLAUDE_ARGS, CLAUDE_PROBE, GROK_PROBE, parse_claude_usage, parse_grok_usage, run_temporary_usage
 
 GROK_ARGS = ["--minimal", "--no-alt-screen", "--no-memory", "--no-subagents", "--disable-web-search"]
@@ -19,7 +20,7 @@ GROK_ARGS = ["--minimal", "--no-alt-screen", "--no-memory", "--no-subagents", "-
 def no_quota_reason(executable: str) -> str | None:
     """Use the noninteractive status first; older CLIs can still use /usage."""
     try:
-        result = subprocess.run([executable, "auth", "status"], capture_output=True,
+        result = process_jail.run([executable, "auth", "status"], capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=10,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         status = json.loads(result.stdout)
@@ -37,7 +38,13 @@ def no_quota_reason(executable: str) -> str | None:
 
 
 def stop_worker(process: subprocess.Popen) -> None:
-    # Only this disposable worker's descendants; never an existing client session.
+    """End a disposable worker and everything it started. Its job holds the
+    whole tree (PTY host, CLI, the CLI's MCP servers), including processes
+    whose parent already exited; the snapshot below only covers a worker that
+    could not be put in a job. Never touches an existing client session."""
+    job = getattr(process, "job", None)
+    if job is not None:
+        job.close()
     try:
         children = psutil.Process(process.pid).children(recursive=True)
     except psutil.Error:
@@ -69,9 +76,9 @@ def read_usage(executable: str, provider: str = "claude", raw: dict | None = Non
         command += [executable, str(destination)]
         if not frozen:
             command.append(provider)
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL,
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        process = process_jail.popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         timeout = 45 if provider == "claude" else 35
         try:
             process.wait(timeout=timeout)
@@ -79,6 +86,10 @@ def read_usage(executable: str, provider: str = "claude", raw: dict | None = Non
             stop_worker(process)
             label = "Claude Code" if provider == "claude" else "Grok"
             raise TimeoutError(f"{label} 额度读取在 {timeout} 秒内未完成（含隐藏终端初始化）") from None
+        # The worker finished; anything it left behind (the CLI's MCP servers) ends with its job.
+        job = getattr(process, "job", None)
+        if job is not None:
+            job.close()
         result = json.loads(destination.read_text(encoding="utf-8"))
         if raw is not None:
             raw.update(result.get("cli", {}))

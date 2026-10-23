@@ -22,7 +22,23 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import process_jail
+
 log = logging.getLogger(__name__)
+
+
+def _on_disk_name(path: str) -> str:
+    """The path with the file name spelt as on disk. shutil.which appends the
+    PATHEXT extension in its case ("herdr.EXE"), and Herdr's managed launcher
+    refuses to run unless it is invoked as bin/herdr.exe."""
+    candidate = Path(path)
+    try:
+        for entry in candidate.parent.iterdir():
+            if entry.name.lower() == candidate.name.lower():
+                return str(entry)
+    except OSError:
+        pass
+    return path
 
 POLL_SECONDS = 2.5
 LOOKUP_SECONDS = 60.0       # how often to look for a newly installed herdr
@@ -83,7 +99,7 @@ class Herdr:
         self.enabled = enabled
         self.exe = exe or os.environ.get("CODEX_QUOTA_HERDR_EXE") or None
         self.session = os.environ.get("CODEX_QUOTA_HERDR_SESSION", "").strip()
-        self.runner = runner or subprocess.run
+        self.runner = runner or process_jail.run
         self.rows: list[dict[str, Any]] = []
         self.polled_at = 0.0
         self.looked_at = 0.0
@@ -105,8 +121,8 @@ class Herdr:
                     if base and candidate.is_file():
                         found = str(candidate)
                         break
-        self.exe = found
-        return found
+        self.exe = _on_disk_name(found) if found and os.name == "nt" else found
+        return self.exe
 
     def poll(self, now: float | None = None) -> list[dict[str, Any]]:
         now = now or time.time()
