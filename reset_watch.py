@@ -207,12 +207,12 @@ def save(path: Path, outlook: ResetOutlook) -> None:
 
 
 def panel_line(outlook: ResetOutlook | None, now: float) -> str:
-    """The panel's one-line summary: the combined 24 h chance only."""
+    """The banner's short left part: the combined 24 h chance only."""
     if outlook is None:
-        return "Codex 重置概率 读取中"
+        return "Codex 重置 读取中"
     if outlook.level(now) == "unknown":
-        return "Codex 重置概率 —"
-    return f"Codex 重置概率 {outlook.prob_24}%"
+        return "Codex 重置 —"
+    return f"Codex 重置 {outlook.prob_24}%"
 
 
 def announced(outlook: ResetOutlook | None, now: float) -> bool:

@@ -284,13 +284,22 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 
 这些是社区估计，不是 OpenAI 的官方时间表。请求只发送普通 HTTP GET，不包含任何账户信息。
 
+## 模型智商（AI Stupid Level）
+
+[AI Stupid Level](https://aistupidlevel.info/) 持续给主流模型跑基准测试，发布每个模型近 24 小时的综合分（0–100，越高越好）、趋势和置信区间。面板顶部横条左侧为简短的 `Codex 重置 NN%`，右侧显示“智商”与所选模型的分数（如 `GPT-5.6 Sol 75↑  Opus 4.7 72↓`）；分数为琥珀色 / 红色表示该站判定为警告 / 严重退化，读数超过 30 小时时变灰。
+
+- 需要免费 API Key：设置 → 模型智商 → “获取免费 Key”，填入 `asl_live_…` 后保存或点“立即读取”。也可用环境变量 `CODEX_QUOTA_IQ_KEY`（优先于设置页）。Key 仅保存在本机 `model_iq_config.json`。
+- 免费 Key 每天 10 次（00:00 UTC 重置）：程序每 3 小时自动读取一次、每天最多 7 次，其余留给手动“立即读取”；调用次数记在 `model_iq.json`，重启不会多用；Key 无效时同样等满 3 小时再试；遇到 429 当天停止。
+- 默认在悬停面板显示 Codex（OpenAI）与 Claude（Anthropic）各自得分最高的模型；在设置页的完整列表中勾选最多 3 个模型可自定义，按勾选顺序显示，“恢复默认”清空选择。点击面板顶部横条直接打开该设置页。
+- 按该站条款，展示数据时须注明来源 aistupidlevel.info；设置页底部有来源链接。
+
 ## Agent 任务气泡
 
 悬停任一额度图标都会打开任务面板（旧的详情卡片已移除）；没有在工作的 agent 时也照常显示。未开通订阅的 Claude 没有额度可显示，仍用文字提示。指针可以移入面板操作，移出约半秒后收起；面板不抢键盘焦点。
 
 | 区域 | 内容 |
 | --- | --- |
-| 顶部 | 5 小时、每周剩余额度与最近 TPS，打开时数字与额度条从零滚动到当前值；右上角为状态（N 个在工作 / 空闲 / 旧数据 / 读取失败），工作时标题圆点有声呐波纹；MiMo 并列显示套餐剩余、今日 Credits 与 TPS；agent 仍在工作但长回复或工具调用暂未产生新样本时，保留 30 分钟内最近一次测得的 TPS，不再跳成 0；上方显示 GPT 社区重置概率 |
+| 顶部 | 5 小时、每周剩余额度与最近 TPS，打开时数字与额度条从零滚动到当前值；右上角为状态（N 个在工作 / 空闲 / 旧数据 / 读取失败），工作时标题圆点有声呐波纹；MiMo 并列显示套餐剩余、今日 Credits 与 TPS；agent 仍在工作但长回复或工具调用暂未产生新样本时，保留 30 分钟内最近一次测得的 TPS，不再跳成 0；上方横条显示 Codex 社区重置概率与所选模型智商，点击打开“模型智商”设置页 |
 | 额度区下方的重置三栏 | 仅显示来源全名和倒计时，按时间由近到远排列。Codex 等来源选择当前限制可用额度的窗口；周额度耗尽时不展示无助于恢复使用的 5 小时重置，两个窗口均耗尽时等较晚的窗口恢复。Gemini 的 Argon 和 Opus 独立参与排序，可占两栏，并注明池名（Opus 显示为“Gemini · Opus”以免与 Claude 混淆，超过一天只显示天数）；Opus 对应控制台的 Claude/GPT 共享池时间。MiMo 套餐到期不算周期重置 |
 | 气泡内 | 任务名：最近一次实质请求（“继续”“好的”之类不覆盖任务），缺失时用客户端线程标题或项目文件夹 |
 | 气泡下 | 当前动作：运行测试、编辑某文件、检索代码、查资料、派发子任务、思考中等；悬停气泡时展开完整任务描述 |
@@ -369,6 +378,7 @@ Windows 没有移动通知区域图标的接口，而且删除后重新添加的
 | `CODEX_QUOTA_CODEX_EXE` | 用于额度查询的 `codex` App Server 可执行文件路径 |
 | `CODEX_QUOTA_RESET_NOTIFY` | 额度重置时弹出 Windows 通知的来源，默认 `codex,grok,claude`；设为 `none` 关闭 |
 | `CODEX_QUOTA_RESET_WATCH` | 设为 `0` 关闭 Codex 全局重置预测（不再访问社区站点） |
+| `CODEX_QUOTA_IQ_KEY` | AI Stupid Level API Key（优先于设置页；不设置且设置页为空时不读取模型智商） |
 | `CODEX_QUOTA_RESET_ALERT` | 醒目提示的 24 小时概率阈值，默认 `60`（百分比） |
 | `CODEX_QUOTA_GROK_EXE` | 用于额度查询的 Grok CLI 路径 |
 | `CODEX_QUOTA_GEMINI_EXE` | 提供对应 `/usage` JSON 的 `agy` 可执行文件路径 |
@@ -404,6 +414,7 @@ Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送
 | `performance.json` | 数值化输出计数、速率、来源及可观测状态 |
 | `history.json` | 预测用的时间、已用百分比、重置时间 |
 | `codex_reset.json` | 最近一次 Codex 全局重置预测 |
+| `model_iq.json`、`model_iq_config.json` | 最近一次模型智商读数与当天调用次数；AI Stupid Level API Key 与悬停面板所选模型 |
 | `app.log` | 运行日志（错误与每次额度刷新结果），达到约 1 MB 后轮转，保留两份备份 |
 | `diagnostics.txt` | 从菜单生成的诊断信息 |
 | `claude-probe/` | Claude Code 临时额度探测的工作目录 |
@@ -496,6 +507,7 @@ tps_sources.py        本地记录发现、输出计数、去重与速率汇总
 refresh_scheduler.py  按需刷新、失败退避和重置调度
 forecast.py           数值历史与额度耗尽估计
 reset_watch.py        Codex 全局重置的社区预测读取与提示文案
+model_iq.py           AI Stupid Level 模型智商读取、每日调用预算与面板显示选择
 icon_art.py           额度与 TPS 圆盘绘制、字体缓存
 detail_card.py        面板共用的字体、配色、阴影与合成
 hover_details.py      Win32 分层窗口、DPI、悬停、任务面板窗口及文字提示回退
@@ -520,7 +532,7 @@ build.ps1             测试与 PyInstaller 构建入口
 
 ```powershell
 python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py `
-  test_tray_app.py test_features.py test_claude.py test_mimo.py test_reset_watch.py `
+  test_tray_app.py test_features.py test_claude.py test_mimo.py test_reset_watch.py test_model_iq.py `
   test_agent_tasks.py test_settings.py
 ```
 

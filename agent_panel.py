@@ -131,13 +131,15 @@ class PanelModel:
     upcoming_resets: tuple[ResetColumn, ...] = ()
     burn: BurnChart | None = None
     banner_alert: str = ""                      # e.g. "官方预告": the banner turns solid with this badge
+    intel: tuple = ()                           # model IQ on the banner's right: (name, score text, tone)
+    intel_note: str = ""                        # shown there instead when there are no scores (e.g. "未设置")
 
     @property
     def header(self) -> tuple:
         """Static part of the panel (cached background). Quota figures, bars,
         TPS and the burn chart are drawn per frame; the reset line is cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], "") for item in self.quota[:3]), (self.banner, self.banner_alert),
+                tuple((item[0], "") for item in self.quota[:3]), (self.banner, self.banner_alert, self.intel, self.intel_note),
                 (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3])
 
 
@@ -175,7 +177,19 @@ def gear_center(model, field_h: float) -> tuple[float, float]:
 
 
 def header_offset(model: PanelModel | None) -> float:
-    return 32 if model and model.banner else 0
+    return 32 if model and (model.banner or model.intel or model.intel_note) else 0
+
+
+def banner_box() -> tuple[float, float, float, float]:
+    """The banner bar (reset chance on the left, model IQ on the right)."""
+    return PAD - 6, PAD - 2, WIDTH - PAD + 6, PAD + 18
+
+
+def over_banner(model: PanelModel | None, pointer) -> bool:
+    if pointer is None or not header_offset(model):
+        return False
+    x0, y0, x1, y1 = banner_box()
+    return x0 <= pointer[0] <= x1 and y0 <= pointer[1] <= y1
 
 
 def field_top(model: PanelModel | None) -> float:
@@ -366,6 +380,7 @@ class Scene:
         self.order: list[str] = []              # first-seen order: bubbles keep their slots
         self.live_since: dict[str, tuple[bool, float]] = {}
         self.gear_press = False
+        self.banner_press = False
         self.dirty = True                       # something changed that the next frame must show
         self._source: tuple[str, str] | None = None   # (provider, letter) of the figures shown
 
@@ -515,8 +530,15 @@ class Scene:
         events: list[tuple] = []
         under = self.body_at(*pointer) if pointer else None
         gear = not under and self.over_gear(pointer)
+        banner = not under and over_banner(self.model, pointer)
         if left and not self.left and gear:
             self.gear_press = True
+        if left and not self.left and banner:
+            self.banner_press = True
+        if not left and self.left and self.banner_press:
+            if banner and not self.dragging:
+                events.append(("settings", "iq"))    # the banner opens the model IQ / reset details
+            self.banner_press = False
         if not left and self.left and self.gear_press:
             if gear and not self.dragging:
                 events.append(("settings",))
@@ -1184,9 +1206,9 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 
 def _header_model(header: tuple) -> PanelModel:
-    letter, title, status, tone, meters, (banner, alert), forecast, daily, resets = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, resets = header
     return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (),
-                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets, banner_alert=alert)
+                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets, banner_alert=alert, intel=intel, intel_note=note)
 
 
 @lru_cache(maxsize=8)
@@ -1199,10 +1221,61 @@ def empty_note(scale: float) -> Image.Image:
     return image
 
 
+INTEL_TONES = {"danger": CLAY, "warn": AMBER}
+
+
+def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str) -> None:
+    """One bar: the Codex reset chance (short) on the left, then the chosen
+    models' IQ right-aligned. An official announcement tints the bar and adds
+    a badge next to the chance."""
+    right, mid = WIDTH - PAD, PAD + 8
+    x0, y0, x1, y1 = banner_box()
+    face, small, bold = ui_font(px(11), "bold"), ui_font(px(10)), ui_font(px(10), "bold")
+    if alert:
+        draw.rounded_rectangle((px(x0), px(y0), px(x1), px(y1)), radius=px(7), fill=_with_alpha(RESET_TINT, 64),
+                               outline=_with_alpha(RESET_TINT, 170), width=max(1, round(s)))
+    else:
+        draw.rounded_rectangle((px(x0), px(y0), px(x1), px(y1)), radius=px(7), fill=(240, 238, 230, 8),
+                               outline=(240, 238, 230, 22), width=max(1, round(s)))
+    x = PAD
+    if banner:
+        draw.ellipse((px(x), px(mid - 2.5), px(x + 5), px(mid + 2.5)), fill=RESET_TINT)
+        x += 10
+        draw.text((px(x), px(mid)), banner, font=face, fill=TEXT if alert else SECONDARY_TEXT, anchor="lm")
+        x += draw.textlength(banner, font=face) / s + 6
+        if alert:
+            badge = ui_font(px(10), "bold")
+            width = draw.textlength(alert, font=badge) / s + 12
+            draw.rounded_rectangle((px(x), px(mid - 7), px(x + width), px(mid + 7)), radius=px(5), fill=RESET_TINT)
+            draw.text((px(x + width / 2), px(mid)), alert, font=badge, fill=(28, 30, 36, 255), anchor="mm")
+            x += width + 6
+    # Right side, right-aligned in the chosen order; models that do not fit are dropped from the end.
+    room = right + 1 - (x + 8) - draw.textlength("智商", font=small) / s - 8
+    pieces, total = [], 0.0
+    for name, value, tone in intel:
+        need = (draw.textlength(name + " ", font=small) + draw.textlength(value, font=bold)) / s
+        if total + need + (12 if pieces else 0) > room:
+            break
+        total += need + (12 if pieces else 0)
+        pieces.append((name, value, tone))
+    if not pieces and note and draw.textlength(note, font=small) / s <= room:
+        pieces, total = [], draw.textlength(note, font=small) / s
+        draw.text((px(right + 1), px(mid)), note, font=small, fill=MUTED_TEXT, anchor="rm")
+    elif not pieces:
+        return
+    start = right + 1 - total
+    draw.text((px(start - 8), px(mid)), "智商", font=small, fill=MUTED_TEXT, anchor="rm")
+    for name, value, tone in pieces:
+        draw.text((px(start), px(mid)), name, font=small, fill=SECONDARY_TEXT, anchor="lm")
+        start += draw.textlength(name + " ", font=small) / s
+        draw.text((px(start), px(mid)), value, font=bold, fill=INTEL_TONES.get(tone, TEXT), anchor="lm")
+        start += draw.textlength(value, font=bold) / s + 12
+
+
 @lru_cache(maxsize=12)
 def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     model = _header_model(header)
-    letter, title, status, tone, meters, (banner, alert), _, daily, resets = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, resets = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -1233,25 +1306,8 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
             draw.rounded_rectangle((px(x), px(y + 45), px(end), px(y + 49)), radius=px(2), fill=TRACK)
             if reset:
                 draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
-    if banner:
-        y_banner = PAD - 2
-        box = (px(PAD - 6), px(y_banner), px(right + 6), px(y_banner + 20))
-        face = ui_font(px(11), "bold")
-        if alert:
-            # Official announcement: a solid bar with a bright badge, impossible to miss.
-            draw.rounded_rectangle(box, radius=px(7), fill=_with_alpha(RESET_TINT, 64), outline=_with_alpha(RESET_TINT, 170),
-                                   width=max(1, round(s)))
-            draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=face, fill=TEXT, anchor="lm")
-            badge = ui_font(px(10), "bold")
-            width = draw.textlength(alert, font=badge) / s + 14
-            draw.rounded_rectangle((px(right + 1 - width), px(y_banner + 3), px(right + 1), px(y_banner + 17)), radius=px(5),
-                                   fill=RESET_TINT)
-            draw.text((px(right + 1 - width / 2), px(y_banner + 10)), alert, font=badge, fill=(28, 30, 36, 255), anchor="mm")
-        else:
-            draw.rounded_rectangle(box, radius=px(7), fill=(240, 238, 230, 8), outline=(240, 238, 230, 22),
-                                   width=max(1, round(s)))
-            draw.ellipse((px(PAD), px(y_banner + 7.5), px(PAD + 5), px(y_banner + 12.5)), fill=RESET_TINT)
-            draw.text((px(PAD + 10), px(y_banner + 10)), banner, font=face, fill=SECONDARY_TEXT, anchor="lm")
+    if header_offset(model):
+        _banner(draw, px, s, banner, alert, intel, note)
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     chart_y = chart_top(model, field_h)

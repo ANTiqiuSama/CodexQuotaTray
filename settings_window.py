@@ -37,7 +37,7 @@ def save_summary(config: dict, enabled: bool) -> None:
     os.replace(temporary, path)
 
 
-PAGES = (("overview", "概览"), ("sources", "额度来源"), ("mimo", "小米 MiMo"), ("agents", "任务与 herdr"),
+PAGES = (("overview", "概览"), ("sources", "额度来源"), ("iq", "模型智商"), ("mimo", "小米 MiMo"), ("agents", "任务与 herdr"),
          ("naming", "任务命名 API"), ("general", "常规"))
 PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "mimo": "Xiaomi MiMo"}
 
@@ -82,9 +82,9 @@ class SettingsController:
         self.thread = None
         self.lock = threading.Lock()
 
-    def show(self):
+    def show(self, page=None):
         with self.lock:
-            self.commands.put(("show",))
+            self.commands.put(("show", page))
             if self.thread is None or not self.thread.is_alive():
                 self.thread = threading.Thread(target=self._run, name="settings-ui", daemon=True)
                 self.thread.start()
@@ -265,6 +265,7 @@ class SettingsWindow:
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._overview(self.scrollable(self.pages["overview"]))
         self._sources(self.scrollable(self.pages["sources"]))
+        self._iq(self.scrollable(self.pages["iq"]))
         self._mimo(self.scrollable(self.pages["mimo"]))
         self._agents(self.scrollable(self.pages["agents"]))
         self._naming(self.pages["naming"])
@@ -362,6 +363,123 @@ class SettingsWindow:
         line.grid(row=5, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
         self.button(line, "保存手动套餐", self.save_mimo_manual).pack(side="left")
         self.button(line, "删除手动套餐", self.remove_mimo_manual).pack(side="left", padx=S(8))
+
+    # ----- model IQ ------------------------------------------------------------------
+    def _iq(self, page):
+        import model_iq
+        tk, S = self.tk, self.S
+        self.heading(page, "模型智商", "AI Stupid Level 持续给主流模型跑基准测试，这里显示各模型近 24 小时的综合分（0–100，越高越好），"
+                                    "箭头为趋势。每 3 小时自动读取一次；免费 Key 每天 10 次，自动最多用 7 次，其余留给“立即读取”。")
+        form = tk.Frame(page, bg=view.SURFACE, padx=S(16), pady=S(14))
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        self.iq_key = tk.StringVar()
+        self.iq_selected: list[str] = []
+        self.iq_built = None
+        self.iq_checks = {}
+        self.label(form, "API Key", 10, view.INK_2).grid(row=0, column=0, sticky="w", padx=(0, S(16)))
+        self.entry(form, self.iq_key, secret=True).grid(row=0, column=1, sticky="ew", ipady=S(4))
+        self.label(form, "asl_live_…，仅保存在本机", 9, view.INK_3).grid(row=0, column=2, sticky="w", padx=(S(12), 0))
+        line = tk.Frame(form, bg=view.SURFACE)
+        line.grid(row=1, column=0, columnspan=3, sticky="w", pady=(S(10), 0))
+        self.button(line, "获取免费 Key", lambda: os.startfile(model_iq.SIGNUP)).pack(side="left")  # type: ignore[attr-defined]
+        self.button(line, "立即读取", self.iq_refresh, "primary").pack(side="left", padx=S(8))
+        self.iq_message = tk.StringVar()
+        self.label(line, "", 9, view.INK_2, textvariable=self.iq_message).pack(side="left", padx=S(8))
+        self.iq_info = self.label(form, "", 9, view.INK_3, wraplength=S(620))
+        self.iq_info.grid(row=2, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        pick = tk.Frame(page, bg=view.BG)
+        pick.pack(fill="x", pady=(S(14), S(6)))
+        self.label(pick, "悬停面板显示", 11, weight="bold").pack(side="left")
+        self.iq_pick = self.label(pick, "", 9, view.INK_3)
+        self.iq_pick.pack(side="left", padx=S(10))
+        self.button(pick, "恢复默认", self.iq_default).pack(side="right")
+        self.iq_table = tk.Frame(page, bg=view.SURFACE, padx=S(12), pady=S(8))
+        self.iq_table.pack(fill="x")
+        source = self.label(page, "数据来源：aistupidlevel.info（AI Stupid Level）", 9, "#7ec9a6", cursor="hand2")
+        source.pack(anchor="w", pady=(S(10), 0))
+        source.bind("<Button-1>", lambda _: os.startfile(model_iq.SITE))  # type: ignore[attr-defined]
+
+    def iq_refresh(self):
+        if not hasattr(self.app, "refresh_model_iq"):
+            return
+        try:
+            self.app.save_model_iq(self.iq_key.get(), list(self.iq_selected) or None)
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror("未能保存", str(error), parent=self.root)
+            return
+        self.iq_message.set("正在读取…")
+
+        def worker():
+            try:
+                text = self.app.refresh_model_iq()
+            except Exception as error:
+                text = "读取失败：" + type(error).__name__
+            self.commands.put(("iq", text))
+        threading.Thread(target=worker, name="model-iq-manual", daemon=True).start()
+
+    def iq_default(self):
+        self.iq_selected = []
+        for var in self.iq_checks.values():
+            var.set(False)
+        self._fill_iq(rebuild=False)
+
+    def iq_toggle(self, name):
+        import model_iq
+        var = self.iq_checks[name]
+        if var.get():
+            if len(self.iq_selected) >= model_iq.HOVER_MAX:
+                var.set(False)
+                self.iq_message.set(f"悬停面板最多显示 {model_iq.HOVER_MAX} 个模型")
+                return
+            self.iq_selected.append(name)
+        elif name in self.iq_selected:
+            self.iq_selected.remove(name)
+        self._fill_iq(rebuild=False)
+
+    def _fill_iq(self, rebuild=True):
+        import model_iq
+        if not hasattr(self.app, "model_iq_status"):
+            return
+        tk, S = self.tk, self.S
+        info = self.app.model_iq_status()
+        parts = [f"上次读取：{info['fetched']}", f"今日已用 {info['calls']} / {model_iq.DAILY_LIMIT} 次（00:00 UTC 重置）"]
+        if info["env_key"]:
+            parts.append(f"已设置 {model_iq.ENV_KEY} 环境变量，优先于本页的 Key")
+        if info["error"]:
+            parts.append("⚠ " + info["error"])
+        text = " · ".join(parts)
+        if self.iq_info.cget("text") != text:
+            self.iq_info.configure(text=text)
+        shown = self.iq_selected or info["default"]
+        pick = ("、".join(model_iq.short_name(n) for n in shown) or "—") + ("（默认：Codex 与 Claude 各自得分最高的模型）"
+                                                                         if not self.iq_selected else "") + f"；最多 {model_iq.HOVER_MAX} 个，保存后生效"
+        if self.iq_pick.cget("text") != pick:
+            self.iq_pick.configure(text=pick)
+        if rebuild and self.iq_built != info["fetched_at"]:
+            self.iq_built = info["fetched_at"]
+            for child in self.iq_table.winfo_children():
+                child.destroy()
+            self.iq_checks = {}
+            models = info["models"]
+            if not models:
+                self.label(self.iq_table, "填写 API Key 后点“立即读取”，这里会列出所有模型的分数。", 10, view.INK_3).grid(row=0, column=0, sticky="w")
+                return
+            for column, title in enumerate(("显示", "#", "模型", "厂商", "分数", "区间", "状态")):
+                self.label(self.iq_table, title, 9, view.INK_3).grid(row=0, column=column, sticky="w", padx=(0, S(14)), pady=(0, S(4)))
+            tones = {"danger": "#e07a6a", "warn": "#e5a84b", "ok": view.INK}
+            for index, score in enumerate(models, 1):
+                var = self.iq_checks[score.name] = tk.BooleanVar(value=score.name in self.iq_selected)
+                tk.Checkbutton(self.iq_table, variable=var, command=lambda name=score.name: self.iq_toggle(name), bg=view.SURFACE,
+                               activebackground=view.SURFACE, selectcolor=view.FIELD, fg=view.INK, bd=0,
+                               highlightthickness=0).grid(row=index, column=0, sticky="w")
+                band = "" if score.lower is None or score.upper is None else f"{score.lower:.0f}–{score.upper:.0f}"
+                cells = (str(index), f"{score.short}  ({score.name})" if score.short != score.name else score.name,
+                         model_iq.provider_label(score.provider), model_iq.score_text(score), band, score.status or "")
+                for column, value in enumerate(cells, 1):
+                    color = tones.get(model_iq.score_tone(score), view.INK) if column == 4 else (view.INK if column == 2 else view.INK_2)
+                    self.label(self.iq_table, value, 10 if column in (2, 4) else 9, color,
+                               weight="bold" if column == 4 else "normal").grid(row=index, column=column, sticky="w", padx=(0, S(14)))
 
     def entry(self, parent, variable, secret=False):
         return self.tk.Entry(parent, textvariable=variable, show="●" if secret else "", bg=view.FIELD, fg=view.INK,
@@ -483,6 +601,8 @@ class SettingsWindow:
             elif self.page == "sources":
                 self._fill_sources()
                 self._fill_health()
+            elif self.page == "iq":
+                self._fill_iq()
             elif self.page == "mimo":
                 self._fill_mimo()
             elif self.page == "agents":
@@ -624,6 +744,11 @@ class SettingsWindow:
         import sys
         order = getattr(sys.modules.get("tray_app") or sys.modules.get("__main__"), "TRAY_ORDER_MODE", "auto")
         self.vars["order"].set(order != "fixed")
+        if hasattr(self.app, "model_iq_status"):
+            info = self.app.model_iq_status()
+            self.iq_key.set(info["key"])
+            self.iq_selected = list(info["shown"] or [])
+            self.iq_built = None
         self.origins = {name: var.get() for name, var in self.vars.items()}
         self.status.set("")
         self.result.set("")
@@ -633,6 +758,8 @@ class SettingsWindow:
             self.app.apply_summary_settings({name: var.get() for name, var in self.fields.items()}, self.vars["summary"].get())
             if self.vars["startup"].get() != self.origins["startup"]:
                 self.app.toggle_startup()
+            if hasattr(self.app, "save_model_iq"):
+                self.app.save_model_iq(self.iq_key.get(), list(self.iq_selected) or None)
             prefs = {"herdr": bool(self.vars["herdr"].get()), "tray_order": "auto" if self.vars["order"].get() else "fixed"}
             if hasattr(self.app, "save_preferences"):
                 self.app.save_preferences(prefs)
@@ -668,9 +795,15 @@ class SettingsWindow:
                         self.load()
                     self.root.deiconify()
                     self.root.lift()
+                    if len(command) > 1 and command[1] in self.pages:
+                        self.show_page(command[1])
                     self.root.after(60, self.refresh_live)
                 elif command[0] == "result":
                     self.result.set(command[1])
+                elif command[0] == "iq":
+                    self.iq_message.set(command[1])
+                    self.iq_built = None
+                    self._fill_iq()
             self.ticks += 1
             if self.ticks % 20 == 0:          # live figures every 2 s
                 self.refresh_live()

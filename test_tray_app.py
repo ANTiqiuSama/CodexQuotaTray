@@ -899,3 +899,29 @@ class PanelPacingTests(unittest.TestCase):
         self.assertEqual(update.call_count, 6)
         self.assertEqual(select.call_args_list[-1], call(5, 7))          # original bitmap restored
         delete_dc.assert_called_once_with(5)
+
+
+class ModelIqTrayTests(unittest.TestCase):
+    def test_banner_intel_follows_key_scores_and_saved_choice(self):
+        import tempfile
+        from pathlib import Path
+        import model_iq
+        from test_model_iq import PAYLOAD
+        tray = QuotaTray.__new__(QuotaTray)
+        tray.iq_state, tray.iq_config = model_iq.IqState(), {"key": "", "shown": None}
+        tray.iq_wake, tray.iq_lock, tray.update_ui = threading.Event(), threading.Lock(), Mock()
+        now = time.time()
+        with patch.dict("os.environ", {model_iq.ENV_KEY: ""}):
+            self.assertEqual(tray.panel_intel(now), ((), "未设置"))
+            tray.iq_config["key"] = "asl_live_abcdefgh"
+            self.assertEqual(tray.panel_intel(now), ((), "读取中"))
+            with patch.object(model_iq, "_request", return_value=PAYLOAD), tempfile.TemporaryDirectory() as folder, \
+                    patch.object(tray_app, "IQ_STATE_PATH", Path(folder) / "s.json"), \
+                    patch.object(tray_app, "IQ_CONFIG_PATH", Path(folder) / "c.json"):
+                self.assertIn("已读取 5", tray.refresh_model_iq())
+                intel, note = tray.panel_intel(time.time())
+                self.assertEqual([item[0] for item in intel], ["GPT-5.6 Sol", "Opus 4.7"])
+                tray.save_model_iq("asl_live_abcdefgh", ["gemini-3-pro-preview"])
+                self.assertEqual(tray.panel_intel(time.time())[0], (("Gemini 3 Pro", "70", "ok"),))
+                self.assertFalse(tray.iq_wake.is_set())          # same key: no extra call
+                self.assertEqual(tray.model_iq_status()["calls"], 1)
