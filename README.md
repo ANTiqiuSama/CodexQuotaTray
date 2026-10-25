@@ -286,7 +286,7 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 
 ## 模型智商（AI Stupid Level）
 
-[AI Stupid Level](https://aistupidlevel.info/) 持续给主流模型跑基准测试，托盘只读取它的编程榜（`sortBy=coding`），显示各模型近 24 小时的编程分（0–100，越高越好）。面板顶部横条左侧为简短的 `Codex 重置 NN%`，右侧显示“智商”与三个模型的编程分（如 `GPT-6.1 Sol 83  GPT-6 Luna 86  Opus 5.5 93`）；读数超过 30 小时时变灰。
+[AI Stupid Level](https://aistupidlevel.info/) 持续给主流模型跑基准测试，托盘只读取它的编程榜（`sortBy=coding`），显示各模型近 24 小时的编程分（0–100，越高越好）。面板顶部为两个分开的圆角标签：左侧为简短的 `Codex 重置 NN%`，右侧显示“智商”与三个模型的编程分（如 `GPT-6.1 Sol 83  GPT-6 Luna 86  Opus 5.5 93`）；读数超过 30 小时时变灰。
 
 - 需要免费 API Key：设置 → 模型智商 → “获取免费 Key”，填入 `asl_live_…` 后保存或点“立即读取”。也可用环境变量 `CODEX_QUOTA_IQ_KEY`（优先于设置页）。Key 仅保存在本机 `model_iq_config.json`。
 - 免费 Key 每天 10 次（00:00 UTC 重置）：程序每 3 小时自动读取一次、每天最多 7 次，其余留给手动“立即读取”；调用次数记在 `model_iq.json`，重启不会多用；Key 无效时同样等满 3 小时再试；遇到 429 当天停止。

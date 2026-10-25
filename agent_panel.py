@@ -1225,32 +1225,33 @@ INTEL_TONES = {"idle": MUTED_TEXT}         # stale scores fade
 
 
 def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, letter: str = "") -> None:
-    """One bar: the Codex reset chance (short) on the left, then the chosen
-    models' coding scores right-aligned (the running model first, in the
-    source's colour). An official announcement tints the bar and adds
-    a badge next to the chance."""
+    """Two separate pills on one row: the Codex reset chance (short) on the
+    left, the models' coding scores on the right (the running model first, in
+    the source's colour). An official announcement tints only the reset pill
+    and adds a badge inside it."""
     right, mid = WIDTH - PAD, PAD + 8
     x0, y0, x1, y1 = banner_box()
     face, small, bold = ui_font(px(11), "bold"), ui_font(px(10)), ui_font(px(10), "bold")
-    if alert:
-        draw.rounded_rectangle((px(x0), px(y0), px(x1), px(y1)), radius=px(7), fill=_with_alpha(RESET_TINT, 64),
-                               outline=_with_alpha(RESET_TINT, 170), width=max(1, round(s)))
-    else:
-        draw.rounded_rectangle((px(x0), px(y0), px(x1), px(y1)), radius=px(7), fill=(240, 238, 230, 8),
-                               outline=(240, 238, 230, 22), width=max(1, round(s)))
+    calm_fill, calm_edge, edge = (240, 238, 230, 8), (240, 238, 230, 22), max(1, round(s))
     x = PAD
     if banner:
-        draw.ellipse((px(x), px(mid - 2.5), px(x + 5), px(mid + 2.5)), fill=RESET_TINT)
-        x += 10
-        draw.text((px(x), px(mid)), banner, font=face, fill=TEXT if alert else SECONDARY_TEXT, anchor="lm")
-        x += draw.textlength(banner, font=face) / s + 6
+        x += 10 + draw.textlength(banner, font=face) / s
+        badge = ui_font(px(10), "bold")
+        badge_w = draw.textlength(alert, font=badge) / s + 12 if alert else 0
+        end = x + (6 + badge_w if alert else 0) + 2
         if alert:
-            badge = ui_font(px(10), "bold")
-            width = draw.textlength(alert, font=badge) / s + 12
-            draw.rounded_rectangle((px(x), px(mid - 7), px(x + width), px(mid + 7)), radius=px(5), fill=RESET_TINT)
-            draw.text((px(x + width / 2), px(mid)), alert, font=badge, fill=(28, 30, 36, 255), anchor="mm")
-            x += width + 6
-    # Right side, right-aligned in order; when space is short the "智商" label
+            draw.rounded_rectangle((px(x0), px(y0), px(end + 6), px(y1)), radius=px(7), fill=_with_alpha(RESET_TINT, 64),
+                                   outline=_with_alpha(RESET_TINT, 170), width=edge)
+        else:
+            draw.rounded_rectangle((px(x0), px(y0), px(end + 6), px(y1)), radius=px(7), fill=calm_fill, outline=calm_edge, width=edge)
+        draw.ellipse((px(PAD), px(mid - 2.5), px(PAD + 5), px(mid + 2.5)), fill=RESET_TINT)
+        draw.text((px(PAD + 10), px(mid)), banner, font=face, fill=TEXT if alert else SECONDARY_TEXT, anchor="lm")
+        if alert:
+            bx = x + 6
+            draw.rounded_rectangle((px(bx), px(mid - 7), px(bx + badge_w), px(mid + 7)), radius=px(5), fill=RESET_TINT)
+            draw.text((px(bx + badge_w / 2), px(mid)), alert, font=badge, fill=(28, 30, 36, 255), anchor="mm")
+        x = end + 6 + 8                                  # pill edge, then the gap between the two pills
+    # Right pill, right-aligned in order; when space is short the "智商" label
     # goes first, then models are dropped from the end.
     gap = 9
 
@@ -1264,7 +1265,7 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, lette
             chosen.append((name, value, tone, bool(live and live[0])))
         return chosen, width
 
-    space = right + 1 - (x + 8)
+    space = right + 1 - (x + 6)                          # inside the right pill's padding
     label_w = draw.textlength("智商", font=small) / s + 7
     pieces, total = fit(space - label_w)
     labelled = True
@@ -1272,15 +1273,18 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, lette
         bare = fit(space)
         if len(bare[0]) > len(pieces):
             (pieces, total), labelled = bare, False
-    room = space - label_w
-    if not pieces and note and draw.textlength(note, font=small) / s <= room:
-        pieces, total = [], draw.textlength(note, font=small) / s
-        draw.text((px(right + 1), px(mid)), note, font=small, fill=MUTED_TEXT, anchor="rm")
-    elif not pieces:
-        return
+    if not pieces:
+        if not note or draw.textlength(note, font=small) / s > space - label_w:
+            return
+        total = draw.textlength(note, font=small) / s
     start = right + 1 - total
-    if labelled:
+    left_edge = start - (label_w if labelled or not pieces else 0) - 6
+    draw.rounded_rectangle((px(left_edge), px(y0), px(x1), px(y1)), radius=px(7), fill=calm_fill, outline=calm_edge, width=edge)
+    if labelled or not pieces:
         draw.text((px(start - 7), px(mid)), "智商", font=small, fill=MUTED_TEXT, anchor="rm")
+    if not pieces:
+        draw.text((px(start), px(mid)), note, font=small, fill=MUTED_TEXT, anchor="lm")
+        return
     for name, value, tone, live in pieces:
         draw.text((px(start), px(mid)), name, font=small, fill=accent(letter) if live and letter else SECONDARY_TEXT, anchor="lm")
         start += draw.textlength(name + " ", font=small) / s
