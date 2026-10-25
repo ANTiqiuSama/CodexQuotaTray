@@ -394,6 +394,30 @@ class SceneTests(unittest.TestCase):
                                                   0, (), "idle", "Codex 重置概率 22%", text, "warn"), 0)
             self.assertIsNotNone(scene.render(scale))
 
+    def test_switching_source_rolls_figures_faster_than_opening(self):
+        def model(provider, letter, value, tps):
+            return agent_panel.PanelModel(provider, letter, provider, "空闲", (("5 小时", value, ""), ("每周", value, "")), tps, ())
+
+        def settle_time(scene, start, target):
+            moment = start          # until the shown figures (bar % and TPS) reach the new values
+            while moment < start + 5 and (abs(scene.meters[0].value - target[0]) >= 0.5
+                                          or abs(scene.rate.value - target[1]) >= 0.5):
+                moment += 1 / 60
+                scene.step(moment, None, False, False)
+            return moment - start
+
+        scene = agent_panel.Scene()
+        scene.set_model(model("codex", "C", 80, 100), 0.0)
+        opening = settle_time(scene, 0.0, (80, 100))
+        scene.set_model(model("grok", "X", 20, 300), 10.0)
+        switching = settle_time(scene, 10.0, (20, 300))
+        self.assertLess(switching, opening * 0.5)
+        self.assertLess(switching, 0.4)
+        fresh = agent_panel.Scene()                          # a new opening counts up at the easy pace again
+        fresh.set_model(model("codex", "C", 80, 100), 0.0)
+        self.assertEqual((fresh.meters[0].stiffness, fresh.rate.stiffness),
+                         (agent_panel.METER_SPRING[0], agent_panel.RATE_SPRING[0]))
+
     def test_gear_release_and_right_click_open_settings(self):
         scene = agent_panel.Scene()
         model = panel()

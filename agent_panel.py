@@ -222,6 +222,12 @@ def ease_out_cubic(p: float) -> float:
     return 1 - (1 - p) ** 3
 
 
+# (stiffness, damping) of the header figures, all critically damped (no overshoot).
+METER_SPRING = (90.0, 19.0)       # quota bars and Credits count up when the panel opens (~0.6 s)
+RATE_SPRING = (120.0, 22.0)       # TPS eases between readings
+SWITCH_SPRING = (600.0, 49.0)     # hovering another source: roll to its figures (~0.25 s)
+
+
 class Spring:
     """Critically under-damped spring: quick, with a small elegant overshoot."""
 
@@ -352,8 +358,8 @@ class Scene:
         self.origins: dict[str, tuple[float, float, float]] = {}
         self.homes: dict[str, tuple[float, float]] = {}
         self.meters: list[Spring] = []          # quota bars count up from zero when the panel opens
-        self.rate = Spring(0.0, 120.0, 22.0)    # TPS figure eases between readings
-        self.today_usage = Spring(0.0, 90.0, 19.0)
+        self.rate = Spring(0.0, *RATE_SPRING)   # TPS figure eases between readings
+        self.today_usage = Spring(0.0, *METER_SPRING)
         self.opened = 0.0
         self.gear = Spring(0.0, 260.0, 26.0)    # settings gear highlight under the pointer
         self.gear_angle = 0.0
@@ -361,6 +367,7 @@ class Scene:
         self.live_since: dict[str, tuple[bool, float]] = {}
         self.gear_press = False
         self.dirty = True                       # something changed that the next frame must show
+        self._source: tuple[str, str] | None = None   # (provider, letter) of the figures shown
 
     def over_gear(self, pointer) -> bool:
         if pointer is None or self.model is None:
@@ -393,13 +400,25 @@ class Scene:
         self.model = model
         if first:
             self.opened = now
+        previous = self._source
+        self._source = (model.provider, model.letter)
+        switched = not first and previous != self._source
         values = [item[1] for item in model.quota[:3]]
         if len(self.meters) != len(values):
-            self.meters = [Spring(0.0, 90.0, 19.0) for _ in values]
+            # Keep the figures already shown so a switch rolls from them, not from zero.
+            old = [spring.value for spring in self.meters]
+            self.meters = [Spring(old[i] if i < len(old) else 0.0, *METER_SPRING) for i in range(len(values))]
         for spring, value in zip(self.meters, values):
             spring.target = 0.0 if value is None else float(value)
         self.rate.target = float(model.tps or 0.0)
         self.today_usage.target = float(model.today_used or 0.0)
+        if switched or first:
+            # Opening counts up at an easy pace; hopping to another source's
+            # figures rolls about 2.5x faster so the numbers keep up with the pointer.
+            meter, rate = (SWITCH_SPRING, SWITCH_SPRING) if switched else (METER_SPRING, RATE_SPRING)
+            for spring in (*self.meters, self.today_usage):
+                spring.stiffness, spring.damping = meter
+            self.rate.stiffness, self.rate.damping = rate
         bubbles = self._stable(model.bubbles[:MAX_BUBBLES], now, first)
         self.homes, self.field.target = pack(bubbles, field_top(model))
         if first:
