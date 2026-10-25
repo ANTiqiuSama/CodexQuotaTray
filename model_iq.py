@@ -60,6 +60,7 @@ class IqState:
     calls: dict = field(default_factory=dict)       # UTC day -> calls spent
     blocked_day: str = ""                           # 429 seen: no calls until the next UTC day
     error: str = ""
+    board: str = "coding"                      # provenance of the cached score values
 
     def scores(self) -> list[ModelScore]:
         result = []
@@ -254,6 +255,7 @@ def read(state: IqState, key: str, now: float, get: Callable[[str], dict] | None
         return state
     state.models = [asdict(m) for m in models]
     state.fetched_at, state.error = now, ""
+    state.board = "coding"
     return state
 
 
@@ -262,7 +264,12 @@ def read(state: IqState, key: str, now: float, get: Callable[[str], dict] | None
 def load_state(path: Path) -> IqState:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return IqState(**{k: v for k, v in data.items() if k in IqState.__dataclass_fields__})
+        state = IqState(**{k: v for k, v in data.items() if k in IqState.__dataclass_fields__})
+        if data.get("board") != "coding":
+            # Older releases cached the combined board. Its figures must not
+            # be relabelled as coding scores while the API is rate-limited.
+            state.models, state.fetched_at, state.board = [], 0.0, "legacy"
+        return state
     except (OSError, ValueError, TypeError, AttributeError):
         return IqState()
 

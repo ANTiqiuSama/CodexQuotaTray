@@ -19,6 +19,25 @@ DAY = 1_790_000_000.0 - 1_790_000_000.0 % 86400 + 3600      # 01:00 UTC
 
 
 class ModelIqTests(unittest.TestCase):
+    def test_legacy_combined_cache_is_hidden_until_coding_board_is_read(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "iq.json"
+            old = {"models": [m.__dict__ for m in model_iq.parse(PAYLOAD)], "fetched_at": DAY,
+                   "attempted_at": DAY, "calls": {model_iq.utc_day(DAY): 2},
+                   "blocked_day": model_iq.utc_day(DAY), "error": "今日免费额度已用完"}
+            path.write_text(json.dumps(old), encoding="utf-8")
+            state = model_iq.load_state(path)
+            self.assertEqual(state.scores(), [])
+            self.assertEqual(state.fetched_at, 0)
+            self.assertEqual(model_iq.remaining_today(state, DAY), 0)
+            self.assertFalse(model_iq.due(state, DAY))
+            model_iq.read(state, "test-key", DAY + 86400, get=lambda _: PAYLOAD)
+            model_iq.save_state(path, state)
+            updated = model_iq.load_state(path)
+            self.assertEqual(updated.board, "coding")
+            self.assertTrue(updated.scores())
+
     def test_parse_sorts_best_first_and_names_are_compact(self):
         scores = model_iq.parse(PAYLOAD)
         self.assertEqual([s.name for s in scores][:2], ["gpt-5.6-sol", "claude-opus-4-7-20260101"])
