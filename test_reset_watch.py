@@ -21,9 +21,9 @@ class ResetWatchTests(unittest.TestCase):
     def test_panel_probability_is_visible_even_below_alert_threshold(self):
         now = time.time()
         outlook = ResetOutlook("s", "p", 22, 39, fetched_at=now)
-        self.assertEqual(reset_watch.panel_line(outlook, now), "Codex 重置概率 22%")
+        self.assertEqual(reset_watch.panel_line(outlook, now), "Codex 重置 22%")
         self.assertIn("读取中", reset_watch.panel_line(None, now))
-        self.assertEqual(reset_watch.panel_line(outlook, now + reset_watch.STALE_SECONDS + 1), "Codex 重置概率 —")
+        self.assertEqual(reset_watch.panel_line(outlook, now + reset_watch.STALE_SECONDS + 1), "Codex 重置 —")
 
     def test_parsers(self):
         a = parse_willreset(WILLRESET)
@@ -45,7 +45,7 @@ class ResetWatchTests(unittest.TestCase):
         self.assertEqual([r["source"] for r in outlook.readings], ["codex-reset.com", "willcodexreset.com"])
         self.assertEqual(outlook.fetched_at, 100.0)
         self.assertEqual(len(errors), 1)
-        self.assertEqual(panel_line(outlook, 100.0), "Codex 重置概率 28%")
+        self.assertEqual(panel_line(outlook, 100.0), "Codex 重置 28%")
         self.assertFalse(reset_watch.announced(outlook, 100.0))
         single, _ = fetch_outlook(lambda url: CODEX_RESET if "codex-reset" in url else {}, now=100.0)
         self.assertEqual((single.source, single.prob_24), ("codex-reset.com", 45))
@@ -64,7 +64,7 @@ class ResetWatchTests(unittest.TestCase):
         soon = parsed.signal_at + 3600
         outlook, _ = fetch_outlook(lambda url: promised if "codex-reset" in url else {}, now=soon)
         self.assertEqual((outlook.prob_24, outlook.prob_48), (93, 93))
-        self.assertEqual(panel_line(outlook, soon), "Codex 重置概率 93%")
+        self.assertEqual(panel_line(outlook, soon), "Codex 重置 93%")
         self.assertTrue(reset_watch.announced(outlook, soon))
         self.assertEqual(reset_watch.effective(parsed, None, parsed.signal_at + 2 * 86400)[:2], (22, 39))   # a day later
         self.assertEqual(reset_watch.effective(parsed, parsed.signal_at + 60, soon)[:2], (22, 39))         # reset happened
@@ -80,10 +80,10 @@ class ResetWatchTests(unittest.TestCase):
     def test_panel_line_shows_probabilities_or_state(self):
         now = time.time()
         high = ResetOutlook("willreset.com", "p", 71, 81, now - 3600, "x", "Direct usage reset", "Done", now)
-        self.assertEqual(panel_line(high, now), "Codex 重置概率 71%")
-        self.assertEqual(panel_line(ResetOutlook("s", "p", 20, None, fetched_at=now), now), "Codex 重置概率 20%")
+        self.assertEqual(panel_line(high, now), "Codex 重置 71%")
+        self.assertEqual(panel_line(ResetOutlook("s", "p", 20, None, fetched_at=now), now), "Codex 重置 20%")
         self.assertIn("读取中", panel_line(None, now))
-        self.assertEqual(panel_line(ResetOutlook("s", "p", 20, 30, fetched_at=now - 5 * 3600), now), "Codex 重置概率 —")
+        self.assertEqual(panel_line(ResetOutlook("s", "p", 20, 30, fetched_at=now - 5 * 3600), now), "Codex 重置 —")
 
 
 class TrayResetTests(unittest.TestCase):

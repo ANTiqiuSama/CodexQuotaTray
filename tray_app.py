@@ -41,6 +41,7 @@ from quota_sources import (
 import hover_details
 import mimo_usage
 import providers as provider_registry
+import model_iq
 import reset_watch
 from refresh_scheduler import RefreshScheduler
 from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
@@ -203,6 +204,8 @@ def load_preferences() -> dict:
     except (OSError, ValueError):
         return {}
 RESET_PATH = DATA_DIR / "codex_reset.json"
+IQ_STATE_PATH = DATA_DIR / "model_iq.json"
+IQ_CONFIG_PATH = DATA_DIR / "model_iq_config.json"     # AI Stupid Level key + chosen models
 # Providers whose quota resets raise a Windows notification.
 RESET_NOTIFY = {part.strip().lower() for part in (os.environ.get("CODEX_QUOTA_RESET_NOTIFY") or "codex,grok,claude").split(",") if part.strip()}
 RESET_NOTIFY_MIN_GAIN = 10.0     # percentage points regained before it counts as a reset
@@ -288,6 +291,10 @@ class QuotaTray:
         self.shown_order: list[str] = []
         self.reordered_at = 0.0
         self.reset_outlook = reset_watch.load(RESET_PATH) if reset_watch.ENABLED else None
+        self.iq_state = model_iq.load_state(IQ_STATE_PATH)
+        self.iq_config = model_iq.load_config(IQ_CONFIG_PATH)
+        self.iq_lock = threading.Lock()
+        self.iq_wake = threading.Event()
         # Cached figures may use a different alert threshold.  Notify once
         # after a fresh high forecast arrives, then suppress repeats this run.
         self.reset_alerted = "unknown"
@@ -552,6 +559,7 @@ class QuotaTray:
             outlook = getattr(self, "reset_outlook", None)
             banner = reset_watch.panel_line(outlook, now)
             alert = "官方预告" if reset_watch.announced(outlook, now) else ""
+        intel, intel_note = self.panel_intel(now)
         forecast, forecast_tone = self.headline_forecast(provider)
         today_used = None
         if provider == "mimo":
@@ -561,7 +569,7 @@ class QuotaTray:
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used, self.upcoming_resets(now),
-                                      self.burn_chart(provider, now), alert)
+                                      self.burn_chart(provider, now), alert, intel, intel_note)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
@@ -949,6 +957,73 @@ class QuotaTray:
         mark = "可能即将重置 · " if outlook.level() == "high" else ""
         return f"全局重置预测：{mark}24h {outlook.prob_24}% · 48h {outlook.prob_48}%（{outlook.source}）"
 
+    # ----- model IQ (AI Stupid Level) -------------------------------------------------
+    def panel_intel(self, now: float) -> tuple[tuple, str]:
+        """(models on the banner's right, note when there are none)."""
+        state, config = getattr(self, "iq_state", None), getattr(self, "iq_config", None) or {}
+        if not model_iq.effective_key(config):
+            return (), "未设置"
+        models = model_iq.hover_models(state, config.get("shown"))
+        if not models:
+            error = state.error if state else ""
+            return (), ("Key 无效" if "Key" in error else "今日已用完" if "用完" in error else "读取失败" if error else "读取中")
+        stale = model_iq.is_stale(state, now)
+        return tuple((m.short, model_iq.score_text(m), "idle" if stale else model_iq.score_tone(m)) for m in models), ""
+
+    def model_iq_status(self) -> dict:
+        now = time.time()
+        state, config = self.iq_state, self.iq_config
+        return {"key": config.get("key", ""), "env_key": bool(os.environ.get(model_iq.ENV_KEY)),
+                "shown": config.get("shown"), "models": state.scores(), "fetched": model_iq.age_text(state, now),
+                "fetched_at": state.fetched_at, "remaining": model_iq.remaining_today(state, now),
+                "calls": model_iq.calls_today(state, now), "error": state.error,
+                "default": model_iq.default_selection(state.scores())}
+
+    def save_model_iq(self, key: str, shown: list[str] | None) -> None:
+        model_iq.save_config(IQ_CONFIG_PATH, key, shown)
+        changed = (key or "").strip() != self.iq_config.get("key")
+        self.iq_config = model_iq.load_config(IQ_CONFIG_PATH)
+        if changed:
+            self.iq_state.attempted_at = 0.0  # try the new key on the next pass (still within the daily budget)
+            self.iq_wake.set()             # a new key: read now if a read is due (it is, before the first one)
+        self.update_ui()
+
+    def refresh_model_iq(self) -> str:
+        """Manual read from the settings page; spends one of the day's calls."""
+        key = model_iq.effective_key(self.iq_config)
+        if not key:
+            return "请先填写 API Key"
+        now = time.time()
+        with self.iq_lock:
+            if model_iq.remaining_today(self.iq_state, now) <= 0:
+                return "今日 10 次已用完（00:00 UTC 重置）"
+            model_iq.read(self.iq_state, key, now)
+            model_iq.save_state(IQ_STATE_PATH, self.iq_state)
+        self.update_ui()
+        return self.iq_state.error or f"✓ 已读取 {len(self.iq_state.models)} 个模型"
+
+    def iq_loop(self) -> None:
+        """Automatic reads: every 3 h, at most 7 a day; the count is kept on disk
+        so restarts spend no extra calls."""
+        while not self.stop_event.is_set():
+            key = model_iq.effective_key(self.iq_config)
+            now = time.time()
+            if key:
+                with self.iq_lock:
+                    if model_iq.due(self.iq_state, now):
+                        model_iq.read(self.iq_state, key, now)
+                        model_iq.save_state(IQ_STATE_PATH, self.iq_state)
+                        log.info("model iq read: %d models%s", len(self.iq_state.models),
+                                 f" ({self.iq_state.error})" if self.iq_state.error else "")
+                        self.update_ui()
+            self.iq_wake.clear()
+            self.iq_wake.wait(600)
+            if self.stop_event.is_set():
+                break
+
+    def open_iq_page(self, _icon=None, _item=None) -> None:
+        os.startfile(model_iq.SITE)  # type: ignore[attr-defined]
+
     def open_reset_page(self, _icon=None, _item=None) -> None:
         outlook = getattr(self, "reset_outlook", None)
         os.startfile(outlook.page if outlook else "https://willreset.com/")  # type: ignore[attr-defined]
@@ -1152,6 +1227,10 @@ class QuotaTray:
             self.wake.set()
 
     def open_settings(self, _icon=None, _item=None) -> None:
+        self.open_settings_page(None)
+
+    def open_settings_page(self, page: str | None) -> None:
+        """Settings window, optionally on one page (the panel banner opens "iq")."""
         from settings_window import SettingsController
         self.settings_requested.set()
         for icon in self.icons.values():
@@ -1160,8 +1239,8 @@ class QuotaTray:
         with self.ui_lock:
             if self.settings_ui is None:
                 self.settings_ui = SettingsController(self)
-            self.settings_ui.show()
-        log.info("settings window requested")
+            self.settings_ui.show(page)
+        log.info("settings window requested%s", f" ({page})" if page else "")
 
     def apply_preferences(self, prefs: dict) -> None:
         """Settings-page choices; an explicitly set environment variable still wins."""
@@ -1207,6 +1286,7 @@ class QuotaTray:
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
         if reset_watch.ENABLED and "codex" in PROVIDERS:
             threading.Thread(target=self.reset_loop, name="codex-reset-watch", daemon=True).start()
+        threading.Thread(target=self.iq_loop, name="model-iq", daemon=True).start()
         hover = HoverDetails(self.icons, self.hover_text, self.stop_event, agents=self)
         threading.Thread(target=hover.run, name="hover-details", daemon=True).start()
         ready = [threading.Event() for _ in self.slots]

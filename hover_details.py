@@ -599,7 +599,10 @@ class HoverDetails:
             if event[0] == "settings":
                 panel.hide()
                 self.candidate = None
-                self.agents.open_settings()
+                if len(event) > 1 and hasattr(self.agents, "open_settings_page"):
+                    self.agents.open_settings_page(event[1])
+                else:
+                    self.agents.open_settings()
                 return
             elif event[0] == "merge":
                 merged = self.agents.merge(event[1], event[2])

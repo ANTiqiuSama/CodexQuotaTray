@@ -391,7 +391,7 @@ class SceneTests(unittest.TestCase):
             self.assertTrue(all(probe.textlength(line, font=face) <= limit for line in lines))
             scene = agent_panel.Scene()
             scene.set_model(agent_panel.PanelModel("codex", "C", "GPT / Codex", "空闲", (("5 小时", 70, "2小时后重置"),),
-                                                  0, (), "idle", "Codex 重置概率 22%", text, "warn"), 0)
+                                                  0, (), "idle", "Codex 重置 22%", text, "warn"), 0)
             self.assertIsNotNone(scene.render(scale))
 
     def test_switching_source_rolls_figures_faster_than_opening(self):
