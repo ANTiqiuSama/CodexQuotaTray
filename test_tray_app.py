@@ -925,5 +925,8 @@ class ModelIqTrayTests(unittest.TestCase):
                 self.assertEqual(tray.panel_intel(time.time())[0], (("Gemini 3 Pro", "70", "ok", False),))
                 intel, _ = tray.panel_intel(time.time(), ["claude-sonnet-4-5"])     # the TPS model leads
                 self.assertEqual(intel[0], ("Sonnet 4.5", "66", "ok", True))
+                tray.iq_state.blocked_day, tray.iq_state.error = model_iq.utc_day(time.time()), "今日免费额度已用完"
+                self.assertEqual(tray.panel_intel(time.time() + 40 * 3600)[1], "")     # last result, no quota note
+                self.assertTrue(tray.panel_intel(time.time() + 40 * 3600)[0])
                 self.assertFalse(tray.iq_wake.is_set())          # same key: no extra call
                 self.assertEqual(tray.model_iq_status()["calls"], 1)

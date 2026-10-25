@@ -967,11 +967,11 @@ class QuotaTray:
         if not model_iq.effective_key(config):
             return (), "未设置"
         models = model_iq.hover_models(state, config.get("shown"), running)
-        if not models:
+        if not models:                 # nothing ever read: no quota or error wording on the panel
             error = state.error if state else ""
-            return (), ("Key 无效" if "Key" in error else "今日已用完" if "用完" in error else "读取失败" if error else "读取中")
-        stale = model_iq.is_stale(state, now)
-        return tuple((m.short, model_iq.score_text(m), "idle" if stale else "ok", live) for m, live in models), ""
+            return (), ("Key 无效" if "Key" in error else "读取中")
+        # Always the last result as it is, however old or whatever the last call returned.
+        return tuple((m.short, model_iq.score_text(m), "ok", live) for m, live in models), ""
 
     def model_iq_status(self) -> dict:
         now = time.time()

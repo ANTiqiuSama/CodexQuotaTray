@@ -19,7 +19,7 @@ DAY = 1_790_000_000.0 - 1_790_000_000.0 % 86400 + 3600      # 01:00 UTC
 
 
 class ModelIqTests(unittest.TestCase):
-    def test_legacy_combined_cache_is_hidden_until_coding_board_is_read(self):
+    def test_legacy_cache_stays_until_the_coding_board_is_read(self):
         import json
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "iq.json"
@@ -28,8 +28,8 @@ class ModelIqTests(unittest.TestCase):
                    "blocked_day": model_iq.utc_day(DAY), "error": "今日免费额度已用完"}
             path.write_text(json.dumps(old), encoding="utf-8")
             state = model_iq.load_state(path)
-            self.assertEqual(state.scores(), [])
-            self.assertEqual(state.fetched_at, 0)
+            self.assertEqual(len(state.scores()), 5)                 # the last result stays on show
+            self.assertEqual(state.board, "legacy")
             self.assertEqual(model_iq.remaining_today(state, DAY), 0)
             self.assertFalse(model_iq.due(state, DAY))
             model_iq.read(state, "test-key", DAY + 86400, get=lambda _: PAYLOAD)
@@ -100,6 +100,13 @@ class ModelIqTests(unittest.TestCase):
             self.assertEqual(len(state.scores()), 5)                # the last scores stay
             tomorrow = DAY + 86400
             self.assertTrue(model_iq.due(state, tomorrow))
+
+    def test_an_empty_answer_keeps_the_last_result(self):
+        state = model_iq.IqState()
+        model_iq.read(state, "k" * 10, DAY, get=lambda key: PAYLOAD)
+        model_iq.read(state, "k" * 10, DAY + model_iq.READ_SECONDS, get=lambda key: {"data": []})
+        self.assertEqual(len(state.scores()), 5)
+        self.assertEqual(state.fetched_at, DAY)
 
     def test_a_failing_key_waits_the_full_interval(self):
         state = model_iq.IqState()

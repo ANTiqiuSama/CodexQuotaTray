@@ -30,7 +30,6 @@ USER_AGENT = "CodexQuotaTray (+https://github.com/ANTiqiuSama/CodexQuotaTray)"
 DAILY_LIMIT = 10                 # free key: 10 calls per UTC day
 AUTO_CALLS_PER_DAY = 7           # automatic reads; the other 3 stay for manual refresh
 READ_SECONDS = 3 * 3600          # automatic cadence (7 reads span 21 h)
-STALE_SECONDS = 30 * 3600        # older scores are greyed out as stale
 HOVER_MAX = 3                    # models on the hover panel line
 ENV_KEY = "CODEX_QUOTA_IQ_KEY"
 
@@ -253,6 +252,9 @@ def read(state: IqState, key: str, now: float, get: Callable[[str], dict] | None
     except Exception as error:   # network or layout change: keep the last scores
         state.error = f"读取失败：{type(error).__name__}"
         return state
+    if not models:                 # an empty answer never wipes the last result
+        state.error = "读取失败：返回为空"
+        return state
     state.models = [asdict(m) for m in models]
     state.fetched_at, state.error = now, ""
     state.board = "coding"
@@ -266,9 +268,10 @@ def load_state(path: Path) -> IqState:
         data = json.loads(path.read_text(encoding="utf-8"))
         state = IqState(**{k: v for k, v in data.items() if k in IqState.__dataclass_fields__})
         if data.get("board") != "coding":
-            # Older releases cached the combined board. Its figures must not
-            # be relabelled as coding scores while the API is rate-limited.
-            state.models, state.fetched_at, state.board = [], 0.0, "legacy"
+            # Older releases cached the combined board. Keep showing those last
+            # figures (the panel always shows the last result) until the next
+            # coding-board read (the normal 3-hourly one) replaces them.
+            state.board = "legacy"
         return state
     except (OSError, ValueError, TypeError, AttributeError):
         return IqState()
@@ -319,7 +322,3 @@ def age_text(state: IqState, now: float) -> str:
     if minutes < 60:
         return f"{minutes} 分钟前"
     return f"{minutes // 60} 小时前"
-
-
-def is_stale(state: IqState | None, now: float) -> bool:
-    return state is None or not state.fetched_at or now - state.fetched_at > STALE_SECONDS
