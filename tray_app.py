@@ -453,7 +453,8 @@ class QuotaTray:
                 has_argon = any(str(p.get("key") or p.get("label") or "").lower() == "argon" for p in snapshot.pools)
                 for pool in snapshot.pools:
                     key = str(pool.get("key") or pool.get("label") or "").lower()
-                    label = {"argon": "Argon", "claude_gpt": "Opus", "claude/gpt": "Opus", "opus": "Opus"}.get(key)
+                    label = {"argon": "Argon", "claude_gpt": "Gemini · Opus", "claude/gpt": "Gemini · Opus",
+                             "opus": "Gemini · Opus"}.get(key)
                     if key == "gemini" and not has_argon:
                         label = "Flash"
                     if label:
@@ -463,9 +464,9 @@ class QuotaTray:
                         stamp = pool.get("resets_at")
                         if stamp is None or stamp <= now:
                             continue
-                        window = (pool.get("label") or label) + " · " + (window_label(pool.get("window_minutes")) or "周期")
+                        window = (pool.get("label") or label.removeprefix("Gemini · ")) + " · " + (window_label(pool.get("window_minutes")) or "周期")
                         candidates.append((float(stamp), agent_panel.ResetColumn(provider, provider_letter(provider),
-                            label,      # short pool name: Argon / Opus / Flash
+                            label,      # Argon / Flash; Opus keeps the Gemini prefix (not Claude)
                             window, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"),
                             duration_text(stamp - now) + "后")))
                     continue

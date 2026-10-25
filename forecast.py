@@ -39,14 +39,14 @@ class Forecast:
 
 
 def duration_text(seconds: float) -> str:
-    """Compact: whole hours (rounded) from an hour up, minutes only below an
-    hour, e.g. "2 天 5 小时", "3 小时", "35 分钟"."""
+    """Compact, one unit only: whole days (rounded) from a day up, whole hours
+    from an hour up, minutes below an hour, e.g. "2 天", "3 小时", "35 分钟"."""
     seconds = max(0, int(seconds))
     if seconds < 3570:
         return f"{max(1, round(seconds / 60))} 分钟"
-    days, hours = divmod(round(seconds / 3600), 24)
-    if days:
-        return f"{days} 天 {hours} 小时" if hours else f"{days} 天"
+    hours = round(seconds / 3600)
+    if hours >= 24:
+        return f"{max(1, round(seconds / 86400))} 天"
     return f"{hours} 小时"
 
 

@@ -593,11 +593,11 @@ class AgentPanelTests(unittest.TestCase):
         resets = self.tray.upcoming_resets(now)
         self.assertEqual([r.provider for r in resets], ["gemini", "codex", "gemini"])
         self.assertEqual(resets[1].window, "每周")
-        self.assertEqual([r.name for r in resets], ["Argon", "Codex", "Opus"])
+        self.assertEqual([r.name for r in resets], ["Argon", "Codex", "Gemini · Opus"])
         self.assertEqual([r.letter for r in resets], ["G", "C", "G"])
         gemini.pools[0]["resets_at"] = now - 1
         later = self.tray.upcoming_resets(now)
-        self.assertEqual([r.name for r in later], ["Codex", "Opus", "Grok"])
+        self.assertEqual([r.name for r in later], ["Codex", "Gemini · Opus", "Grok"])
         self.assertIn("后", resets[0].countdown)
 
     def test_upcoming_resets_unknown_or_past_times_do_not_invent_dates(self):
@@ -648,7 +648,7 @@ class AgentPanelTests(unittest.TestCase):
         snapshot.pools = [{"label": "Gemini", "remaining_percent": 99, "window_minutes": 300, "resets_at": now + 60},
                           {"label": "Claude/GPT", "remaining_percent": 0, "window_minutes": 300, "resets_at": now + 3600}]
         items = [item for item in self.tray.upcoming_resets(now) if item.provider == "gemini"]
-        self.assertEqual([item.name for item in items], ["Flash", "Opus"])
+        self.assertEqual([item.name for item in items], ["Flash", "Gemini · Opus"])
         self.assertEqual(items[1].window, "Claude/GPT · 5 小时")
         self.assertFalse(any("Argon" in item.name for item in items))
 
