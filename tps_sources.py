@@ -235,6 +235,8 @@ class TpsMonitor:
         self.readers: dict[Path, JsonlReader] = {}
         self.context: dict[str, dict[str, Any]] = {}
         self.events: deque[Observation] = deque()
+        self.added_total = 0               # observations ever added (consumers read only the new tail)
+        self.source_seen: dict[tuple[str, str], float] = {}   # (provider, source) -> newest ended_at
         self.seen: set[str] = set()
         self.completed_at: dict[str, float] = {}
         self.client_stream_starts: dict[str, list[float]] = {}
@@ -270,6 +272,10 @@ class TpsMonitor:
             return
         self.seen.add(observation.identity)
         self.events.append(observation)
+        self.added_total += 1
+        pair = (observation.provider, observation.source)
+        if self.source_seen.get(pair, 0.0) < observation.ended_at:
+            self.source_seen[pair] = observation.ended_at
 
     @staticmethod
     def _recent(path: Path, now: float) -> bool:
@@ -296,6 +302,14 @@ class TpsMonitor:
         for session, moment in list(self.completed_at.items()):
             if moment < now - FORGET_SECONDS:
                 self.completed_at.pop(session, None)
+        # One entry per session ever seen; without pruning these grew for the
+        # life of the process (every Claude session, every 30-min Grok quota read).
+        for session, moment in list(self.claude_last_input.items()):
+            if moment < now - FORGET_SECONDS:
+                self.claude_last_input.pop(session, None)
+        grok_live = {path.parent.name for path in self.readers if path.name == "updates.jsonl"}
+        for counter in [counter for counter in self.grok_counters if counter[0] not in grok_live]:
+            self.grok_counters.pop(counter, None)
         live = set(self.file_sessions.values()) | set(self.activity) | set(self.client_stream_starts)
         self.notes.prune(live, now)
         for session in list(self.context):
@@ -1066,8 +1080,26 @@ class TpsMonitor:
         # The installed Codex bridge emits a second copy of agy's usage. Only
         # compare its known isolated agy channel, one-to-one, with exact output
         # counts and near-identical completion time; unrelated CLI runs remain.
-        copies = [e for e in self.events if e.source == "Codex · Gemini桥接回传"]
-        native = [e for e in self.events if e.source == "Antigravity CLI · Codex隔离配置"]
+        # This runs every second over up to a day of observations. One pass
+        # collects the copies to de-duplicate, the sources per provider and the
+        # last HOLD_TPS_SECONDS; everything else works on that short window
+        # (it used to be ~20 full passes, the bulk of the TPS thread's CPU).
+        copy_source, native_source = "Codex · Gemini桥接回传", "Antigravity CLI · Codex隔离配置"
+        copies, native, window = [], [], []
+        cutoff = now - max(HOLD_TPS_SECONDS, 300)
+        for e in self.events:
+            if e.ended_at >= cutoff:
+                window.append(e)
+            if e.source == copy_source:
+                copies.append(e)
+            elif e.source == native_source:
+                native.append(e)
+        sources: dict[str, set] = {}
+        for (provider, source), newest in list(self.source_seen.items()):
+            if newest < now - 86400:
+                self.source_seen.pop((provider, source), None)     # its events have left the deque
+            elif source != copy_source:
+                sources.setdefault(provider, set()).add(source)
         duplicate_ids = set()
         available = list(native)
         for copy in copies:
@@ -1075,12 +1107,14 @@ class TpsMonitor:
             if match:
                 duplicate_ids.add(copy.identity)
                 available.remove(match)
+            else:
+                sources.setdefault(copy.provider, set()).add(copy.source)
         providers = {}
         for provider, label in PROVIDER_NAMES.items():
-            events = [e for e in self.events if e.provider == provider and e.identity not in duplicate_ids]
-            recent = [e for e in events if e.count_in_rate and now - 60 <= e.ended_at <= now]
+            events = [e for e in window if e.provider == provider]
+            recent = [e for e in events if e.count_in_rate and now - 60 <= e.ended_at <= now and e.identity not in duplicate_ids]
             # A deduplicated bridge copy still carries the client's stream timing.
-            samples = [e for e in self.events if e.provider == provider and now - 300 <= e.ended_at <= now and e.native_tps is not None]
+            samples = [e for e in events if now - 300 <= e.ended_at <= now and e.native_tps is not None]
             latest = max(samples, key=lambda e:e.ended_at) if samples else None
             active = sum(1 for value in self.activity.values() if value[0] == provider)
             # herdr sees agents working before (and between) their local records.
@@ -1099,11 +1133,11 @@ class TpsMonitor:
             if generation is None and active:
                 # A long reply or tool run has no finished sample for minutes; keep
                 # the last measured rate (up to HOLD_TPS_SECONDS) instead of 0.
-                held = [e for e in self.events if e.provider == provider and e.native_tps is not None and now - HOLD_TPS_SECONDS <= e.ended_at <= now]
+                held = [e for e in events if e.native_tps is not None and now - HOLD_TPS_SECONDS <= e.ended_at <= now]
                 if held:
                     latest = max(held, key=lambda e: e.ended_at)
                     generation, basis_text = latest.native_tps, f"{latest.basis}；仍在工作，保留上次测得的速率"
-            providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted({e.source for e in events}), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
+            providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted(sources.get(provider, ())), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
 
 

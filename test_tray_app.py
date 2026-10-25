@@ -321,6 +321,34 @@ class IconArtTests(unittest.TestCase):
         self.assertEqual([tps_text(v) for v in (7.4, 143, 2500, 99999)], ["7", "143", "2k", "9k+"])
 
 
+class SteadyStateCostTests(unittest.TestCase):
+    def test_unchanged_icons_are_not_redrawn_every_second(self):
+        snapshot = QuotaSnapshot(provider="codex", label="Codex", window_minutes=300, used_percent=40, remaining_percent=60,
+                                 resets_at=None, updated_at=time.time(), stale=False, error=None)
+        idle = {"active_sessions": 0, "display_tps": None}
+        first = tray_app.make_display_icon(snapshot, "C", idle)
+        self.assertIs(first, tray_app.make_display_icon(snapshot, "C", idle))
+        live = {"active_sessions": 1, "display_tps": 85.04}
+        self.assertIs(tray_app.make_display_icon(snapshot, "C", live), tray_app.make_display_icon(snapshot, "C", dict(live, display_tps=85.01)))
+
+    def test_mimo_ledger_only_sees_new_observations(self):
+        from collections import deque
+        events = deque(SimpleNamespace(identity=str(i), provider="other") for i in range(5))
+        monitor = SimpleNamespace(events=events, added_total=5)
+        seen = []
+        ledger = SimpleNamespace(ingest=lambda items: seen.append([e.identity for e in items]) or 0, save=lambda: None)
+        tracker = SimpleNamespace(ledger=ledger, view=lambda now=None: None)
+        app = SimpleNamespace(tps_monitor=monitor, mimo_ingested=0, mimo_view_at=time.time(),
+                              snapshots={"mimo": SimpleNamespace(remaining_percent=None)})
+        with patch.object(tray_app, "mimo_tracker", return_value=tracker):
+            QuotaTray.update_mimo_locally(app, time.time())
+            events.append(SimpleNamespace(identity="5", provider="mimo"))
+            monitor.added_total = 6
+            QuotaTray.update_mimo_locally(app, time.time())
+            QuotaTray.update_mimo_locally(app, time.time())
+        self.assertEqual([[str(i) for i in range(5)], ["5"]], seen)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -565,7 +593,7 @@ class AgentPanelTests(unittest.TestCase):
         resets = self.tray.upcoming_resets(now)
         self.assertEqual([r.provider for r in resets], ["gemini", "codex", "gemini"])
         self.assertEqual(resets[1].window, "每周")
-        self.assertEqual([r.name for r in resets], ["Gemini · Argon", "Codex", "Gemini · Opus"])
+        self.assertEqual([r.name for r in resets], ["Argon", "Codex", "Gemini · Opus"])
         self.assertEqual([r.letter for r in resets], ["G", "C", "G"])
         gemini.pools[0]["resets_at"] = now - 1
         later = self.tray.upcoming_resets(now)
@@ -620,7 +648,7 @@ class AgentPanelTests(unittest.TestCase):
         snapshot.pools = [{"label": "Gemini", "remaining_percent": 99, "window_minutes": 300, "resets_at": now + 60},
                           {"label": "Claude/GPT", "remaining_percent": 0, "window_minutes": 300, "resets_at": now + 3600}]
         items = [item for item in self.tray.upcoming_resets(now) if item.provider == "gemini"]
-        self.assertEqual([item.name for item in items], ["Gemini", "Gemini · Opus"])
+        self.assertEqual([item.name for item in items], ["Flash", "Gemini · Opus"])
         self.assertEqual(items[1].window, "Claude/GPT · 5 小时")
         self.assertFalse(any("Argon" in item.name for item in items))
 
@@ -636,7 +664,7 @@ class AgentPanelTests(unittest.TestCase):
         model = self.tray.panel("gemini")
         self.assertNotIn("Argon", [q[0] for q in model.quota])
         self.assertFalse(any("Argon" in item.name for item in model.upcoming_resets))
-        self.assertIn("Gemini", [item.name for item in model.upcoming_resets])
+        self.assertIn("Flash", [item.name for item in model.upcoming_resets])
         scene.set_model(model, 1)
         for scale in (1, 1.25, 1.5):
             self.assertIsNotNone(scene.render(scale))

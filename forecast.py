@@ -39,21 +39,15 @@ class Forecast:
 
 
 def duration_text(seconds: float) -> str:
+    """Compact, one unit only: whole days (rounded) from a day up, whole hours
+    from an hour up, minutes below an hour, e.g. "2 天", "3 小时", "35 分钟"."""
     seconds = max(0, int(seconds))
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
-    if days:
-        return f"{days} 天 {hours} 小时" if hours else f"{days} 天"
-    if hours:
-        return f"{hours} 小时 {minutes} 分" if minutes else f"{hours} 小时"
-    return f"{max(1, minutes)} 分钟"
-
-
-def rate_text(rate_per_hour: float) -> str:
-    if rate_per_hour >= 1:
-        return f"{rate_per_hour:.1f}%/小时"
-    return f"{rate_per_hour * 24:.1f}%/天"
+    if seconds < 3570:
+        return f"{max(1, round(seconds / 60))} 分钟"
+    hours = round(seconds / 3600)
+    if hours >= 24:
+        return f"{max(1, round(seconds / 86400))} 天"
+    return f"{hours} 小时"
 
 
 def same_window(a: int | None, b: int | None) -> bool:
@@ -102,16 +96,15 @@ def forecast(samples: Iterable[Sample], now: float, remaining: float | None, res
     if rate < IDLE_RATE:
         return Forecast("idle", "近期几乎没有消耗，重置前够用", rate)
     exhausts_at = now + remaining / rate * 3600
-    pace = rate_text(rate)
     if resets_at and resets_at > now and exhausts_at >= resets_at:
         spare = remaining - rate * (resets_at - now) / 3600
-        return Forecast("ok", f"按当前速度（{pace}）重置前够用，约剩 {spare:.0f}%", rate, exhausts_at, False)
+        return Forecast("ok", f"按当前速度重置前够用，约剩 {spare:.0f}%", rate, exhausts_at, False)
     left = exhausts_at - now
     if resets_at and resets_at > now:
         gap = resets_at - exhausts_at
         tone = "danger" if left < 3600 else "warn"
-        return Forecast(tone, f"按当前速度（{pace}）约 {duration_text(left)}后用完，早于重置 {duration_text(gap)}", rate, exhausts_at, True)
-    return Forecast("warn" if left < 3 * 3600 else "ok", f"按当前速度（{pace}）约 {duration_text(left)}后用完", rate, exhausts_at, None)
+        return Forecast(tone, f"按当前速度约 {duration_text(left)}后用完，早于重置 {duration_text(gap)}", rate, exhausts_at, True)
+    return Forecast("warn" if left < 3 * 3600 else "ok", f"按当前速度约 {duration_text(left)}后用完", rate, exhausts_at, None)
 
 
 class QuotaHistory:

@@ -394,6 +394,30 @@ class SceneTests(unittest.TestCase):
                                                   0, (), "idle", "Codex 重置概率 22%", text, "warn"), 0)
             self.assertIsNotNone(scene.render(scale))
 
+    def test_switching_source_rolls_figures_faster_than_opening(self):
+        def model(provider, letter, value, tps):
+            return agent_panel.PanelModel(provider, letter, provider, "空闲", (("5 小时", value, ""), ("每周", value, "")), tps, ())
+
+        def settle_time(scene, start, target):
+            moment = start          # until the shown figures (bar % and TPS) reach the new values
+            while moment < start + 5 and (abs(scene.meters[0].value - target[0]) >= 0.5
+                                          or abs(scene.rate.value - target[1]) >= 0.5):
+                moment += 1 / 60
+                scene.step(moment, None, False, False)
+            return moment - start
+
+        scene = agent_panel.Scene()
+        scene.set_model(model("codex", "C", 80, 100), 0.0)
+        opening = settle_time(scene, 0.0, (80, 100))
+        scene.set_model(model("grok", "X", 20, 300), 10.0)
+        switching = settle_time(scene, 10.0, (20, 300))
+        self.assertLess(switching, opening * 0.5)
+        self.assertLess(switching, 0.4)
+        fresh = agent_panel.Scene()                          # a new opening counts up at the easy pace again
+        fresh.set_model(model("codex", "C", 80, 100), 0.0)
+        self.assertEqual((fresh.meters[0].stiffness, fresh.rate.stiffness),
+                         (agent_panel.METER_SPRING[0], agent_panel.RATE_SPRING[0]))
+
     def test_gear_release_and_right_click_open_settings(self):
         scene = agent_panel.Scene()
         model = panel()
@@ -581,7 +605,10 @@ class SteadyBubbleTests(unittest.TestCase):
         model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),
                                        0.0, (), "live")
         self.assertTrue(agent_panel.pooled(model))
-        self.assertFalse(agent_panel.pooled(panel()))
+        self.assertTrue(agent_panel.pooled(panel()))                     # Codex 5 h + weekly: one shade each, like Gemini
+        codex = [shade("C", slot, 60.0, True) for slot in range(2)]
+        self.assertEqual(codex[0], agent_panel.accent("C"))
+        self.assertGreater(sum(abs(x - y) for x, y in zip(codex[0][:3], codex[1][:3])), 120, codex)
 
     def test_chart_draws_in_on_opening_then_rests(self):
         chart = agent_panel.BurnChart(0, 5 * 3600, 3600, (agent_panel.BurnSeries("5 小时", 0, ((0, 100), (3600, 60)), 40.0, 5 * 3600),))
@@ -776,6 +803,24 @@ class HerdrAndHelperTests(unittest.TestCase):
         self.assertEqual(native, herdr.attach(native, 10.0))
         self.assertEqual("服务未运行", herdr.status)
         self.assertEqual([], herdr_source.Herdr(enabled=False).poll(10.0))
+
+    def test_idle_or_stopped_herdr_is_polled_less_often(self):
+        import herdr_source
+        results = {"code": 1, "out": ""}
+        calls = []
+
+        def runner(command, **_):
+            calls.append(command)
+            return type("R", (), {"returncode": results["code"], "stdout": results["out"]})()
+        herdr = herdr_source.Herdr(exe="herdr", runner=runner, enabled=True)
+        herdr.poll(100.0)
+        herdr.poll(100.0 + herdr_source.POLL_SECONDS + 0.1)      # server not running: no new process yet
+        self.assertEqual(1, len(calls))
+        herdr.poll(100.0 + herdr_source.IDLE_POLL_SECONDS + 0.1)
+        self.assertEqual(2, len(calls))
+        results.update(code=0, out='{"result": {"agents": []}}')
+        herdr.poll(200.0)
+        self.assertEqual(herdr_source.QUIET_POLL_SECONDS, herdr.interval)
 
     def test_unmatched_pane_claims_single_same_folder_session(self):
         import herdr_source

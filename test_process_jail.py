@@ -1,5 +1,4 @@
 """Quota reads must never leave processes behind (they once accumulated by the hundreds)."""
-import json
 import subprocess
 import sys
 import tempfile
@@ -11,6 +10,10 @@ import psutil
 
 import process_jail
 import quota_sources
+
+# Store/venv aliases can activate Python through an application broker. These
+# fixtures need a normal Win32 process tree, like the packaged tray's helpers.
+PYTHON_EXE = psutil.Process().exe()
 
 # A launcher that starts a long-lived grandchild and exits at once: the
 # cmd.exe -> node -> codex shape after cmd.exe is gone. The grandchild's pid is
@@ -48,7 +51,7 @@ class ContainmentTests(unittest.TestCase):
         self.folder.cleanup()
 
     def test_grandchild_of_an_exited_launcher_ends_with_the_job(self):
-        process = process_jail.popen([sys.executable, str(self.script), "launch"], stdout=subprocess.PIPE, text=True)
+        process = process_jail.popen([PYTHON_EXE, str(self.script), "launch"], stdout=subprocess.PIPE, text=True)
         grandchild = int(process.stdout.readline())
         self.spare.append(grandchild)
         process.wait(timeout=10)
@@ -60,7 +63,7 @@ class ContainmentTests(unittest.TestCase):
         process.stdout.close()
 
     def test_run_ends_leftovers_and_a_timeout_ends_the_whole_tree(self):
-        result = process_jail.run([sys.executable, str(self.script), "launch"], capture_output=True, text=True, timeout=20)
+        result = process_jail.run([PYTHON_EXE, str(self.script), "launch"], capture_output=True, text=True, timeout=20)
         grandchild = int(result.stdout.split()[0])
         self.spare.append(grandchild)
         time.sleep(0.3)
@@ -70,7 +73,7 @@ class ContainmentTests(unittest.TestCase):
                         "time.sleep(120)\n", encoding="utf-8")
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
-            process_jail.run([sys.executable, str(hang)], capture_output=True, timeout=1.5)
+            process_jail.run([PYTHON_EXE, str(hang)], capture_output=True, timeout=1.5)
         self.assertLess(time.monotonic() - started, 10)
         leftovers = [p for p in psutil.process_iter(["cmdline"]) if str(hang) in " ".join(p.info["cmdline"] or [])]
         self.assertEqual(leftovers, [])
@@ -85,7 +88,7 @@ else:
         request = json.loads(line)
         print(json.dumps({"id": request["id"], "result": {"pid": os.getpid()}}), flush=True)
 ''', encoding="utf-8")
-        rpc = quota_sources._JsonRpcProcess([sys.executable, "-u", str(server), "launcher"])
+        rpc = quota_sources._JsonRpcProcess([PYTHON_EXE, "-u", str(server), "launcher"])
         try:
             rpc.process.wait(timeout=10)                 # the launcher is gone ...
             leaf = rpc.request("ping", None, timeout=10)["pid"]
