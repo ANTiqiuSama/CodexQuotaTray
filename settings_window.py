@@ -368,8 +368,8 @@ class SettingsWindow:
     def _iq(self, page):
         import model_iq
         tk, S = self.tk, self.S
-        self.heading(page, "模型智商", "AI Stupid Level 持续给主流模型跑基准测试，这里显示各模型近 24 小时的综合分（0–100，越高越好），"
-                                    "箭头为趋势。每 3 小时自动读取一次；免费 Key 每天 10 次，自动最多用 7 次，其余留给“立即读取”。")
+        self.heading(page, "模型智商", "AI Stupid Level 持续给主流模型跑基准测试，这里只显示各模型近 24 小时的编程分（0–100，越高越好）。"
+                                    "每 3 小时自动读取一次；免费 Key 每天 10 次，自动最多用 7 次，其余留给“立即读取”。")
         form = tk.Frame(page, bg=view.SURFACE, padx=S(16), pady=S(14))
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
@@ -452,7 +452,7 @@ class SettingsWindow:
         if self.iq_info.cget("text") != text:
             self.iq_info.configure(text=text)
         shown = self.iq_selected or info["default"]
-        pick = ("、".join(model_iq.short_name(n) for n in shown) or "—") + ("（默认：智商最高的 3 个模型，随读数自动更新）"
+        pick = ("、".join(model_iq.short_name(n) for n in shown) or "—") + ("（默认：编程分最高的 3 个模型，随读数自动更新；正在运行的模型始终排在最前）"
                                                                          if not self.iq_selected else "") + f"；最多 {model_iq.HOVER_MAX} 个，保存后生效"
         if self.iq_pick.cget("text") != pick:
             self.iq_pick.configure(text=pick)
@@ -465,19 +465,17 @@ class SettingsWindow:
             if not models:
                 self.label(self.iq_table, "填写 API Key 后点“立即读取”，这里会列出所有模型的分数。", 10, view.INK_3).grid(row=0, column=0, sticky="w")
                 return
-            for column, title in enumerate(("显示", "#", "模型", "厂商", "分数", "区间", "状态")):
+            for column, title in enumerate(("显示", "#", "模型", "厂商", "编程分")):
                 self.label(self.iq_table, title, 9, view.INK_3).grid(row=0, column=column, sticky="w", padx=(0, S(14)), pady=(0, S(4)))
-            tones = {"danger": "#e07a6a", "warn": "#e5a84b", "ok": view.INK}
             for index, score in enumerate(models, 1):
                 var = self.iq_checks[score.name] = tk.BooleanVar(value=score.name in self.iq_selected)
                 tk.Checkbutton(self.iq_table, variable=var, command=lambda name=score.name: self.iq_toggle(name), bg=view.SURFACE,
                                activebackground=view.SURFACE, selectcolor=view.FIELD, fg=view.INK, bd=0,
                                highlightthickness=0).grid(row=index, column=0, sticky="w")
-                band = "" if score.lower is None or score.upper is None else f"{score.lower:.0f}–{score.upper:.0f}"
                 cells = (str(index), f"{score.short}  ({score.name})" if score.short != score.name else score.name,
-                         model_iq.provider_label(score.provider), model_iq.score_text(score), band, score.status or "")
+                         model_iq.provider_label(score.provider), model_iq.score_text(score))
                 for column, value in enumerate(cells, 1):
-                    color = tones.get(model_iq.score_tone(score), view.INK) if column == 4 else (view.INK if column == 2 else view.INK_2)
+                    color = view.INK if column in (2, 4) else view.INK_2
                     self.label(self.iq_table, value, 10 if column in (2, 4) else 9, color,
                                weight="bold" if column == 4 else "normal").grid(row=index, column=column, sticky="w", padx=(0, S(14)))
 

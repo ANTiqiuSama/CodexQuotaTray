@@ -922,6 +922,8 @@ class ModelIqTrayTests(unittest.TestCase):
                 intel, note = tray.panel_intel(time.time())
                 self.assertEqual([item[0] for item in intel], ["GPT-5.6 Sol", "Opus 4.7", "Gemini 3 Pro"])
                 tray.save_model_iq("asl_live_abcdefgh", ["gemini-3-pro-preview"])
-                self.assertEqual(tray.panel_intel(time.time())[0], (("Gemini 3 Pro", "70", "ok"),))
+                self.assertEqual(tray.panel_intel(time.time())[0], (("Gemini 3 Pro", "70", "ok", False),))
+                intel, _ = tray.panel_intel(time.time(), ["claude-sonnet-4-5"])     # the TPS model leads
+                self.assertEqual(intel[0], ("Sonnet 4.5", "66", "ok", True))
                 self.assertFalse(tray.iq_wake.is_set())          # same key: no extra call
                 self.assertEqual(tray.model_iq_status()["calls"], 1)

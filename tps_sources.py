@@ -1137,7 +1137,7 @@ class TpsMonitor:
                 if held:
                     latest = max(held, key=lambda e: e.ended_at)
                     generation, basis_text = latest.native_tps, f"{latest.basis}；仍在工作，保留上次测得的速率"
-            providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted(sources.get(provider, ())), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
+            providers[provider] = {"label": label, "active_sessions": active, "generation_tps": generation, "output_tps_60": round(output / 60, 2), "output_tokens_60": output, "generation_samples": len(samples), "basis": [basis_text] if latest else ["客户端暂未提供可核验TPS"], "models": sorted({e.model for e in samples}), "sources": sorted(sources.get(provider, ())), "last_sample_at": latest.ended_at if latest else None, "display_tps": generation, "display_model": latest.model if latest else None, "display_basis": basis_text if latest else "客户端暂未取得TPS"}
         return {"generated_at": now, "window_seconds": 60, "providers": providers, "total_output_tps_60": round(sum(p["output_tokens_60"] for p in providers.values()) / 60, 2), "software": self.software, "source_health": self.health, "measurement_note": "Grok直读CLI原生TPS；Codex使用客户端真实输出token数÷首个输出项至计数完成的流式时间，含思考及工具调用输出，完成时结算。使用时显示最近完成的TPS，缺少完整计数时保留额度；不使用字符数或近似分词器。60秒输出速率为已报告输出数之和÷60，不计输入/缓存，不重复加思考token。"}
 
 

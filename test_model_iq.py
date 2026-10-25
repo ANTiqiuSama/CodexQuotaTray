@@ -23,21 +23,36 @@ class ModelIqTests(unittest.TestCase):
         scores = model_iq.parse(PAYLOAD)
         self.assertEqual([s.name for s in scores][:2], ["gpt-5.6-sol", "claude-opus-4-7-20260101"])
         self.assertEqual([s.short for s in scores[:3]], ["GPT-5.6 Sol", "Opus 4.7", "Gemini 3 Pro"])
-        self.assertEqual(model_iq.score_text(scores[0]), "75↑")
-        self.assertEqual(model_iq.score_text(scores[1]), "72↓")
-        self.assertEqual(model_iq.score_tone(scores[1]), "warn")
-        self.assertEqual(model_iq.score_tone(next(s for s in scores if s.status == "critical")), "danger")
+        self.assertEqual(model_iq.score_text(scores[0]), "75")           # the coding score only: no arrow
+        self.assertIn("sortBy=coding", model_iq.API_URL)
+        self.assertIn("period=24h", model_iq.API_URL)
+        explicit = model_iq.parse({"data": [{"name": "m", "currentScore": 80, "codingScore": 91}]})
+        self.assertEqual(explicit[0].score, 91)                           # an explicit coding field wins
         with self.assertRaises(ValueError):
             model_iq.parse({"error": "api_key_required"})
 
     def test_default_is_the_three_best_models_and_choice_keeps_order(self):
         state = model_iq.IqState(models=[m.__dict__ for m in model_iq.parse(PAYLOAD)], fetched_at=DAY)
-        self.assertEqual([m.name for m in model_iq.hover_models(state, None)],      # default: the top three
+        self.assertEqual([m.name for m, _ in model_iq.hover_models(state, None)],      # default: the top three
                          ["gpt-5.6-sol", "claude-opus-4-7-20260101", "gemini-3-pro-preview"])
         chosen = ["gemini-3-pro-preview", "gpt-5.6-mini", "missing-model", "claude-sonnet-4-5"]
-        self.assertEqual([m.name for m in model_iq.hover_models(state, chosen)],
+        self.assertEqual([m.name for m, _ in model_iq.hover_models(state, chosen)],
                          ["gemini-3-pro-preview", "gpt-5.6-mini", "claude-sonnet-4-5"])
         self.assertEqual(model_iq.hover_models(None, None), [])
+
+    def test_running_model_leads_and_the_rest_are_the_best(self):
+        state = model_iq.IqState(models=[m.__dict__ for m in model_iq.parse(PAYLOAD)], fetched_at=DAY)
+        shown = model_iq.hover_models(state, None, ["claude-sonnet-4.5-20260301"])
+        self.assertEqual([(m.name, live) for m, live in shown],
+                         [("claude-sonnet-4-5", True), ("gpt-5.6-sol", False), ("claude-opus-4-7-20260101", False)])
+        already = model_iq.hover_models(state, None, ["gpt-5.6-sol"])    # a top model running: not listed twice
+        self.assertEqual([(m.name, live) for m, live in already],
+                         [("gpt-5.6-sol", True), ("claude-opus-4-7-20260101", False), ("gemini-3-pro-preview", False)])
+        chosen = model_iq.hover_models(state, ["gpt-5.6-mini"], ["unknown-local-model"])
+        self.assertEqual([(m.name, live) for m, live in chosen], [("gpt-5.6-mini", False)])
+        self.assertEqual(model_iq.match("Claude Opus 4-7", state.scores()).name, "claude-opus-4-7-20260101")
+        self.assertEqual(model_iq.match("gpt-5.6-sol-high", state.scores()).name, "gpt-5.6-sol")
+        self.assertIsNone(model_iq.match("gpt-5", state.scores()))
 
     def test_daily_budget_is_kept_across_restarts_and_429_stops_for_the_day(self):
         with tempfile.TemporaryDirectory() as folder:

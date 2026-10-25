@@ -131,7 +131,7 @@ class PanelModel:
     upcoming_resets: tuple[ResetColumn, ...] = ()
     burn: BurnChart | None = None
     banner_alert: str = ""                      # e.g. "官方预告": the banner turns solid with this badge
-    intel: tuple = ()                           # model IQ on the banner's right: (name, score text, tone)
+    intel: tuple = ()                           # coding IQ on the banner's right: (name, score, tone, running)
     intel_note: str = ""                        # shown there instead when there are no scores (e.g. "未设置")
 
     @property
@@ -1221,12 +1221,13 @@ def empty_note(scale: float) -> Image.Image:
     return image
 
 
-INTEL_TONES = {"danger": CLAY, "warn": AMBER}
+INTEL_TONES = {"idle": MUTED_TEXT}         # stale scores fade
 
 
-def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str) -> None:
+def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, letter: str = "") -> None:
     """One bar: the Codex reset chance (short) on the left, then the chosen
-    models' IQ right-aligned. An official announcement tints the bar and adds
+    models' coding scores right-aligned (the running model first, in the
+    source's colour). An official announcement tints the bar and adds
     a badge next to the chance."""
     right, mid = WIDTH - PAD, PAD + 8
     x0, y0, x1, y1 = banner_box()
@@ -1249,27 +1250,42 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str) -> No
             draw.rounded_rectangle((px(x), px(mid - 7), px(x + width), px(mid + 7)), radius=px(5), fill=RESET_TINT)
             draw.text((px(x + width / 2), px(mid)), alert, font=badge, fill=(28, 30, 36, 255), anchor="mm")
             x += width + 6
-    # Right side, right-aligned in the chosen order; models that do not fit are dropped from the end.
-    room = right + 1 - (x + 8) - draw.textlength("智商", font=small) / s - 8
-    pieces, total = [], 0.0
-    for name, value, tone in intel:
-        need = (draw.textlength(name + " ", font=small) + draw.textlength(value, font=bold)) / s
-        if total + need + (12 if pieces else 0) > room:
-            break
-        total += need + (12 if pieces else 0)
-        pieces.append((name, value, tone))
+    # Right side, right-aligned in order; when space is short the "智商" label
+    # goes first, then models are dropped from the end.
+    gap = 9
+
+    def fit(room):
+        chosen, width = [], 0.0
+        for name, value, tone, *live in intel:
+            need = (draw.textlength(name + " ", font=small) + draw.textlength(value, font=bold)) / s
+            if width + need + (gap if chosen else 0) > room:
+                break
+            width += need + (gap if chosen else 0)
+            chosen.append((name, value, tone, bool(live and live[0])))
+        return chosen, width
+
+    space = right + 1 - (x + 8)
+    label_w = draw.textlength("智商", font=small) / s + 7
+    pieces, total = fit(space - label_w)
+    labelled = True
+    if len(pieces) < len(intel):
+        bare = fit(space)
+        if len(bare[0]) > len(pieces):
+            (pieces, total), labelled = bare, False
+    room = space - label_w
     if not pieces and note and draw.textlength(note, font=small) / s <= room:
         pieces, total = [], draw.textlength(note, font=small) / s
         draw.text((px(right + 1), px(mid)), note, font=small, fill=MUTED_TEXT, anchor="rm")
     elif not pieces:
         return
     start = right + 1 - total
-    draw.text((px(start - 8), px(mid)), "智商", font=small, fill=MUTED_TEXT, anchor="rm")
-    for name, value, tone in pieces:
-        draw.text((px(start), px(mid)), name, font=small, fill=SECONDARY_TEXT, anchor="lm")
+    if labelled:
+        draw.text((px(start - 7), px(mid)), "智商", font=small, fill=MUTED_TEXT, anchor="rm")
+    for name, value, tone, live in pieces:
+        draw.text((px(start), px(mid)), name, font=small, fill=accent(letter) if live and letter else SECONDARY_TEXT, anchor="lm")
         start += draw.textlength(name + " ", font=small) / s
         draw.text((px(start), px(mid)), value, font=bold, fill=INTEL_TONES.get(tone, TEXT), anchor="lm")
-        start += draw.textlength(value, font=bold) / s + 12
+        start += draw.textlength(value, font=bold) / s + gap
 
 
 @lru_cache(maxsize=12)
@@ -1307,7 +1323,7 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
             if reset:
                 draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
     if header_offset(model):
-        _banner(draw, px, s, banner, alert, intel, note)
+        _banner(draw, px, s, banner, alert, intel, note, letter)
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     chart_y = chart_top(model, field_h)

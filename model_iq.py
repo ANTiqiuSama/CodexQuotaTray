@@ -1,7 +1,7 @@
 """Model "IQ" from AI Stupid Level (aistupidlevel.info).
 
 AI Stupid Level re-benchmarks frontier models around the clock and publishes a
-0-100 score per model, with trend and confidence interval.  Its data API needs
+0-100 score per model.  The tray shows the 24 h coding score only.  Its data API needs
 a free key (Authorization: Bearer asl_live_...), and the free tier allows 10
 calls a day (quota resets 00:00 UTC).  This module therefore reads at most
 AUTO_CALLS_PER_DAY times a day on its own (every READ_SECONDS), keeps the rest
@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-API_URL = "https://aistupidlevel.info/api/v1/models?period=24h&sortBy=combined"
+API_URL = "https://aistupidlevel.info/api/v1/models?period=24h&sortBy=coding"   # the coding board only
 SITE = "https://aistupidlevel.info/"
 SIGNUP = "https://aistupidlevel.info/router/data-keys"
 USER_AGENT = "CodexQuotaTray (+https://github.com/ANTiqiuSama/CodexQuotaTray)"
@@ -132,31 +132,59 @@ def default_selection(scores: list[ModelScore]) -> list[str]:
     return [s.name for s in ranked[:HOVER_MAX]]
 
 
-def hover_models(state: IqState | None, selection: list[str] | None) -> list[ModelScore]:
-    """The models shown on the panel line, in the chosen order (default: the
-    three highest-scoring models)."""
+def hover_models(state: IqState | None, selection: list[str] | None, running: list[str] | None = None) -> list[tuple[ModelScore, bool]]:
+    """(model, running) shown on the panel line: the models the source is
+    running right now (the TPS figure's model) first, then the chosen ones
+    (default: the highest coding scores), HOVER_MAX in all."""
     if state is None:
         return []
     scores = state.scores()
     names = selection if selection else default_selection(scores)
     by_name = {s.name: s for s in scores}
-    return [by_name[name] for name in names if name in by_name][:HOVER_MAX]
+    result, seen = [], set()
+    for local in running or ():
+        found = match(local, scores)
+        if found and found.name not in seen:
+            result.append((found, True))
+            seen.add(found.name)
+    for name in names:
+        if name in by_name and name not in seen:
+            result.append((by_name[name], False))
+            seen.add(name)
+    if not selection:                  # top up with the next best when a running model took a slot
+        for score in scores:
+            if len(result) >= HOVER_MAX:
+                break
+            if score.name not in seen and score.score is not None:
+                result.append((score, False))
+                seen.add(score.name)
+    return result[:HOVER_MAX]
 
 
 def score_text(score: ModelScore) -> str:
-    if score.score is None:
-        return "—"
-    arrow = {"up": "↑", "down": "↓"}.get((score.trend or "").lower(), "")
-    return f"{round(score.score)}{arrow}"
+    """The coding score, a bare number."""
+    return "—" if score.score is None else str(round(score.score))
 
 
-def score_tone(score: ModelScore) -> str:
-    status = (score.status or "").lower()
-    if any(word in status for word in ("crit", "bad", "poor", "degrad", "down", "stupid")):
-        return "danger"
-    if any(word in status for word in ("warn", "caution", "slight", "minor")):
-        return "warn"
-    return "ok"
+def _key(name: str) -> str:
+    """Comparable model id: lower case, no date / preview suffix, one separator
+    ("claude-opus-4.7-20260101" == "Claude Opus 4-7")."""
+    text = re.sub(r"[-_ ](20\d{6}|\d{4}-\d{2}-\d{2}|latest|preview|exp)\b", "", (name or "").strip().lower())
+    text = re.sub(r"^(anthropic|openai|google|x-ai|xai)[/:]", "", text)
+    return re.sub(r"[-_. /]+", "-", text).strip("-")
+
+
+def match(local: str, scores: list[ModelScore]) -> ModelScore | None:
+    """The scored model a client reports (e.g. Codex's "gpt-6.1-sol"):
+    the same id, else the longest scored id that the local one starts with."""
+    wanted = _key(local)
+    if not wanted:
+        return None
+    exact = next((s for s in scores if _key(s.name) == wanted), None)
+    if exact:
+        return exact
+    prefixed = [s for s in scores if wanted.startswith(_key(s.name) + "-")]
+    return max(prefixed, key=lambda s: len(_key(s.name)), default=None)
 
 
 # ----- reading --------------------------------------------------------------------------------
@@ -169,6 +197,17 @@ def _number(value: Any) -> float | None:
     return number if number == number else None
 
 
+def _coding(row: dict) -> float | None:
+    """The coding board's score: an explicit coding field when present, else
+    the board score (the request asks for sortBy=coding)."""
+    nested = row.get("scores") if isinstance(row.get("scores"), dict) else {}
+    for value in (row.get("codingScore"), row.get("coding"), nested.get("coding"), row.get("currentScore"), row.get("score")):
+        number = _number(value)
+        if number is not None:
+            return number
+    return None
+
+
 def parse(payload: dict) -> list[ModelScore]:
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
@@ -178,7 +217,7 @@ def parse(payload: dict) -> list[ModelScore]:
         if not isinstance(row, dict) or not row.get("name"):
             continue
         result.append(ModelScore(str(row.get("id") or row["name"]), str(row["name"]), str(row.get("provider") or ""),
-                                 _number(row.get("currentScore", row.get("score"))), str(row.get("trend") or ""),
+                                 _coding(row), str(row.get("trend") or ""),
                                  str(row.get("status") or ""), _number(row.get("confidenceLower")),
                                  _number(row.get("confidenceUpper")), str(row.get("lastUpdated") or "")))
     result.sort(key=lambda s: -(s.score if s.score is not None else -1))
