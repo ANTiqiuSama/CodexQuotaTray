@@ -13,6 +13,9 @@ import sys
 import psutil
 from cli_usage import parse_agy_usage_json, parse_grok_usage, parse_reset, run_temporary_usage
 
+# Avoid Store/venv application aliases in real process-lifecycle fixtures.
+PYTHON_EXE = psutil.Process().exe()
+
 
 class JsonRpcLifecycleTests(unittest.TestCase):
     def test_repeated_reads_reap_launcher_descendants_and_reader_threads(self):
@@ -39,11 +42,11 @@ else:
         with tempfile.TemporaryDirectory() as folder:
             script = Path(folder) / "rpc_worker.py"
             script.write_text(worker, encoding="utf-8")
-            unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+            unrelated = subprocess.Popen([PYTHON_EXE, "-c", "import time; time.sleep(60)"],
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             try:
                 for _ in range(repeats):
-                    rpc = quota_sources._JsonRpcProcess([sys.executable, "-u", str(script), "launcher", "intermediate"])
+                    rpc = quota_sources._JsonRpcProcess([PYTHON_EXE, "-u", str(script), "launcher", "intermediate"])
                     owned = []
                     try:
                         leaf_pid = rpc.request("ping", None)["pid"]
