@@ -19,7 +19,7 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from icon_art import AMBER, CLAY, RESET_BLUE, UNIFORM_LETTERS, accent, ring_color
+from icon_art import AMBER, CLAY, UNIFORM_LETTERS, accent, ring_color
 
 WIDTH = 420
 PAD = 18
@@ -89,6 +89,13 @@ class BurnChart:
 
 
 POOL_BLUES = ((35, 90, 230, 255), (40, 212, 236, 255))    # deep cobalt, sky blue: after the source's own periwinkle
+# Two-window sources get a second shade far from their accent in lightness and
+# hue, so the 5 h and weekly lines (and bars) can be told apart at a glance.
+WINDOW_SHADES = {"C": (accent("C"), (38, 140, 168, 255)),     # sage, deep teal
+                 "A": (accent("A"), (240, 196, 150, 255))}    # clay, light peach
+# Reset notices: a quiet steel blue that sits with the panel's muted palette
+# (the bright blue bar with an amber badge clashed with it).
+RESET_TINT = (150, 178, 214, 255)
 
 
 def quota_shade(letter: str, slot: int, value: float | None, pooled: bool) -> tuple[int, int, int, int]:
@@ -98,11 +105,13 @@ def quota_shade(letter: str, slot: int, value: float | None, pooled: bool) -> tu
     and a sky blue (far apart in hue); CIELAB ΔE ≥ 46 between any two."""
     if pooled and letter in UNIFORM_LETTERS and value is not None:
         return accent(letter) if slot % 3 == 0 else POOL_BLUES[slot % 3 - 1]
+    if pooled and letter in WINDOW_SHADES and value is not None:
+        return WINDOW_SHADES[letter][slot % 2]
     return ring_color(value, letter)
 
 
 def pooled(model: "PanelModel") -> bool:
-    return len(model.quota) > 1 and model.provider not in ("codex", "claude")
+    return len(model.quota) > 1
 
 
 @dataclass(frozen=True)
@@ -993,7 +1002,7 @@ def _dashed(pen, start, end, color, width, dash, gap):
 def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.Image:
     """Burn-down chart: remaining % of each quota window in use, each in the
     colour of its header bar, the forecast as a dashed line of the same colour,
-    resets as blue markers."""
+    resets as faint dashed markers."""
     px = lambda value: round(value * scale)  # noqa: E731
     width, height = px(CHART_WIDTH), px(CHART_H)
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -1039,7 +1048,7 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
     for reset in set(resets):
         if chart.start <= reset <= chart.end:
             for y in range(round(Y(100)), round(Y(0)), 4 * k):
-                pen.line((X(reset), y, X(reset), min(Y(0), y + 2 * k)), fill=_with_alpha(RESET_BLUE, 150), width=hair)
+                pen.line((X(reset), y, X(reset), min(Y(0), y + 2 * k)), fill=(240, 238, 230, 70), width=hair)
     # Fills first (lighter when several overlap), then every line above all fills.
     for series, color, history, _, _ in drawn:
         if len(history) >= 2:
@@ -1211,17 +1220,19 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
         face = ui_font(px(11), "bold")
         if alert:
             # Official announcement: a solid bar with a bright badge, impossible to miss.
-            draw.rounded_rectangle(box, radius=px(7), fill=RESET_BLUE)
-            draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=face, fill=(20, 24, 34, 255), anchor="lm")
-            badge = ui_font(px(11), "bold")
-            width = draw.textlength(alert, font=badge) / s + 16
-            draw.rounded_rectangle((px(right + 2 - width), px(y_banner + 2), px(right + 2), px(y_banner + 18)), radius=px(6),
-                                   fill=AMBER)
-            draw.text((px(right + 2 - width / 2), px(y_banner + 10)), alert, font=badge, fill=(31, 30, 28, 255), anchor="mm")
-        else:
-            draw.rounded_rectangle(box, radius=px(7), fill=_with_alpha(RESET_BLUE, 38), outline=_with_alpha(RESET_BLUE, 110),
+            draw.rounded_rectangle(box, radius=px(7), fill=_with_alpha(RESET_TINT, 64), outline=_with_alpha(RESET_TINT, 170),
                                    width=max(1, round(s)))
-            draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=face, fill=RESET_BLUE, anchor="lm")
+            draw.text((px(PAD + 2), px(y_banner + 10)), banner, font=face, fill=TEXT, anchor="lm")
+            badge = ui_font(px(10), "bold")
+            width = draw.textlength(alert, font=badge) / s + 14
+            draw.rounded_rectangle((px(right + 1 - width), px(y_banner + 3), px(right + 1), px(y_banner + 17)), radius=px(5),
+                                   fill=RESET_TINT)
+            draw.text((px(right + 1 - width / 2), px(y_banner + 10)), alert, font=badge, fill=(28, 30, 36, 255), anchor="mm")
+        else:
+            draw.rounded_rectangle(box, radius=px(7), fill=(240, 238, 230, 8), outline=(240, 238, 230, 22),
+                                   width=max(1, round(s)))
+            draw.ellipse((px(PAD), px(y_banner + 7.5), px(PAD + 5), px(y_banner + 12.5)), fill=RESET_TINT)
+            draw.text((px(PAD + 10), px(y_banner + 10)), banner, font=face, fill=SECONDARY_TEXT, anchor="lm")
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     chart_y = chart_top(model, field_h)

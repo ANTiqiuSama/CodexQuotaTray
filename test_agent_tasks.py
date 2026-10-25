@@ -581,7 +581,10 @@ class SteadyBubbleTests(unittest.TestCase):
         model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),
                                        0.0, (), "live")
         self.assertTrue(agent_panel.pooled(model))
-        self.assertFalse(agent_panel.pooled(panel()))
+        self.assertTrue(agent_panel.pooled(panel()))                     # Codex 5 h + weekly: one shade each, like Gemini
+        codex = [shade("C", slot, 60.0, True) for slot in range(2)]
+        self.assertEqual(codex[0], agent_panel.accent("C"))
+        self.assertGreater(sum(abs(x - y) for x, y in zip(codex[0][:3], codex[1][:3])), 120, codex)
 
     def test_chart_draws_in_on_opening_then_rests(self):
         chart = agent_panel.BurnChart(0, 5 * 3600, 3600, (agent_panel.BurnSeries("5 小时", 0, ((0, 100), (3600, 60)), 40.0, 5 * 3600),))

@@ -70,7 +70,9 @@ class ForecastTests(unittest.TestCase):
 
     def test_duration_text_uses_days_for_weekly_windows(self):
         self.assertEqual(duration_text(2 * 86400 + 5 * 3600), "2 天 5 小时")
-        self.assertEqual(duration_text(3 * 3600 + 120), "3 小时 2 分")
+        self.assertEqual(duration_text(3 * 3600 + 120), "3 小时")       # hours only from an hour up
+        self.assertEqual(duration_text(3 * 3600 + 40 * 60), "4 小时")   # rounded to the nearest hour
+        self.assertEqual(duration_text(35 * 60), "35 分钟")
         self.assertEqual(duration_text(20), "1 分钟")
 
     def test_history_records_fresh_reads_only_and_round_trips(self):

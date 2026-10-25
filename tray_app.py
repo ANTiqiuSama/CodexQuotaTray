@@ -455,7 +455,7 @@ class QuotaTray:
                     key = str(pool.get("key") or pool.get("label") or "").lower()
                     label = {"argon": "Argon", "claude_gpt": "Opus", "claude/gpt": "Opus", "opus": "Opus"}.get(key)
                     if key == "gemini" and not has_argon:
-                        label = "Gemini"
+                        label = "Flash"
                     if label:
                         named.append((pool, label))
                 if named:
@@ -465,7 +465,7 @@ class QuotaTray:
                             continue
                         window = (pool.get("label") or label) + " · " + (window_label(pool.get("window_minutes")) or "周期")
                         candidates.append((float(stamp), agent_panel.ResetColumn(provider, provider_letter(provider),
-                            "Gemini" if label == "Gemini" else "Gemini · " + label,
+                            label,      # short pool name: Argon / Opus / Flash
                             window, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"),
                             duration_text(stamp - now) + "后")))
                     continue
