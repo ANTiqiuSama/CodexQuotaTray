@@ -559,7 +559,9 @@ class QuotaTray:
             outlook = getattr(self, "reset_outlook", None)
             banner = reset_watch.panel_line(outlook, now)
             alert = "官方预告" if reset_watch.announced(outlook, now) else ""
-        intel, intel_note = self.panel_intel(now)
+        # The model behind the TPS figure leads the IQ line.
+        running = [data["display_model"]] if data.get("display_tps") is not None and data.get("display_model") else []
+        intel, intel_note = self.panel_intel(now, running)
         forecast, forecast_tone = self.headline_forecast(provider)
         today_used = None
         if provider == "mimo":
@@ -958,17 +960,18 @@ class QuotaTray:
         return f"全局重置预测：{mark}24h {outlook.prob_24}% · 48h {outlook.prob_48}%（{outlook.source}）"
 
     # ----- model IQ (AI Stupid Level) -------------------------------------------------
-    def panel_intel(self, now: float) -> tuple[tuple, str]:
-        """(models on the banner's right, note when there are none)."""
+    def panel_intel(self, now: float, running: list[str] | None = None) -> tuple[tuple, str]:
+        """(models on the banner's right, note when there are none): coding
+        scores, the source's running model first, then the highest scores."""
         state, config = getattr(self, "iq_state", None), getattr(self, "iq_config", None) or {}
         if not model_iq.effective_key(config):
             return (), "未设置"
-        models = model_iq.hover_models(state, config.get("shown"))
+        models = model_iq.hover_models(state, config.get("shown"), running)
         if not models:
             error = state.error if state else ""
             return (), ("Key 无效" if "Key" in error else "今日已用完" if "用完" in error else "读取失败" if error else "读取中")
         stale = model_iq.is_stale(state, now)
-        return tuple((m.short, model_iq.score_text(m), "idle" if stale else model_iq.score_tone(m)) for m in models), ""
+        return tuple((m.short, model_iq.score_text(m), "idle" if stale else "ok", live) for m, live in models), ""
 
     def model_iq_status(self) -> dict:
         now = time.time()
