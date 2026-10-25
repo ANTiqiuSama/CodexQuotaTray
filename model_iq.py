@@ -126,30 +126,15 @@ def short_name(name: str) -> str:
     return " ".join(pretty) or name
 
 
-def family(score: ModelScore) -> str:
-    """Which tray source a model belongs to, for the default selection."""
-    text = f"{score.provider} {score.name}".lower()
-    for key, words in (("codex", ("openai", "gpt", "codex")), ("claude", ("anthropic", "claude", "opus", "sonnet")),
-                       ("gemini", ("google", "gemini")), ("grok", ("xai", "grok")), ("mimo", ("xiaomi", "mimo"))):
-        if any(word in text for word in words):
-            return key
-    return ""
-
-
 def default_selection(scores: list[ModelScore]) -> list[str]:
-    """Best-scoring OpenAI (Codex) and Anthropic (Claude) model: the two the
-    tray's users most often compare."""
-    chosen = []
-    for wanted in ("codex", "claude"):
-        best = max((s for s in scores if family(s) == wanted and s.score is not None), key=lambda s: s.score, default=None)
-        if best:
-            chosen.append(best.name)
-    return chosen
+    """The HOVER_MAX highest-scoring models, best first."""
+    ranked = sorted((s for s in scores if s.score is not None), key=lambda s: -s.score)
+    return [s.name for s in ranked[:HOVER_MAX]]
 
 
 def hover_models(state: IqState | None, selection: list[str] | None) -> list[ModelScore]:
-    """The models shown on the panel line, in the chosen order (default: best
-    Codex and Claude model)."""
+    """The models shown on the panel line, in the chosen order (default: the
+    three highest-scoring models)."""
     if state is None:
         return []
     scores = state.scores()

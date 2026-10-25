@@ -452,7 +452,7 @@ class SettingsWindow:
         if self.iq_info.cget("text") != text:
             self.iq_info.configure(text=text)
         shown = self.iq_selected or info["default"]
-        pick = ("、".join(model_iq.short_name(n) for n in shown) or "—") + ("（默认：Codex 与 Claude 各自得分最高的模型）"
+        pick = ("、".join(model_iq.short_name(n) for n in shown) or "—") + ("（默认：智商最高的 3 个模型，随读数自动更新）"
                                                                          if not self.iq_selected else "") + f"；最多 {model_iq.HOVER_MAX} 个，保存后生效"
         if self.iq_pick.cget("text") != pick:
             self.iq_pick.configure(text=pick)

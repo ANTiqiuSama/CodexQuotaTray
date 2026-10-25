@@ -30,9 +30,10 @@ class ModelIqTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             model_iq.parse({"error": "api_key_required"})
 
-    def test_default_is_best_codex_and_claude_model_and_choice_keeps_order(self):
+    def test_default_is_the_three_best_models_and_choice_keeps_order(self):
         state = model_iq.IqState(models=[m.__dict__ for m in model_iq.parse(PAYLOAD)], fetched_at=DAY)
-        self.assertEqual([m.name for m in model_iq.hover_models(state, None)], ["gpt-5.6-sol", "claude-opus-4-7-20260101"])
+        self.assertEqual([m.name for m in model_iq.hover_models(state, None)],      # default: the top three
+                         ["gpt-5.6-sol", "claude-opus-4-7-20260101", "gemini-3-pro-preview"])
         chosen = ["gemini-3-pro-preview", "gpt-5.6-mini", "missing-model", "claude-sonnet-4-5"]
         self.assertEqual([m.name for m in model_iq.hover_models(state, chosen)],
                          ["gemini-3-pro-preview", "gpt-5.6-mini", "claude-sonnet-4-5"])
