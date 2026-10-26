@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
+import signal
 import subprocess
 from ctypes import wintypes
 
@@ -93,13 +95,29 @@ class Job:
         self.close()
 
 
+class _PosixGroup:
+    """A private process group for bounded CLI reads on macOS/Linux."""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+
+    def close(self) -> None:
+        pid, self.pid = self.pid, 0
+        if pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def popen(args, **kwargs) -> subprocess.Popen:
     """subprocess.Popen whose whole process tree lives in its own job
     (``process.job``); end it with `stop()`. Without job support the process
     simply runs normally."""
     if _kernel is None:
+        kwargs["start_new_session"] = True
         process = subprocess.Popen(args, **kwargs)
-        process.job = None
+        process.job = _PosixGroup(process.pid)
         return process
     try:
         job = Job()

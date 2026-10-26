@@ -1,0 +1,52 @@
+name: macOS menu bar build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mac_menu.py'
+      - 'build-macos.sh'
+      - 'requirements-macos.txt'
+      - 'cli_usage.py'
+      - 'cli_quota.py'
+      - 'quota_sources.py'
+      - 'tps_sources.py'
+      - 'process_jail.py'
+      - 'providers.py'
+      - 'mimo_usage.py'
+      - 'test_mac_menu.py'
+      - '.github/workflows/macos-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and test
+        run: bash build-macos.sh
+      - name: Check bundle metadata
+        run: |
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' dist-macos/CodexQuotaTray.app/Contents/Info.plist)" = true
+          file dist-macos/CodexQuotaTray.app/Contents/MacOS/CodexQuotaTray
+      - name: Package app
+        run: ditto -c -k --sequesterRsrc --keepParent dist-macos/CodexQuotaTray.app "CodexQuotaTray-macos-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexQuotaTray-macos-${{ matrix.arch }}
+          path: CodexQuotaTray-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error

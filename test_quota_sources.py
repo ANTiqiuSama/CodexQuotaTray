@@ -1,4 +1,5 @@
 import time
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -76,7 +77,7 @@ class GrokIsolationTests(unittest.TestCase):
         process.wait.side_effect = subprocess.TimeoutExpired("worker", 35)
         with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
                 patch.object(cli_quota, "no_quota_reason") as claude_status, \
-                patch.object(cli_quota.subprocess, "Popen", return_value=process), \
+                patch.object(cli_quota.process_jail, "popen", return_value=process), \
                 patch.object(cli_quota, "stop_worker") as stop:
             snapshot = quota_sources.get_grok_quota()
             self.assertIn("35 秒", snapshot.error)
@@ -99,7 +100,7 @@ class GrokIsolationTests(unittest.TestCase):
             return Mock()
         with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
                 patch.object(cli_quota.sys, "frozen", True, create=True), \
-                patch.object(cli_quota.subprocess, "Popen", side_effect=start):
+                patch.object(cli_quota.process_jail, "popen", side_effect=start):
             for _ in range(2):
                 raw = {}
                 self.assertEqual(cli_quota.read_usage("grok.exe", "grok", raw)["remaining_percent"], 70)
@@ -210,6 +211,7 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(parsed["remaining_percent"], 44.0)
         self.assertIsNotNone(parsed["resets_at"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows pywinpty behavior")
     def test_grok_waits_for_slow_session_and_retries_unavailable_usage(self):
         clock = [0.0]
         queries = []
@@ -241,6 +243,7 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(parse_grok_usage(text)["remaining_percent"], 83)
         kill.assert_called_once_with(123, cli_usage.signal.SIGTERM)
 
+    @unittest.skipUnless(os.name == "nt", "Windows pywinpty behavior")
     def test_grok_timeout_does_not_use_context_percent_or_leak_terminal_output(self):
         clock = [0.0]
         terminal = Mock()
@@ -256,6 +259,7 @@ class QuotaTests(unittest.TestCase):
         self.assertNotIn("identity", str(caught.exception))
         kill.assert_called_once_with(123, cli_usage.signal.SIGTERM)
 
+    @unittest.skipUnless(os.name == "nt", "Windows console initialization")
     def test_grok_initializes_hidden_console_only_when_standard_handles_are_missing(self):
         kernel32 = Mock()
         kernel32.GetStdHandle.return_value = None

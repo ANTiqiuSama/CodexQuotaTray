@@ -1,5 +1,6 @@
 """Xiaomi MiMo Token Plan: Credits, console parsing, ledger, tracker, sources."""
 import json
+import os
 import socket
 import sqlite3
 import tempfile
@@ -125,6 +126,7 @@ class StorageTests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
 
+    @unittest.skipUnless(os.name == "nt", "console session encryption requires Windows DPAPI")
     def test_cookie_roundtrip_and_logout(self):
         path = self.dir / "s.bin"
         mimo_usage.save_cookies({"a": "b"}, path)
@@ -132,6 +134,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(mimo_usage.load_cookies(path), {"a": "b"})
         self.assertEqual(mimo_usage.load_cookies(self.dir / "missing"), {})
 
+    @unittest.skipUnless(os.name == "nt", "console session encryption requires Windows DPAPI")
     def test_session_format_and_first_format_compatibility(self):
         path = self.dir / "s.bin"
         mimo_usage.save_session({"cookies": {"sid": "1"}, "headers": {"Authorization": "Bearer t"}, "api_base": "https://x"}, path)
@@ -140,6 +143,12 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(mimo_usage.load_session(path), {"cookies": {"sid": "2"}, "headers": {"Authorization": "Bearer t"}, "api_base": "https://x"})
         path.write_bytes(mimo_usage._protect(json.dumps({"old": "jar"}).encode()))
         self.assertEqual(mimo_usage.load_session(path)["cookies"], {"old": "jar"})
+
+    @unittest.skipIf(os.name == "nt", "macOS/Linux must refuse unencrypted console sessions")
+    def test_non_windows_refuses_console_session_persistence(self):
+        with self.assertRaises(OSError):
+            mimo_usage.save_session({"cookies": {"sid": "secret"}}, self.dir / "s.bin")
+        self.assertFalse((self.dir / "s.bin").exists())
 
     def test_captured_api_keeps_only_console_token_headers(self):
         events = [

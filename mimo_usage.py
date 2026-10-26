@@ -102,9 +102,9 @@ def credits_text(value: float | None) -> str:
 # ----- DPAPI -------------------------------------------------------------------
 
 def _protect(data: bytes, decrypt: bool = False) -> bytes:
-    """Windows DPAPI (current user).  Other platforms (tests) store base64."""
+    """Windows DPAPI (current user); never persist plaintext console credentials."""
     if os.name != "nt":
-        return base64.b64decode(data) if decrypt else base64.b64encode(data)
+        raise OSError("MiMo 控制台登录凭据仅支持 Windows DPAPI；macOS 请使用手动套餐")
     import ctypes
     from ctypes import wintypes
 

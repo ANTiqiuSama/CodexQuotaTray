@@ -1,6 +1,6 @@
 # CodexQuotaTray · AI 额度与 TPS 托盘
 
-面向 Windows 的独立托盘工具，将本机 AI 客户端的账号额度、生成速率、重置时间和用量趋势放到通知区域。启动时先显示缓存，再在后台读取各来源；鼠标悬停后展开置顶任务面板。
+面向 Windows 和 macOS 的本机 AI 额度与 TPS 工具。Windows 版把来源图标放到任务栏通知区域，悬停展开任务面板；macOS 版把各来源图标放到屏幕顶部菜单栏，点击图标查看额度、重置倒计时、TPS 和刷新操作。两版共用额度与本机记录读取器。
 
 A Windows system-tray monitor for local AI quota and token-usage signals, with generation-rate indicators, reset countdowns and topmost detail cards.
 
@@ -82,6 +82,28 @@ python -m venv .venv
 
 启动后任务栏通知区域出现图标（可能在 `^` 隐藏区里，可拖到任务栏上）。右键任意图标打开**设置**；设置 → 常规里可打开“开机自启”。
 
+### macOS 菜单栏版本
+
+macOS 12+、Python 3.12：
+
+```bash
+git clone https://github.com/ANTiqiuSama/CodexQuotaTray.git
+cd CodexQuotaTray
+python3 -m venv .venv-macos
+.venv-macos/bin/python -m pip install -r requirements-macos.txt
+.venv-macos/bin/python -X utf8 mac_menu.py
+
+# 在 Mac 上测试并构建 CodexQuotaTray.app
+bash build-macos.sh
+open dist-macos/CodexQuotaTray.app
+```
+
+也可从仓库的 **Actions → macOS menu bar build** 下载 Apple Silicon（arm64）或 Intel（x86_64）构建产物。工作流在 macOS runner 上生成 `.app` 并上传 ZIP；当前构建使用临时签名，未做 Apple 公证，首次打开可能需要在 macOS 安全设置中允许。该版本的实际菜单栏交互仍需 Mac 实机验收。
+
+每个开启的来源各有一个顶部菜单栏图标：圆环显示剩余额度；检测到活动生成且有可用样本时，显示 TPS 数字。点击图标可看各额度窗口或 Gemini 模型池、当地时间的重置倒计时、最近 TPS、读取状态，并可手动刷新或退出。读取在后台进行，菜单栏启动时先显示本机缓存；数据保存在 `~/Library/Application Support/CodexQuotaTray/`。Finder 启动时会补充常见 CLI 路径，也可用 `CODEX_QUOTA_CODEX_EXE`、`CODEX_QUOTA_GROK_EXE`、`CODEX_QUOTA_GEMINI_EXE`、`CODEX_QUOTA_CLAUDE_EXE` 指定可执行文件。
+
+macOS 版的 Codex 使用 `codex app-server`，Gemini 使用 `agy /usage`，Grok 和已订阅的 Claude Code 使用临时 `/usage` 终端。Claude 默认关闭，订阅开通后才通过 `CODEX_QUOTA_PROVIDERS=codex,grok,gemini,claude` 启用。MiMo 目前支持手动套餐文件和本机 Credits 账本：在上述数据目录的 `mimo.json` 填入 `total_credits`、`period_end` 等字段后可显示 M 图标。MiMo 控制台登录凭据依赖 Windows DPAPI，Mac 版暂不支持自动登录或同步控制台用量，也不会将 cookie 以明文保存。Mac 版使用原生点击菜单，Windows 专属的悬停气泡、设置窗口与开机自启开关尚未移植。
+
 ### 3. 确认每个来源的开关
 
 打开设置 → **额度来源**：每个来源一行，显示“当前：已开启/已关闭”以及原因（默认开启、已检测到、手动关闭、环境变量……）。切换开关后点“保存”，托盘自动重启生效。
@@ -128,7 +150,7 @@ python -m venv .venv
 - 本机验收环境为 Windows 11、Python 3.12.10。Windows 10 尚缺本项目的实机验收记录。
 - 对应来源的客户端及登录状态。可先只启用已准备好的来源。
 
-托盘界面依赖 Win32 与 Windows 通知区域。Linux 上可运行部分纯逻辑模块，完整托盘程序的运行目标是 Windows。
+Windows 悬停面板依赖 Win32 与通知区域；macOS 使用独立的 AppKit 菜单栏入口。Linux 上仅支持部分纯逻辑模块。
 
 ### 从源码运行
 
@@ -520,6 +542,8 @@ settings_view.py      设置页的可视化：来源卡片、输出柱状图、�
 hover_check.py        任务面板窗口显示自检
 mimo_usage.py         MiMo 控制台读取、登录、Credits 账本与年度节奏
 tray_app.py           程序入口、菜单、线程协调与登录启动项
+mac_menu.py           macOS 原生菜单栏入口、后台读取与菜单明细
+build-macos.sh        macOS 测试与 .app 构建入口
 test_*.py             额度、速率、任务面板、定时任务、调度及 Claude 回归用例
 demo_assets.py        生成 README 演示图（演示数据）
 build.ps1             测试与 PyInstaller 构建入口

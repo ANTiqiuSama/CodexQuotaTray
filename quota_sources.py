@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -210,7 +211,7 @@ def parse_codex_session_limits(limits: dict[str, Any], moment: float) -> QuotaSn
 def get_codex_quota(raw: dict | None = None) -> QuotaSnapshot:
     executable = _codex_executable()
     if not executable:
-        return _unknown("codex", "Codex", None, "未找到 codex.exe")
+        return _unknown("codex", "Codex", None, "未找到 Codex CLI（可设置 CODEX_QUOTA_CODEX_EXE）")
     rpc: _JsonRpcProcess | None = None
     try:
         rpc = _JsonRpcProcess([executable, "app-server", "--stdio"])
@@ -235,7 +236,8 @@ def get_codex_quota(raw: dict | None = None) -> QuotaSnapshot:
 
 
 def get_grok_quota(raw: dict | None = None) -> QuotaSnapshot:
-    executable = os.environ.get("CODEX_QUOTA_GROK_EXE") or str(Path.home() / ".grok/bin/grok.exe")
+    default = "grok" if sys.platform == "darwin" else "grok.exe"
+    executable = os.environ.get("CODEX_QUOTA_GROK_EXE") or shutil.which("grok") or str(Path.home() / ".grok/bin" / default)
     try:
         parsed = cli_quota.read_usage(executable, "grok", raw)
         return QuotaSnapshot("grok", "Grok", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"], parsed["resets_at"], time.time(), False, None)
@@ -244,7 +246,8 @@ def get_grok_quota(raw: dict | None = None) -> QuotaSnapshot:
 
 
 def get_gemini_quota() -> QuotaSnapshot:
-    executable = os.environ.get("CODEX_QUOTA_GEMINI_EXE") or shutil.which("agy") or str(Path.home() / "AppData/Local/agy/bin/agy.exe")
+    executable = os.environ.get("CODEX_QUOTA_GEMINI_EXE") or shutil.which("agy") or str(
+        Path.home() / (".local/bin/agy" if sys.platform == "darwin" else "AppData/Local/agy/bin/agy.exe"))
     try:
         parsed = run_agy_usage(executable)
         label = f"Gemini · {parsed['pool']}"
@@ -309,7 +312,9 @@ def mimo_snapshot(view, label: str = "Xiaomi MiMo") -> QuotaSnapshot:
 def get_mimo_quota() -> QuotaSnapshot:
     import mimo_usage
     tracker = mimo_tracker()
-    tracker.refresh(mimo_usage.fetch_with_renewal)
+    # The macOS menu-bar build has no Keychain-backed console session yet.
+    # Use a manual plan and local token ledger; never create an unencrypted cookie file.
+    tracker.refresh(mimo_usage.manual_plan if sys.platform == "darwin" else mimo_usage.fetch_with_renewal)
     return mimo_snapshot(tracker.view())
 
 

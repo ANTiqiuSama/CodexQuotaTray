@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -82,8 +83,9 @@ def find_claude() -> Path | None:
     if override:
         return Path(override)
     candidates = [
+        Path.home() / (".local/bin/claude" if sys.platform == "darwin" else ".local/bin/claude.exe"),
         Path.home() / ".local/bin/claude.exe",
-        Path.home() / ".claude/local/claude.exe",
+        Path.home() / (".claude/local/claude" if sys.platform == "darwin" else ".claude/local/claude.exe"),
         Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "npm/claude.cmd",
     ]
     found = shutil.which("claude")

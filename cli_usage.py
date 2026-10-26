@@ -150,6 +150,8 @@ def _spawn_target(executable: str, args: list[str]) -> tuple[str, str]:
 
 def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0, probe: UsageProbe = GROK_PROBE) -> str:
     """Open a temporary PTY session, issue `/usage`, and return its visible text."""
+    if os.name != "nt":
+        return _run_posix_usage(executable, args, timeout, probe)
     if PTY is None:
         raise RuntimeError("缺少 pywinpty，无法读取 CLI /usage 临时窗口")
 
@@ -213,6 +215,55 @@ def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0,
         _terminate(children)
         if own_console:
             ctypes.windll.kernel32.FreeConsole()
+
+
+def _run_posix_usage(executable: str, args: list[str], timeout: float, probe: UsageProbe) -> str:
+    """macOS PTY counterpart; retain quota text only in memory for parsing."""
+    import pexpect
+
+    child = pexpect.spawn(executable, args, encoding="utf-8", codec_errors="replace",
+                          echo=False, timeout=0.1, dimensions=(40, 160), maxread=4096,
+                          cwd=probe.cwd())
+    captured: list[str] = []
+    started = time.monotonic()
+    first_quota_at = last_request_at = None
+    answered: set[int] = set()
+    try:
+        while time.monotonic() - started < timeout:
+            try:
+                piece = child.read_nonblocking(4096, timeout=0.1)
+                captured.append(piece)
+                if sum(map(len, captured)) > 2_000_000:
+                    raise ValueError(f"{probe.name} 输出超出 2 MB 上限")
+            except pexpect.TIMEOUT:
+                pass
+            except pexpect.EOF:
+                raise RuntimeError(f"{probe.name} 额度读取会话提前退出，请检查 CLI 登录状态") from None
+            current = clean_terminal_text("".join(captured))
+            now = time.monotonic()
+            for index, (pattern, reply) in enumerate(probe.answers):
+                if index not in answered and pattern.search(current):
+                    answered.add(index)
+                    child.send(reply)
+                    last_request_at = None
+            if probe.found.search(current):
+                if first_quota_at is None:
+                    first_quota_at = now
+                if probe.complete(current) or now - first_quota_at >= probe.settle:
+                    return current
+            elif (probe.ready.search(current) or now - started >= probe.ready_after) and (
+                    last_request_at is None or now - last_request_at >= probe.retry_every):
+                child.send(probe.command + "\r")
+                last_request_at = now
+            if not child.isalive():
+                raise RuntimeError(f"{probe.name} 额度读取会话提前退出，请检查 CLI 登录状态")
+        raise TimeoutError(f"{probe.name} 会话在 {timeout:g} 秒内未返回 {probe.missing}")
+    finally:
+        descendants = _child_processes(child.pid, executable)
+        try:
+            child.terminate(force=True)
+        finally:
+            _terminate(descendants)
 
 
 def parse_grok_usage(text: str) -> dict[str, Any]:

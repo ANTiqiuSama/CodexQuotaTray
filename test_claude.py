@@ -1,5 +1,6 @@
 """Claude readiness: registry, /usage parsing and probe, transcript reader."""
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -168,6 +169,7 @@ class ReaderIsolationTests(unittest.TestCase):
             self.assertEqual(claude_quota.read_usage("claude.exe"), {"remaining_percent": 81})
 
 
+@unittest.skipUnless(os.name == "nt", "Windows pywinpty behavior")
 class ProbeTests(unittest.TestCase):
     def run_probe(self, screens, executable="claude.exe"):
         clock, writes = [0.0], []
