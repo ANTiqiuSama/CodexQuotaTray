@@ -140,7 +140,7 @@ class ReaderIsolationTests(unittest.TestCase):
         process.wait.side_effect = subprocess.TimeoutExpired("worker", 45)
         with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
                 patch.object(claude_quota, "no_quota_reason", return_value=None), \
-                patch.object(claude_quota.subprocess, "Popen", return_value=process), \
+                patch.object(claude_quota.process_jail, "popen", return_value=process), \
                 patch.object(claude_quota, "stop_worker") as stop:
             with self.assertRaisesRegex(TimeoutError, "隐藏终端初始化"):
                 claude_quota.read_usage("claude.exe")
@@ -165,7 +165,7 @@ class ReaderIsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {"LOCALAPPDATA": folder}), \
                 patch.object(claude_quota, "no_quota_reason", return_value=None), \
                 patch.object(claude_quota.sys, "frozen", True, create=True), \
-                patch.object(claude_quota.subprocess, "Popen", side_effect=start):
+                patch.object(claude_quota.process_jail, "popen", side_effect=start):
             self.assertEqual(claude_quota.read_usage("claude.exe"), {"remaining_percent": 81})
 
 
