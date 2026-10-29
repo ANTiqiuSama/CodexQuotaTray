@@ -587,6 +587,27 @@ class SteadyBubbleTests(unittest.TestCase):
                 sprite = agent_panel.burn_sprite(chart, colors, scale)
                 self.assertEqual(sprite.size, (round(agent_panel.CHART_WIDTH * scale), round(agent_panel.CHART_H * scale)))
 
+    def test_log_quota_axis_handles_zero_and_spreads_small_consumption(self):
+        position = agent_panel.burn_log_position
+        self.assertEqual(position(100), 0)
+        self.assertEqual(position(0), 1)
+        self.assertEqual(position(-1), 1)
+        self.assertEqual(position(101), 0)
+        values = [position(value) for value in (100,99,90,50,0)]
+        self.assertEqual(values, sorted(values))
+        self.assertGreater(position(99)-position(100), .1)  # 1% used is visible, rather than 1% of plot height
+        curve = agent_panel.burn_projection_curve([(0,100),(100,0)])
+        self.assertEqual((curve[0],curve[-1]), ((0,100),(100,0)))
+        self.assertEqual(curve[16], (50,50))
+        self.assertGreater(position(curve[16][1]), .5)      # projection follows the log curve, not an endpoint chord
+        bounds = agent_panel.burn_log_bounds([61,80,85,90])
+        self.assertLess(bounds[1]-bounds[0], 1)
+        self.assertLessEqual(bounds[0], position(90))
+        self.assertGreaterEqual(bounds[1], position(61))
+        flat = agent_panel.burn_log_bounds([80,80])
+        self.assertGreaterEqual(flat[1]-flat[0], .159)
+        self.assertEqual(agent_panel.burn_log_ticks((0,1)), (100,90,0))
+
     def test_global_chart_legends_wrap_and_keep_the_plot_and_footer_clear(self):
         labels = ('Codex · 5 小时', 'Codex · 每周', 'Claude Code · 5 小时', 'Claude Code · 每周',
                   'Gemini · Argon', 'Gemini · Claude/GPT', 'Xiaomi MiMo · 套餐额度', 'Grok · 每周')

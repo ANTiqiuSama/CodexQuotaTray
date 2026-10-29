@@ -1037,14 +1037,68 @@ def burn_points(series: BurnSeries, chart: BurnChart) -> tuple[list[tuple[float,
     return history, [(t0, r0), (stop, max(0.0, r0 - series.rate * (stop - t0) / 3600))], seen
 
 
-def _dashed(pen, start, end, color, width, dash, gap):
-    (x0, y0), (x1, y1) = start, end
-    length = math.hypot(x1 - x0, y1 - y0)
-    position = 0.0
-    while position < length:
-        a, b = position / length, min(length, position + dash) / length
-        pen.line((x0 + (x1 - x0) * a, y0 + (y1 - y0) * a, x0 + (x1 - x0) * b, y0 + (y1 - y0) * b), fill=color, width=width)
-        position += dash + gap
+def burn_log_position(remaining: float) -> float:
+    """Top=100% left, bottom=0% left; log1p(spent) expands small consumption.
+
+    Keep raw quota/rate data untouched. The +1 gives both full and exhausted
+    windows finite positions, unlike a logarithm of remaining quota.
+    """
+    remaining = max(0.0, min(100.0, remaining))
+    return math.log1p(100.0 - remaining) / math.log(101.0)
+
+
+def burn_projection_curve(projection: list, steps: int = 32) -> list:
+    if len(projection) < 2:
+        return projection
+    (t0, r0), (t1, r1) = projection[0], projection[-1]
+    return [(t0 + (t1-t0)*index/steps, r0 + (r1-r0)*index/steps) for index in range(steps+1)]
+
+
+def burn_log_bounds(values) -> tuple[float, float]:
+    positions = [burn_log_position(value) for value in values]
+    if not positions:
+        return 0.0, 1.0
+    low, high = min(positions), max(positions)
+    padding = max(.015, (high-low)*.12)
+    low, high = max(0.0,low-padding), min(1.0,high+padding)
+    # Do not magnify a flat reading or rounding noise into a large movement.
+    if high-low < .16:
+        center = (low+high)/2
+        low = max(0.0,min(.84,center-.08))
+        high = low+.16
+    return low, high
+
+
+def burn_log_ticks(bounds: tuple[float, float]) -> tuple[float, ...]:
+    low, high = bounds
+    nice = (100,99.5,99,98,95,90,85,80,75,70,60,50,40,30,20,10,0)
+    available = [value for value in nice if low <= burn_log_position(value) <= high]
+    ticks = set()
+    for target in (low,(low+high)/2,high):
+        if available:
+            ticks.add(min(available,key=lambda value:abs(burn_log_position(value)-target)))
+    result = []
+    for value in sorted(ticks,reverse=True):
+        if not result or (burn_log_position(value)-burn_log_position(result[-1]))/(high-low) >= .24:
+            result.append(value)
+    return tuple(result)
+
+
+def _dashed_curve(pen, points, color, width, dash, gap):
+    """Continuous dash phase along a sampled nonlinear projection."""
+    travelled, period = 0.0, dash + gap
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        length = math.hypot(x1-x0, y1-y0)
+        if length <= 0:
+            continue
+        position = math.floor(travelled / period) * period
+        while position < travelled + length:
+            start, end = max(0.0, position-travelled), min(length, position+dash-travelled)
+            if end > start:
+                a, b = start/length, end/length
+                pen.line((x0+(x1-x0)*a, y0+(y1-y0)*a, x0+(x1-x0)*b, y0+(y1-y0)*b), fill=color, width=width)
+            position += period
+        travelled += length
 
 
 @lru_cache(maxsize=16)
@@ -1059,7 +1113,7 @@ def burn_legend(chart: BurnChart | None) -> tuple:
     for index, series in enumerate(chart.series):
         text = f"{series.label} · 剩余额度" if single else series.label
         width = probe.textlength(text, font=face) + (0 if single else 8)
-        if x > 10 and x + width > CHART_WIDTH - 10:
+        if x > 10 and x + width > CHART_WIDTH - 38:
             x, row = 10.0, row + 1
         result.append((index, x, row, text))
         x += width + 12
@@ -1099,40 +1153,45 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
         last_x = x + draw.textlength(text, font=small) + px(12)
     resets = sorted(s.reset_at for s in chart.series if s.reset_at)
     drawn = [(series, color, *burn_points(series, chart)) for series, color in zip(chart.series, colors)]
+    bounds = burn_log_bounds(value for _,_,history,projection,_ in drawn for _,value in history+projection)
+    ticks = burn_log_ticks(bounds)
     exhausting = [(exhausts, series, color) for series, color, _, _, exhausts in drawn if exhausts is not None]
     first = min(exhausting, key=lambda item: item[0]) if exhausting else None
     row = px(CHART_LABEL / 2 + 1)
+    tag_right = width - px(38)       # reserve the right edge for the axis-mode label
     if first is not None:
         # The earliest exhaustion is named in the label row, where no line runs;
         # the reset stays visible as its blue marker.
         tag = ("" if single else first[1].label + " ") + f"约 {_clock(first[0], chart.now)} 用完"
-        if single and width - px(10) - draw.textlength(tag, font=small) > last_x:
-            draw.text((width - px(10), row), tag, font=small, fill=first[2], anchor="rm")
+        if single and tag_right - draw.textlength(tag, font=small) > last_x:
+            draw.text((tag_right, row), tag, font=small, fill=first[2], anchor="rm")
     elif resets:
         prefix = "重置" if single else "最近重置"
         tag = f"{prefix} {_clock(resets[0], chart.now)}"
-        if single and width - px(10) - draw.textlength(tag, font=small) > last_x:
-            draw.text((width - px(10), row), tag, font=small, fill=MUTED_TEXT, anchor="rm")
+        if single and tag_right - draw.textlength(tag, font=small) > last_x:
+            draw.text((tag_right, row), tag, font=small, fill=MUTED_TEXT, anchor="rm")
+    draw.text((width-px(10), row), "log", font=small, fill=MUTED_TEXT, anchor="rm")
 
     k = SUPERSAMPLE
-    left, top, right, bottom = 10, CHART_LABEL + extra + 4, CHART_WIDTH - 10, CHART_H + extra - 6
+    left, top, right, bottom = 34, CHART_LABEL + extra + 4, CHART_WIDTH - 10, CHART_H + extra - 6
     big = Image.new("RGBA", (width * k, height * k), (0, 0, 0, 0))
     pen = ImageDraw.Draw(big)
     X = lambda t: (left + (right - left) * (t - chart.start) / span) * scale * k  # noqa: E731
-    Y = lambda r: (bottom - (bottom - top) * r / 100) * scale * k  # noqa: E731
+    Y = lambda r: (top + (bottom - top) * (burn_log_position(r)-bounds[0])/(bounds[1]-bounds[0])) * scale * k  # noqa: E731
     hair = max(1, round(scale * k))
-    for level in (0, 50, 100):          # baseline, half, full
+    for level in ticks:
         pen.line((X(chart.start), Y(level), X(chart.end), Y(level)), fill=(240, 238, 230, 34 if level == 0 else 16), width=hair)
     for reset in set(resets):
         if chart.start <= reset <= chart.end:
-            for y in range(round(Y(100)), round(Y(0)), 4 * k):
-                pen.line((X(reset), y, X(reset), min(Y(0), y + 2 * k)), fill=(240, 238, 230, 70), width=hair)
+            for y in range(round(top*scale*k), round(bottom*scale*k), 4*k):
+                pen.line((X(reset),y,X(reset),min(bottom*scale*k,y+2*k)), fill=(240,238,230,70), width=hair)
     # Fills first (lighter when several overlap), then every line above all fills.
     for series, color, history, _, _ in drawn:
         if len(history) >= 2:
             line = [(X(t), Y(r)) for t, r in history]
             area = Image.new("L", big.size, 0)
-            ImageDraw.Draw(area).polygon(line + [(line[-1][0], Y(0)), (line[0][0], Y(0))], fill=46 if single else 22)
+            baseline = bottom*scale*k
+            ImageDraw.Draw(area).polygon(line + [(line[-1][0], baseline), (line[0][0], baseline)], fill=46 if single else 22)
             fill = Image.new("RGBA", big.size, tuple(color[:3]) + (0,))
             fill.putalpha(area)
             big.alpha_composite(fill)
@@ -1140,13 +1199,15 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
         if len(history) >= 2:
             pen.line([(X(t), Y(r)) for t, r in history], fill=color, width=max(2, round(1.6 * scale * k)), joint="curve")
         if projection:
-            _dashed(pen, *[(X(t), Y(r)) for t, r in projection], _with_alpha(color, 200),
-                    max(2, round(1.3 * scale * k)), 5 * scale * k, 4 * scale * k)
+            _dashed_curve(pen, [(X(t), Y(r)) for t, r in burn_projection_curve(projection)],
+                          _with_alpha(color, 200), max(2, round(1.3 * scale * k)), 5 * scale * k, 4 * scale * k)
     image.alpha_composite(big.resize((width, height), Image.LANCZOS))
     draw = ImageDraw.Draw(image)
+    for level in ticks:
+        draw.text((px(left-5), Y(level)/k), f"{level:g}%", font=ui_font(px(8)), fill=MUTED_TEXT, anchor="rm")
     if all(len(history) < 2 for _, _, history, _, _ in drawn):
         draw.text((width / 2, px((top + bottom) / 2)), "正在积累用量记录", font=small, fill=MUTED_TEXT, anchor="mm")
-    base, ceiling = Y(0) / k, Y(100) / k
+    base, ceiling = px(bottom), px(top)
     for series, color, history, _, exhausts in drawn:
         if history:
             cx, cy = X(history[-1][0]) / k, Y(history[-1][1]) / k

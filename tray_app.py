@@ -353,7 +353,7 @@ class QuotaTray:
         text, _ = self.headline_forecast(provider)
         return f"预测：{text}" if text else ""
 
-    CHART_VIEW_MAX = 8 * 86400       # Longer windows (MiMo's year): only the last 8 days of readings.
+    CHART_VIEW_MAX = 2 * 3600        # Focus on recent work; long quota windows must not squeeze it to the edge.
     CHART_POINTS = 160
     CHART_RECENT_SECONDS = 30 * 60  # keep completed work visible long enough to inspect its trend
 
@@ -461,15 +461,10 @@ class QuotaTray:
         if not candidates:
             return None
         series = tuple(item[0] for item in candidates)
-        # The view starts at the earliest reading shown and runs a little past
-        # now (past the first projected exhaustion), at most to a near reset: a
-        # week-long axis with two days of data squeezed the lines into a corner.
+        # Keep recent history and a short projection readable. A far-away
+        # exhaustion remains in the forecast text instead of expanding this axis.
         back = max(3600.0, now - min(s.points[0][0] for s in series))
         start, end = now - back, now + 0.6 * back
-        exhausts = [outlook.exhausts_at for item, outlook in candidates
-                    if outlook.exhausts_at and (not item.reset_at or outlook.exhausts_at < item.reset_at)]
-        if exhausts:
-            end = max(end, min(exhausts) + 0.15 * back)
         near = [s.reset_at for s in series if s.reset_at and (s.reset_at <= end or s.reset_at - now <= 1.2 * back)]
         if near:
             end = max(now + 0.2 * back, max(near))          # a reset is near: show it

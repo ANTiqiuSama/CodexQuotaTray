@@ -468,6 +468,21 @@ class AgentPanelTests(unittest.TestCase):
         self.tray.history = None
         self.assertIsNone(self.tray.burn_chart("codex", now))
 
+    def test_chart_focuses_on_recent_history_without_zooming_out_to_far_forecasts(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = time.time()
+        reset = int(now+3*3600)
+        history = QuotaHistory(Path(self.folder.name) / 'recent-axis.json')
+        for age, used in ((86400,1),(7200,10),(3600,11),(0,12)):
+            history.add('codex',now-age,used,reset)
+        self.tray.history = history
+        self.tray.snapshots['codex'] = QuotaSnapshot('codex','Codex',300,12,88,reset,now,False,None)
+        chart = self.tray.burn_chart('codex',now)
+        self.assertGreaterEqual(chart.start,now-7200.1)
+        self.assertLessEqual(chart.end,now+4320.1)
+        self.assertEqual(chart.series[0].points[-1][1],88)
+
     def test_exhausted_codex_switches_to_weekly_only_while_working(self):
         from pathlib import Path
         from forecast import QuotaHistory
