@@ -262,6 +262,18 @@ def get_gemini_quota() -> QuotaSnapshot:
 
 
 def get_claude_quota() -> QuotaSnapshot:
+    import claude_status
+    report = claude_status.latest()
+    if report:
+        windows = report["rate_limits"]
+        primary, secondary = windows.get("five_hour", {}), windows.get("seven_day", {})
+        used, second = primary.get("used_percentage"), secondary.get("used_percentage")
+        return QuotaSnapshot("claude", "Claude Code", 300, used, None if used is None else 100.0 - used,
+                             primary.get("resets_at"), report["updated_at"], time.time() - report["updated_at"] > 1800, None,
+                             10080 if secondary else None, second, None if second is None else 100.0 - second,
+                             secondary.get("resets_at"))
+    if claude_status.bridge_installed():
+        return _unknown("claude", "Claude Code", 300, "等待 Claude Code 同步额度（完成一次回复后自动更新）")
     executable = providers.find_claude()
     if executable is None:
         return _unknown("claude", "Claude", 300, "未找到 Claude Code（claude.exe / claude.cmd），可设置 CODEX_QUOTA_CLAUDE_EXE")

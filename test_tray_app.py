@@ -17,6 +17,13 @@ from quota_sources import QuotaSnapshot
 
 
 class TrayMenuTests(unittest.TestCase):
+    def test_packaged_restart_owns_new_python_runtime(self):
+        with patch.object(tray_app.sys, 'frozen', True, create=True), \
+                patch.dict(tray_app.os.environ, {'EXISTING_SETTING':'keep'}):
+            result = tray_app.restart_environment()
+        self.assertEqual(result['PYINSTALLER_RESET_ENVIRONMENT'], '1')
+        self.assertEqual(result['EXISTING_SETTING'], 'keep')
+
     def setUp(self):
         # Exercise the real pystray menu validation without quota requests.
         self.tray = QuotaTray.__new__(QuotaTray)
@@ -58,7 +65,7 @@ class TrayMenuTests(unittest.TestCase):
             with self.subTest(enabled=enabled), patch.object(tray_app, "PROVIDERS", active), \
                     patch.object(tray_app.provider_registry, "set_claude_enabled") as save:
                 item = next(item for item in self.tray.build_menu("codex").items
-                            if item.text == "Claude 额度检测（订阅开通后启用）")
+                            if item.text == "Claude Code 额度与 TPS")
                 self.assertEqual(item.checked, enabled)
                 item(None)
                 save.assert_called_once_with(not enabled)

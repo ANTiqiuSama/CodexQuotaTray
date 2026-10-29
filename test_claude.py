@@ -51,9 +51,9 @@ class RegistryTests(unittest.TestCase):
                 self.assertNotIn("claude", providers.enabled_keys("claude,codex"))
 
     def test_everything_derives_from_registry(self):
-        self.assertEqual(quota_sources.LABELS["claude"], ("Claude", 300))
-        self.assertEqual(IDLE["claude"], IDLE["grok"])
-        self.assertEqual(SETTLE["claude"], 20)
+        self.assertEqual(quota_sources.LABELS["claude"], ("Claude Code", 300))
+        self.assertEqual(IDLE["claude"], 300)
+        self.assertEqual(SETTLE["claude"], 5)
         self.assertEqual(accent("A"), providers.get("claude").accent)
         self.assertEqual(set(ACCENTS), {"C", "G", "M", "A", "X"})
         # Danger is no longer Claude's clay, so a low Claude ring stays distinct.
@@ -64,6 +64,13 @@ class RegistryTests(unittest.TestCase):
 
 
 class UsageParsingTests(unittest.TestCase):
+    def setUp(self):
+        self.native = patch('claude_status.latest', return_value=None)
+        self.bridge = patch('claude_status.bridge_installed', return_value=False)
+        self.native.start()
+        self.bridge.start()
+        self.addCleanup(self.native.stop)
+        self.addCleanup(self.bridge.stop)
     def test_session_and_week_windows(self):
         with patch.object(cli_usage, "datetime", wraps=datetime) as fake:
             fake.now.side_effect = lambda tz=None: NOW
@@ -108,6 +115,13 @@ class UsageParsingTests(unittest.TestCase):
 
 
 class ReaderIsolationTests(unittest.TestCase):
+    def setUp(self):
+        self.native = patch('claude_status.latest', return_value=None)
+        self.bridge = patch('claude_status.bridge_installed', return_value=False)
+        self.native.start()
+        self.bridge.start()
+        self.addCleanup(self.native.stop)
+        self.addCleanup(self.bridge.stop)
     def test_logged_out_account_skips_native_terminal_and_sleeps_twelve_hours(self):
         status = Mock(stdout=json.dumps({"loggedIn": False, "email": "private@example.test"}))
         with patch.object(providers, "find_claude", return_value=Path("claude.exe")), \
@@ -277,6 +291,26 @@ class TranscriptTests(unittest.TestCase):
         self.monitor.poll(now)
         self.write(self.assistant("msg_s", 0, now - 1, stop="end_turn", model="<synthetic>"))
         self.assertEqual(self.monitor.poll(now)["providers"]["claude"]["output_tokens_60"], 0)
+
+    def test_api_request_reference_measures_reply_without_tool_time_or_duplicates(self):
+        now = time.time()
+        self.monitor.poll(now)
+        reply = self.assistant('msg-measured', 500, now - 1, stop='end_turn', model='claude-opus-5-5')
+        reply['requestRef'] = 'request-2'
+        self.write({'type':'user', 'timestamp': now - 60, 'message':{}},
+                   {'type':'api-request', 'id':'request-2', 'timestamp':now - 6, 'params':{'model':'claude-opus-5-5'}},
+                   reply, reply)
+        value = self.monitor.poll(now)['providers']['claude']
+        self.assertEqual(value['display_tps'], 100.0)
+        self.assertEqual(value['output_tokens_60'], 500)
+        self.assertIn('本次 API 请求', value['display_basis'])
+        self.assertIn('含首字延迟', value['display_basis'])
+
+    def test_completed_reply_replay_does_not_leave_a_generating_session(self):
+        now = time.time()
+        self.monitor.poll(now)
+        self.write(self.assistant('msg-ended', 500, now - 10, stop='end_turn'))
+        self.assertEqual(self.monitor.poll(now)['providers']['claude']['active_sessions'], 0)
 
 
 if __name__ == "__main__":

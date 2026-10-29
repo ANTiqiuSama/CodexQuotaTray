@@ -31,7 +31,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 | C | GPT / Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
 | X | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
 | G | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），圆环优先显示 Argon，其次 Claude/GPT，最后 Gemini | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
-| A | Claude Code，可选 | 临时 Claude Code 会话执行 `/usage`，解析当前会话与每周订阅窗口 | 读取本地会话的 `message.usage.output_tokens` | 解析、去重与错误路径已有测试；真实订阅账号额度尚缺端到端验收；免费桌面端额度未接入 |
+| A | Claude Code | 原生 status line 同步 5 小时与每周额度 | 本地 `api-request` 与 `requestRef` 关联真实输出计数，计算每次 API 请求的端到端 TPS | Pro/Max 账号；未记录请求开始时间的旧会话只统计输出计数 |
 | M | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
 
 额度、输出计数和生成速率来自不同信号。能读到额度，不代表同一来源也提供生成 TPS；没有近期记录也不能证明没有使用。
@@ -40,9 +40,9 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 
 A 来源面向 **Claude Code 的 CLI 和本地会话记录**。Claude 桌面应用的安装状态、免费版聊天额度和桌面端对话记录不通过这条接口读取。
 
-Claude 默认关闭，不会因安装客户端而开始读取。开通订阅并登录 Claude Code 后，右键任意托盘图标打开设置 → **额度来源**，打开 **A · Claude Code** 开关并保存（或在托盘菜单勾选“Claude 额度检测（订阅开通后启用）”）；托盘自动重启、执行首次读取，随后定期刷新。取消勾选会停止读取并隐藏 A，选择会保存。免费桌面端和 API Key 计费环境没有这类订阅额度窗口。
+在设置 → **额度来源**打开 **A · Claude Code**，或在托盘菜单勾选“Claude Code 额度与 TPS”。免费桌面端和 API Key 计费环境没有 Pro/Max 的订阅额度窗口。进程列表分别统计 Claude Code 和 Claude 桌面客户端。
 
-显式设置 `CODEX_QUOTA_PROVIDERS` 含 `claude` 也可首次启用；设置页/托盘菜单保存的启停选择优先。读取前先检查非交互登录状态，无登录或无订阅时暂停 12 小时；订阅读取在独立进程中执行，含终端初始化的总超时为 45 秒，避免卡住其他来源。
+Windows 运行 `CodexQuotaTray.exe --install-claude-statusline` 接入 Claude 官方 status line 数据。它保留其他 Claude 设置，只在没有已有自定义 status line 时安装；当前会话会自动重载，随后把原生 `rate_limits` 同步到本机托盘，不读取 OAuth 凭据、不发送模型请求。脚本只保存会话 ID、采样时间与数值额度，不保存聊天内容。已安装实时接入时不再启动 `/usage` 终端；旧版或未接入环境保留有超时的 `/usage` 兼容读取。`CODEX_QUOTA_PROVIDERS` 和设置页的来源开关仍然有效。
 
 ### Xiaomi MiMo Token Plan
 
@@ -226,7 +226,7 @@ Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家�
 
 Gemini 气泡的任务名来自会话数据库中用户消息步骤（step_type 14）的文字，桌面端还会读取 `~/.gemini/antigravity/brain/<会话>/task.md` 的标题；若客户端版本的步骤编号不同，可用 `CODEX_QUOTA_AGY_USER_STEPS=14,…` 指定。`--check-gemini-tps` 的 `user_steps`、`step_columns` 只报告字数与列名，便于核对。经 Codex 桥接使用 Gemini 时，同样采用 Codex 客户端的流式统计。
 
-**Claude 模型的 Claude Code** 当前没有可核验的原生生成 TPS，界面保留未知值，只展示可读到的输出计数和活动状态。
+**Claude Code** 用 `api-request.id` 与回复的 `requestRef` 逐请求关联，计算真实输出 token 数 ÷ API 请求记录至最后输出记录的时间。它包含首字延迟，界面标注为 API 端到端速率；工具执行与用户等待不计入下一次请求时长。同一消息的内容块合并去重，最近多个回复按 token 加权。没有匹配时间字段时保留未知，避免用整个任务耗时代替生成时间。
 
 ### 最近 60 秒输出速率
 
@@ -425,7 +425,7 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini,claude'
 
 读取器路径覆盖与左键启动入口是两项设置。左键启动方式由 `providers.py` 中的 `ProviderSpec.launch` 决定；安装方式不同时，需要调整对应入口。
 
-Claude 额度探测在本程序的 `claude-probe` 文件夹中执行，仅发送 `/usage` 状态指令，并使用 `--strict-mcp-config`。首次出现该文件夹的信任提示时，读取器会自动确认。CLI 仍可能使用或更新其自身的偏好、信任和会话文件；这不是对任意工作目录的通用授权。
+Claude 原生实时额度使用 `claude-status/` 中的数值记录；`claude-probe/` 仅供未接入 status line 的旧版 `/usage` 兼容读取。
 
 ## 本地数据与隐私
 
@@ -563,7 +563,7 @@ python -X utf8 -m unittest -v test_quota_sources.py test_tps_sources.py `
 
 2026-10-16，本机 Windows 11 / Python 3.12.10 对代码版本 `d5a553a`（合入提交 `ea19ed0`）运行 **97 项测试，全部通过**。测试覆盖解析、计数去重、来源注册表、图标、卡片、刷新调度和预测计算；这是一份本机验证记录。
 
-原生卡片另做过置顶全屏窗口测试：79 次连续采样位置稳定，未反复隐藏，键盘焦点保持不变。纯渲染用例覆盖不同缩放比例。Claude Code 的订阅账号真实额度仍缺端到端验收，免费桌面端的额度与 TPS 尚未接入。
+原生卡片另做过置顶全屏窗口测试：79 次连续采样位置稳定，未反复隐藏，键盘焦点保持不变。纯渲染用例覆盖不同缩放比例。2026-10-29 已实测 Claude Code Pro 的原生 5 小时/每周额度、本地会话和逐请求端到端 TPS；免费桌面端额度未接入。
 
 尚未覆盖的场景包括 Windows 10 实机、所有显示器缩放组合、独占全屏游戏、各客户端未来版本，以及没有可观测本地记录的软件和独立网页。
 

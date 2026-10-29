@@ -39,7 +39,7 @@ def save_summary(config: dict, enabled: bool) -> None:
 
 PAGES = (("overview", "概览"), ("sources", "额度来源"), ("iq", "模型智商"), ("mimo", "小米 MiMo"), ("agents", "任务与 herdr"),
          ("naming", "任务命名 API"), ("general", "常规"))
-PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "mimo": "Xiaomi MiMo"}
+PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude Code", "mimo": "Xiaomi MiMo"}
 
 
 def letter_of(provider: str) -> str:
@@ -64,7 +64,7 @@ def build_cards(app, now: float | None = None) -> list[tuple[view.SourceCard, ob
         if model is not None:
             status, tone, forecast, forecast_tone = model.status, model.status_tone, model.forecast, model.forecast_tone
         else:
-            status, tone, forecast, forecast_tone = ("未开通" if snapshot is not None and snapshot.error else "空闲"), "idle", "", "unknown"
+            status, tone, forecast, forecast_tone = ("读取异常" if snapshot is not None and snapshot.error else "空闲"), "idle", "", "unknown"
         note = (snapshot.error or "") if snapshot is not None else ""
         card = view.SourceCard(provider, letter, PROVIDER_NAMES.get(provider, provider), status, tone, view.quota_rows(snapshot, now),
                                data.get("display_tps"), float(data.get("output_tps_60") or 0.0), int(data.get("active_sessions") or 0),

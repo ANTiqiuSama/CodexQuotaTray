@@ -34,7 +34,7 @@ PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Lo
 RECENT_SECONDS = 86400          # Only files touched within a day can matter.
 FORGET_SECONDS = 2 * 86400      # Readers idle this long are released.
 SLOW_DISCOVERY_SECONDS = 30     # Process list and full-history globbing.
-PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude", "mimo": "Xiaomi MiMo", "other": "其他模型"}
+PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude Code", "mimo": "Xiaomi MiMo", "other": "其他模型"}
 CLAUDE_IDLE_FLUSH = 30          # Emit an unfinished Claude message after this much silence.
 CLAUDE_STALE_ACTIVITY = 90      # Drop "generating" when a session went quiet this long.
 
@@ -227,6 +227,7 @@ class TpsMonitor:
         self.claude_root = self.home / ".claude" if home else providers.claude_home()
         self.claude_pending: dict[str, dict[str, Any]] = {}
         self.claude_last_input: dict[str, float] = {}   # session -> last user / tool-result record
+        self.claude_request_starts: dict[tuple[str, str], float] = {}
         self.home_override = home is not None
         self.mimocode_paths: list[Path] | None = None
         self.mimocode_scanned = 0.0
@@ -307,6 +308,8 @@ class TpsMonitor:
         for session, moment in list(self.claude_last_input.items()):
             if moment < now - FORGET_SECONDS:
                 self.claude_last_input.pop(session, None)
+        self.claude_request_starts = {key: moment for key, moment in self.claude_request_starts.items()
+                                     if moment >= now - FORGET_SECONDS}
         grok_live = {path.parent.name for path in self.readers if path.name == "updates.jsonl"}
         for counter in [counter for counter in self.grok_counters if counter[0] not in grok_live]:
             self.grok_counters.pop(counter, None)
@@ -453,6 +456,13 @@ class TpsMonitor:
         if moment is None:
             return
         kind = record.get("type")
+        if kind == "api-request" and record.get("id"):
+            self.claude_request_starts[(session, str(record["id"]))] = moment
+            if moment > now - 120:
+                model = (record.get("params") or {}).get("model", "")
+                provider = provider_for(model)
+                self.activity[session] = (provider if provider != "other" else "claude", moment, "请求中")
+            return
         if kind not in ("assistant", "user"):
             return
         # Any later record means earlier messages of this session are final.
@@ -475,6 +485,10 @@ class TpsMonitor:
             "session": session, "model": model, "last": moment, "output": 0, "stop": None, "seen_at": now,
             "input": 0, "cached": 0, "requested": self.claude_last_input.get(session),
         })
+        request_start = self.claude_request_starts.get((session, str(record.get("requestRef") or "")))
+        if request_start is not None:
+            pending["api_requested"] = request_start
+        self.context.setdefault(session, {}).update({"model": model, "provider": provider_for(model)})
         uncached = (number(usage.get("input_tokens"), 0) or 0) + (number(usage.get("cache_creation_input_tokens"), 0) or 0)
         pending["input"] = max(pending["input"], int(uncached))
         pending["cached"] = max(pending["cached"], int(number(usage.get("cache_read_input_tokens"), 0) or 0))
@@ -494,20 +508,25 @@ class TpsMonitor:
             return
         provider = provider_for(pending["model"])
         provider = provider if provider != "other" else "claude"   # Claude Code sessions default to Claude
-        tps, basis, seconds = None, "读取Claude Code真实输出计数；不推算TPS", None
-        requested = pending.get("requested")
-        if provider == "mimo" and requested and pending["output"] >= MIN_TPS_TOKENS:
+        tps, basis, seconds = None, "Claude Code 输出计数（缺少本次 API 请求时间）", None
+        requested = pending.get("api_requested") or (pending.get("requested") if provider == "mimo" else None)
+        if requested and pending["output"] >= MIN_TPS_TOKENS:
             # Claude Code routed to MiMo: the transcript has no streaming times,
             # only when the request input was written and when the reply ended.
             elapsed = pending["last"] - requested
             if MIN_TPS_SECONDS <= elapsed <= 600:
                 tps, seconds = round(pending["output"] / elapsed, 1), elapsed
-                basis = "Claude Code 端到端速率（真实输出token数÷请求发出至回复结束，含首字延迟，偏低）"
+                basis = ("Claude Code API 端到端速率（真实输出 token ÷ 本次 API 请求至输出完成，含首字延迟）"
+                         if pending.get("api_requested") else
+                         "Claude Code 端到端速率（真实输出token数÷请求发出至回复结束，含首字延迟，偏低）")
         self.add(Observation(key("claude", mid), "Claude Code", pending["session"], provider, pending["model"],
                              pending["last"], pending["output"], seconds, basis, True, tps,
                              pending.get("input", 0), pending.get("cached", 0)), now)
-        if pending["stop"] == "end_turn" and pending["last"] > now - 3:
-            self.activity[pending["session"]] = (provider, pending["last"], "刚完成生成")
+        if pending["stop"] == "end_turn":
+            if pending["last"] > now - 3:
+                self.activity[pending["session"]] = (provider, pending["last"], "刚完成生成")
+            elif self.activity.get(pending["session"], (None, 0))[1] <= pending["last"]:
+                self.activity.pop(pending["session"], None)
 
     def _claude_flush(self, now: float):
         for mid, pending in list(self.claude_pending.items()):
@@ -1361,9 +1380,13 @@ def antigravity_diagnostics(home: Path | None = None, databases: int = 3, genera
 def running_software() -> list[dict[str, Any]]:
     names = {"chatgpt.exe": "ChatGPT / Codex 桌面", "codex.exe": "Codex 引擎", "grok.exe": "Grok CLI", "agy.exe": "Antigravity CLI", "antigravity.exe": "Antigravity 桌面", "gemini.exe": "Gemini CLI", "claude.exe": "Claude Code", "cursor.exe": "Cursor", "ollama.exe": "Ollama", "lm studio.exe": "LM Studio", "copilot.exe": "Copilot CLI", "opencode.exe": "OpenCode", "mimo.exe": "MiMo Code"}
     counts: dict[str, int] = {}
-    for process in psutil.process_iter(["name"]):
+    for process in psutil.process_iter(["name", "exe"]):
         name = (process.info.get("name") or "").lower()
-        if name in names:
+        executable = (process.info.get("exe") or "").lower().replace("\\", "/")
+        if name in ("claude.exe", "claude"):
+            app = "Claude 桌面" if "/windowsapps/" in executable or "/claude.app/" in executable else "Claude Code"
+            counts[app] = counts.get(app, 0) + 1
+        elif name in names:
             counts[names[name]] = counts.get(names[name], 0) + 1
         elif name in ("node.exe", "node"):
             try:
@@ -1375,7 +1398,8 @@ def running_software() -> list[dict[str, Any]]:
             except (psutil.Error, OSError):
                 pass
     supported = {"ChatGPT / Codex 桌面", "Codex 引擎", "Grok CLI", "Antigravity CLI", "Antigravity 桌面", "Claude Code", "MiMo Code"}
-    return [{"name": name, "processes": count, "status": "读取本地记录" if name in supported else "暂无可核验的本地TPS信号"} for name, count in sorted(counts.items())]
+    return [{"name": name, "processes": count, "status": ("读取本地记录" if name in supported else
+             "桌面客户端" if name == "Claude 桌面" else "暂无可核验的本地TPS信号")} for name, count in sorted(counts.items())]
 
 
 def performance_signature(snapshot: dict[str, Any]) -> str:

@@ -153,7 +153,7 @@ SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         "grok", "X", "Grok", 10080, (203, 208, 216, 255), 30 * 60, 10 * 60, 20,
         ("cli", lambda: Path.home() / ".grok/bin/grok.exe"),
-        source_note="临时 Grok CLI 会话 /usage（每周）",
+        source_note="Grok CLI /usage（每周）",
         exhausted_seconds=3 * 3600,
     ),
     ProviderSpec(
@@ -164,10 +164,10 @@ SPECS: tuple[ProviderSpec, ...] = (
     ProviderSpec(
         # Claude Code's /usage reports a 5-hour session and a weekly window.
         # Its reader opens a whole CLI session, so it refreshes like Grok.
-        "claude", "A", "Claude", 300, (217, 119, 87, 255), 30 * 60, 10 * 60, 20,
+        "claude", "A", "Claude Code", 300, (217, 119, 87, 255), 5 * 60, 60, 5,
         ("cli", find_claude),
         default=False, detect=lambda: claude_choice() is True,
-        source_note="临时 Claude Code 会话 /usage（当前会话 5 小时 + 每周）",
+        source_note="Claude Code 实时额度（5 小时 + 每周）、会话与 TPS",
         give_up_seconds=12 * 3600,
     ),
     ProviderSpec(
@@ -207,9 +207,9 @@ def enabled_keys(env: str | None = None) -> list[str]:
 
 DESCRIPTIONS = {
     "codex": "读取 Codex App Server 的 5 小时与每周额度；需要已安装并登录 Codex。",
-    "grok": "用临时 Grok CLI 会话读取 /usage 每周额度；需要已安装并登录 Grok CLI。",
+    "grok": "读取 Grok CLI /usage 每周额度；需要已安装并登录 Grok CLI。",
     "gemini": "用 agy（Antigravity CLI）读取 Argon、Claude/GPT、Gemini 额度池；需要已安装并登录 Antigravity。",
-    "claude": "用临时 Claude Code 会话读取订阅额度；需要 Claude 订阅（Pro/Max）并登录 Claude Code。",
+    "claude": "读取 Claude Code 实时额度、TPS 和本地会话；使用当前已登录的订阅账号。",
     "mimo": "读取小米 MiMo Token Plan 控制台套餐；需要在设置 → 小米 MiMo 中登录或填写手动套餐。",
 }
 

@@ -259,6 +259,14 @@ def startup_command() -> str:
     return f'"{runner}" -X utf8 "{Path(__file__).resolve()}"'
 
 
+def restart_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        # The new instance must own its extraction directory after the old exits.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
+
+
 class QuotaTray:
     # Class-level so test doubles built with __new__ share the same guarantees.
     ui_lock = threading.RLock()
@@ -617,7 +625,7 @@ class QuotaTray:
             *((pystray.MenuItem(lambda _: self.menu_reset_outlook(), self.open_reset_page, visible=lambda _: reset_watch.ENABLED),)
               if provider == "codex" else ()),
             pystray.MenuItem(lambda _: "打开诊断信息", self.open_diagnostics),
-            pystray.MenuItem("Claude 额度检测（订阅开通后启用）", self.toggle_claude,
+            pystray.MenuItem("Claude Code 额度与 TPS", self.toggle_claude,
                              checked=lambda _: "claude" in PROVIDERS),
             pystray.MenuItem(
                 lambda _: "开机自启",
@@ -863,6 +871,8 @@ class QuotaTray:
                     self.update_mimo_locally(now)
                 if "codex" in PROVIDERS:
                     self.update_codex_locally(now)
+                if "claude" in PROVIDERS:
+                    self.update_claude_locally(now)
                 if now - getattr(self, "order_checked_at", 0.0) >= 30:
                     self.order_checked_at = now
                     self.maybe_reorder(now)   # resets pass between refreshes
@@ -1074,6 +1084,19 @@ class QuotaTray:
                     log.exception("codex reset outlook update failed")
             level = outlook.level(now) if outlook else "unknown"
             self.stop_event.wait(reset_watch.POLL_SECONDS_HIGH if level in ("high", "watch") or outlook is None else reset_watch.POLL_SECONDS)
+
+    def update_claude_locally(self, now: float) -> None:
+        import claude_status
+        record = claude_status.latest(now)
+        old = self.snapshots.get("claude")
+        if record and old is not None and record["updated_at"] > (old.updated_at or 0):
+            fresh = get_claude_quota()
+            self.announce_resets("claude", old, fresh, now)
+            self.snapshots["claude"] = fresh
+            if self.history is not None and self.history.record(fresh):
+                self.history.save()
+            log.info("quota claude from native status: left=%s second=%s reset=%s/%s", fresh.remaining_percent,
+                     fresh.secondary_remaining_percent, fresh.resets_at, fresh.secondary_resets_at)
 
     def update_codex_locally(self, now: float) -> None:
         """Codex writes fresh rate limits into its session record after every
@@ -1360,6 +1383,12 @@ def check_claude(destination: Path, raw: bool = False) -> int:
     snapshot = get_claude_quota()
     destination.write_text(dump_snapshot({"claude": snapshot}), encoding="utf-8")
     if raw:
+        import claude_status
+        report = claude_status.latest()
+        if report or claude_status.bridge_installed():
+            destination.with_suffix(".raw.json").write_text(
+                json.dumps(report or {"status": "waiting_for_native_data"}, ensure_ascii=False, indent=2), encoding="utf-8")
+            return 1 if snapshot.error else 0
         executable = provider_registry.find_claude()
         try:
             text = run_temporary_usage(str(executable), CLAUDE_ARGS, timeout=30.0, probe=CLAUDE_PROBE) if executable else "未找到 Claude Code"
@@ -1412,6 +1441,26 @@ def check_agents(destination: Path) -> int:
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-runtime":
+        time.sleep(3)  # let the previous onefile parent exit and clean its own files
+        root = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+        report = {"frozen": bool(getattr(sys, "frozen", False)), "runtime_dir": str(root),
+                  "base_library_exists": (root / "base_library.zip").is_file(),
+                  "utf8_ok": "Claude 额度".encode("utf-8").decode("utf-8") == "Claude 额度"}
+        destination = Path(sys.argv[2]).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if report["utf8_ok"] and (report["base_library_exists"] or not report["frozen"]) else 1
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-restart":
+        command = ([sys.executable] if getattr(sys, "frozen", False) else
+                   [sys.executable, "-X", "utf8", str(Path(__file__).resolve())])
+        subprocess.Popen([*command, "--check-runtime", str(Path(sys.argv[2]).resolve())],
+                         env=restart_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return 0
+    if len(sys.argv) == 2 and sys.argv[1] == "--install-claude-statusline":
+        import claude_status
+        claude_status.install()
+        return 0
     if len(sys.argv) == 4 and sys.argv[1] in ("--claude-quota-worker", "--grok-quota-worker"):
         import cli_quota
         provider = "grok" if sys.argv[1] == "--grok-quota-worker" else "claude"
@@ -1501,7 +1550,7 @@ def main() -> int:
         ctypes.windll.kernel32.CloseHandle(handle)
         command = ([sys.executable] if getattr(sys, "frozen", False)
                    else [sys.executable, "-X", "utf8", str(Path(__file__).resolve())])
-        subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        subprocess.Popen(command, env=restart_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return 0
 
 

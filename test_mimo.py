@@ -451,6 +451,11 @@ class MimoTpsTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+    def setUp(self):
+        choices = patch.object(providers, "provider_choices", return_value={})
+        choices.start()
+        self.addCleanup(choices.stop)
+
     def test_claude_routed_to_mimo_is_not_a_claude_subscription(self):
         with tempfile.TemporaryDirectory() as home, patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": home, "ANTHROPIC_BASE_URL": ""}):
             (Path(home) / "projects").mkdir()
