@@ -587,6 +587,27 @@ class SteadyBubbleTests(unittest.TestCase):
                 sprite = agent_panel.burn_sprite(chart, colors, scale)
                 self.assertEqual(sprite.size, (round(agent_panel.CHART_WIDTH * scale), round(agent_panel.CHART_H * scale)))
 
+    def test_global_chart_legends_wrap_and_keep_the_plot_and_footer_clear(self):
+        labels = ('Codex · 5 小时', 'Codex · 每周', 'Claude Code · 5 小时', 'Claude Code · 每周',
+                  'Gemini · Argon', 'Gemini · Claude/GPT', 'Xiaomi MiMo · 套餐额度', 'Grok · 每周')
+        series = tuple(agent_panel.BurnSeries(label, 0, ((0, 100), (3600, 70)), 30, 7200)
+                       for label in labels)
+        chart = agent_panel.BurnChart(0, 7200, 3600, series)
+        extra = agent_panel.chart_extra(chart)
+        self.assertGreater(extra, 0)
+        from PIL import Image, ImageDraw
+        draw = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
+        for _, x, _, text in agent_panel.burn_legend(chart):
+            self.assertLessEqual(x + 8 + draw.textlength(text, font=agent_panel.ui_font(10)), agent_panel.CHART_WIDTH - 10)
+        model = agent_panel.PanelModel('grok', 'X', 'Grok', '空闲', (), None, (), burn=chart)
+        self.assertEqual(agent_panel._header_model(model.header).chart_padding, extra)
+        for scale in (1.0, 1.25, 1.5):
+            sprite = agent_panel.burn_sprite(chart, tuple(agent_panel.accent('C') for _ in series), scale)
+            self.assertEqual(sprite.height, round((agent_panel.CHART_H + extra) * scale))
+            scene = agent_panel.Scene()
+            scene.set_model(model, 0)
+            self.assertIsNotNone(scene.render(scale))
+
     def test_lines_use_the_colour_of_their_header_bar(self):
         shade = agent_panel.quota_shade
         pools = [shade("G", slot, 40.0, True) for slot in range(3)]

@@ -78,6 +78,8 @@ class BurnSeries:
     points: tuple[tuple[float, float], ...]     # (time, remaining %), oldest first
     rate: float | None = None
     reset_at: float | None = None
+    letter: str = ""                         # source colour, independent of hovered icon
+    pooled: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,7 @@ class PanelModel:
     banner_alert: str = ""                      # e.g. "官方预告": the banner turns solid with this badge
     intel: tuple = ()                           # coding IQ on the banner's right: (name, score, tone, running)
     intel_note: str = ""                        # shown there instead when there are no scores (e.g. "未设置")
+    chart_padding: float = 0.0                   # static-background copy of wrapped legend space
 
     @property
     def header(self) -> tuple:
@@ -140,7 +143,7 @@ class PanelModel:
         TPS and the burn chart are drawn per frame; the reset line is cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], "") for item in self.quota[:3]), (self.banner, self.banner_alert, self.intel, self.intel_note),
-                (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3])
+                (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3], chart_extra_for(self))
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
@@ -164,12 +167,16 @@ def chart_top(model, field_h: float) -> float:
     return field_top(model) + field_h + CHART_TOP
 
 
+def chart_extra_for(model: PanelModel) -> float:
+    return max(model.chart_padding, chart_extra(model.burn))
+
+
 def resets_middle(model, field_h: float) -> float:
-    return chart_top(model, field_h) + CHART_H + 10
+    return chart_top(model, field_h) + CHART_H + chart_extra_for(model) + 10
 
 
 def footer_middle(model, field_h: float) -> float:
-    return field_top(model) + field_h + CHART + 30
+    return field_top(model) + field_h + CHART + chart_extra_for(model) + 30
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
@@ -226,7 +233,7 @@ def field_height(bubbles) -> float:
 
 
 def panel_height(model: PanelModel, field: float) -> float:
-    return field_top(model) + field + CHART + FOOTER + 8
+    return field_top(model) + field + CHART + chart_extra_for(model) + FOOTER + 8
 
 
 # ----- motion helpers ------------------------------------------------------------
@@ -748,11 +755,12 @@ class Scene:
     def _chart(self, frame, model, field_h, scale, at):
         """Burn chart below the task field; the plot draws itself left to right on opening."""
         chart = model.burn
-        colors = tuple(quota_shade(model.letter, s.slot, s.points[-1][1] if s.points else None, pooled(model))
+        colors = tuple(quota_shade(s.letter or model.letter, s.slot, s.points[-1][1] if s.points else None,
+                                  s.pooled if s.letter else pooled(model))
                        for s in chart.series) if chart else ()
         sprite = burn_sprite(chart, colors, scale)
         left, top = round(at(PAD - 6)), round(at(chart_top(model, field_h)))
-        label = round(CHART_LABEL * scale)
+        label = round((CHART_LABEL + chart_extra(chart)) * scale)
         progress = self.chart_progress
         if progress >= 1:
             frame.alpha_composite(sprite, (left, top))
@@ -1039,30 +1047,56 @@ def _dashed(pen, start, end, color, width, dash, gap):
         position += dash + gap
 
 
+@lru_cache(maxsize=16)
+def burn_legend(chart: BurnChart | None) -> tuple:
+    """Wrap source/window labels without shrinking the plot or clipping legends."""
+    if chart is None:
+        return ()
+    face = ui_font(10)
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    x, row, result = 10.0, 0, []
+    single = len(chart.series) == 1
+    for index, series in enumerate(chart.series):
+        text = f"{series.label} · 剩余额度" if single else series.label
+        width = probe.textlength(text, font=face) + (0 if single else 8)
+        if x > 10 and x + width > CHART_WIDTH - 10:
+            x, row = 10.0, row + 1
+        result.append((index, x, row, text))
+        x += width + 12
+    return tuple(result)
+
+
+def chart_extra(chart: BurnChart | None) -> float:
+    legend = burn_legend(chart)
+    return legend[-1][2] * CHART_LABEL if legend else 0
+
+
 @lru_cache(maxsize=8)
 def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.Image:
     """Burn-down chart: remaining % of each quota window in use, each in the
     colour of its header bar, the forecast as a dashed line of the same colour,
     resets as faint dashed markers."""
     px = lambda value: round(value * scale)  # noqa: E731
-    width, height = px(CHART_WIDTH), px(CHART_H)
+    extra = chart_extra(chart)
+    width, height = px(CHART_WIDTH), px(CHART_H + extra)
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     small = ui_font(px(10))
     if chart is None or not chart.series:
-        draw.text((width / 2, height / 2), "暂无可绘制的额度窗口", font=small, fill=MUTED_TEXT, anchor="mm")
+        draw.text((width / 2, height / 2), "暂无正在工作的 agent", font=small, fill=MUTED_TEXT, anchor="mm")
         return image
     span = max(1.0, chart.end - chart.start)
     # Label row: a legend (one entry per line) and the next reset in view.
-    x = px(10)
     single = len(chart.series) == 1
-    for series, color in zip(chart.series, colors):
-        text = f"{series.label} · 剩余额度" if single else series.label
+    last_x = 0
+    for index, start_x, legend_row, text in burn_legend(chart):
+        color = colors[index]
+        x, center_y = px(start_x), px(CHART_LABEL / 2 + 1 + legend_row * CHART_LABEL)
         if not single:
-            draw.ellipse((x, px(CHART_LABEL / 2 + 1) - px(2.5), x + px(5), px(CHART_LABEL / 2 + 1) + px(2.5)), fill=color)
+            draw.ellipse((x, center_y - px(2.5), x + px(5), center_y + px(2.5)), fill=color)
             x += px(8)
-        draw.text((x, px(CHART_LABEL / 2 + 1)), text, font=small, fill=MUTED_TEXT if single else color, anchor="lm")
-        x += draw.textlength(text, font=small) + px(12)
+        draw.text((x, center_y), text, font=small, fill=MUTED_TEXT if single else color, anchor="lm")
+        last_x = x + draw.textlength(text, font=small) + px(12)
     resets = sorted(s.reset_at for s in chart.series if s.reset_at)
     drawn = [(series, color, *burn_points(series, chart)) for series, color in zip(chart.series, colors)]
     exhausting = [(exhausts, series, color) for series, color, _, _, exhausts in drawn if exhausts is not None]
@@ -1072,13 +1106,16 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
         # The earliest exhaustion is named in the label row, where no line runs;
         # the reset stays visible as its blue marker.
         tag = ("" if single else first[1].label + " ") + f"约 {_clock(first[0], chart.now)} 用完"
-        draw.text((width - px(10), row), tag, font=small, fill=first[2], anchor="rm")
+        if single and width - px(10) - draw.textlength(tag, font=small) > last_x:
+            draw.text((width - px(10), row), tag, font=small, fill=first[2], anchor="rm")
     elif resets:
         prefix = "重置" if single else "最近重置"
-        draw.text((width - px(10), row), f"{prefix} {_clock(resets[0], chart.now)}", font=small, fill=MUTED_TEXT, anchor="rm")
+        tag = f"{prefix} {_clock(resets[0], chart.now)}"
+        if single and width - px(10) - draw.textlength(tag, font=small) > last_x:
+            draw.text((width - px(10), row), tag, font=small, fill=MUTED_TEXT, anchor="rm")
 
     k = SUPERSAMPLE
-    left, top, right, bottom = 10, CHART_LABEL + 4, CHART_WIDTH - 10, CHART_H - 6
+    left, top, right, bottom = 10, CHART_LABEL + extra + 4, CHART_WIDTH - 10, CHART_H + extra - 6
     big = Image.new("RGBA", (width * k, height * k), (0, 0, 0, 0))
     pen = ImageDraw.Draw(big)
     X = lambda t: (left + (right - left) * (t - chart.start) / span) * scale * k  # noqa: E731
@@ -1206,9 +1243,10 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 
 def _header_model(header: tuple) -> PanelModel:
-    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, resets = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, resets, chart_padding = header
     return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (),
-                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets, banner_alert=alert, intel=intel, intel_note=note)
+                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets, banner_alert=alert,
+                      intel=intel, intel_note=note, chart_padding=chart_padding)
 
 
 @lru_cache(maxsize=8)
@@ -1295,7 +1333,7 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, lette
 @lru_cache(maxsize=12)
 def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     model = _header_model(header)
-    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, resets = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, resets, _padding = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -1331,7 +1369,7 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),
                            fill=(240, 238, 230, 7), outline=(240, 238, 230, 14), width=max(1, round(s)))
     chart_y = chart_top(model, field_h)
-    draw.rounded_rectangle((px(PAD - 6), px(chart_y - 4), px(right + 6), px(chart_y + CHART_H + 2)), radius=px(10),
+    draw.rounded_rectangle((px(PAD - 6), px(chart_y - 4), px(right + 6), px(chart_y + CHART_H + chart_extra_for(model) + 2)), radius=px(10),
                            fill=(240, 238, 230, 6), outline=(240, 238, 230, 12), width=max(1, round(s)))
     # Upcoming resets of every source on one line: coloured dot, name, countdown.
     line_y, x = resets_middle(model, field_h), PAD

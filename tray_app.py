@@ -351,7 +351,6 @@ class QuotaTray:
 
     CHART_VIEW_MAX = 8 * 86400       # Longer windows (MiMo's year): only the last 8 days of readings.
     CHART_POINTS = 160
-    RUNNING_TONES = ("danger", "warn", "ok")     # forecast tones of a window that is being consumed
 
     def quota_windows(self, provider: str) -> list[tuple]:
         """(label, remaining, resets_at, window minutes, history names) in the
@@ -371,45 +370,66 @@ class QuotaTray:
         return windows
 
     def burn_chart(self, provider: str, now: float) -> "agent_panel.BurnChart | None":
-        """Every quota window currently being consumed (Gemini's pools, Codex's
-        5 h and weekly), or the most urgent one when none is, as remaining % over time."""
-        snapshot = self.snapshots.get(provider)
-        if snapshot is None or self.history is None:
+        """Global quota trends of sources with live work, identical on every icon."""
+        if self.history is None:
             return None
-        rank = {"danger": 0, "warn": 1, "ok": 2, "idle": 3, "unknown": 4}
+        active: dict[str, set[str]] = {}
+        for agent in getattr(self, "agents", []):
+            if agent.get("live") and agent.get("provider") in self.snapshots:
+                active.setdefault(agent["provider"], set()).add(str(agent.get("model") or "").lower())
+        for key, data in self.performance.get("providers", {}).items():
+            if data.get("active_sessions", 0) > 0 and key in self.snapshots:
+                active.setdefault(key, set())
         candidates = []
-        for slot, (label, remaining, resets_at, minutes, names) in enumerate(self.quota_windows(provider)):
-            if remaining is None:
+        for key, snapshot in self.snapshots.items():
+            if key not in active:
                 continue
-            # A new pool series starts empty; the first pool falls back to the provider's older series.
-            samples = max((forecast_module.current_window(self.history.samples(name), resets_at) for name in names), key=len)
-            outlook = forecast_module.forecast(samples, now, remaining, resets_at)
-            rate = outlook.rate_per_hour
-            if provider == "mimo":
-                view = mimo_tracker().view(now)
-                rate = view.pace_daily / view.total * 100 / 24 if view.pace_daily and view.total else rate
-            floor = max(resets_at - minutes * 60 if resets_at and minutes else 0, now - self.CHART_VIEW_MAX)
-            points = [(s.at, 100.0 - s.used) for s in samples if floor <= s.at <= now]
-            updated = snapshot.updated_at
-            if not points or (updated and points[-1][0] + 1 < updated <= now):
-                points.append((float(min(now, updated or now)), float(remaining)))
-            if len(points) > self.CHART_POINTS:
-                stride = len(points) / self.CHART_POINTS
-                points = [points[int(i * stride)] for i in range(self.CHART_POINTS - 1)] + [points[-1]]
-            series = agent_panel.BurnSeries(label, slot, tuple((round(t, 1), round(r, 2)) for t, r in points),
-                                            None if rate is None else round(rate, 3), float(resets_at) if resets_at else None)
-            candidates.append((rank[outlook.tone], remaining, series, outlook))
+            allowed = set()
+            if key == "gemini" and snapshot.pools and len(snapshot.pools) > 1:
+                for model in active[key]:
+                    if "argon" in model:
+                        allowed.add("argon")
+                    elif any(name in model for name in ("claude", "opus", "sonnet", "gpt")):
+                        allowed.add("claude_gpt")
+                    elif "gemini" in model:
+                        allowed.add("gemini")
+            windows = self.quota_windows(key)
+            for slot, (label, remaining, resets_at, minutes, names) in enumerate(windows):
+                if remaining is None:
+                    continue
+                if key == "gemini" and snapshot.pools and len(snapshot.pools) > 1:
+                    if snapshot.pools[slot].get("key") not in allowed:
+                        continue  # do not infer an active model pool from old quota consumption
+                samples = max((forecast_module.current_window(self.history.samples(name), resets_at) for name in names), key=len)
+                outlook = forecast_module.forecast(samples, now, remaining, resets_at)
+                rate = outlook.rate_per_hour
+                if key == "mimo":
+                    view = mimo_tracker().view(now)
+                    rate = view.pace_daily / view.total * 100 / 24 if view.pace_daily and view.total else rate
+                floor = max(resets_at - minutes * 60 if resets_at and minutes else 0, now - self.CHART_VIEW_MAX)
+                points = [(s.at, 100.0 - s.used) for s in samples if floor <= s.at <= now]
+                updated = snapshot.updated_at
+                if not points or (updated and points[-1][0] + 1 < updated <= now):
+                    points.append((float(min(now, updated or now)), float(remaining)))
+                if len(points) > self.CHART_POINTS:
+                    stride = len(points) / self.CHART_POINTS
+                    points = [points[int(i * stride)] for i in range(self.CHART_POINTS - 1)] + [points[-1]]
+                name = "Gemini" if key == "gemini" else provider_registry.get(key).label
+                series = agent_panel.BurnSeries(name if label == name else f"{name} · {label}", slot,
+                    tuple((round(t, 1), round(r, 2)) for t, r in points),
+                    None if rate is None else round(rate, 3), float(resets_at) if resets_at else None,
+                    provider_letter(key), len(windows) > 1)
+                candidates.append((series, outlook))
         if not candidates:
             return None
-        running = [c for c in candidates if c[3].tone in self.RUNNING_TONES and (c[2].rate or 0) > 0]
-        chosen = sorted(running, key=lambda c: c[2].slot) if len(running) > 1 else [min(candidates, key=lambda c: c[:2])]
-        series = tuple(c[2] for c in chosen)
+        series = tuple(item[0] for item in candidates)
         # The view starts at the earliest reading shown and runs a little past
         # now (past the first projected exhaustion), at most to a near reset: a
         # week-long axis with two days of data squeezed the lines into a corner.
         back = max(3600.0, now - min(s.points[0][0] for s in series))
         start, end = now - back, now + 0.6 * back
-        exhausts = [c[3].exhausts_at for c in chosen if c[3].exhausts_at and (not c[2].reset_at or c[3].exhausts_at < c[2].reset_at)]
+        exhausts = [outlook.exhausts_at for item, outlook in candidates
+                    if outlook.exhausts_at and (not item.reset_at or outlook.exhausts_at < item.reset_at)]
         if exhausts:
             end = max(end, min(exhausts) + 0.15 * back)
         near = [s.reset_at for s in series if s.reset_at and (s.reset_at <= end or s.reset_at - now <= 1.2 * back)]
@@ -1404,6 +1424,7 @@ def check_agents(destination: Path) -> int:
     tray = QuotaTray.__new__(QuotaTray)
     cached = load_cached_snapshots()
     tray.snapshots = {provider: cached.get(provider) or placeholder(provider) for provider in PROVIDERS}
+    tray.history = QuotaHistory()
     monitor = TpsMonitor()
     monitor.poll()
     time.sleep(1)

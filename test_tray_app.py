@@ -457,7 +457,7 @@ class AgentPanelTests(unittest.TestCase):
         snapshot = QuotaSnapshot("codex", "Codex", 300, 22, 78, five_reset, now, False, None, 10080, 90, 10, week_reset)
         self.tray.snapshots["codex"], self.tray.history = snapshot, history
         chart = self.tray.burn_chart("codex", now)
-        self.assertEqual([(s.label, s.slot) for s in chart.series], [("5 小时", 0), ("每周", 1)])   # header column order
+        self.assertEqual([(s.label, s.slot) for s in chart.series], [("Codex · 5 小时", 0), ("Codex · 每周", 1)])
         weekly = chart.series[1]
         self.assertAlmostEqual(weekly.points[-1][1], 10, delta=0.01)
         self.assertAlmostEqual(weekly.rate, 15.0, delta=0.5)                  # 2.5 % per 10 min
@@ -486,17 +486,25 @@ class AgentPanelTests(unittest.TestCase):
                                      at, False, None, pools=pools)
             history.record(snapshot)
         self.tray.snapshots["gemini"], self.tray.history = snapshot, history
+        self.tray.agents = [{"provider":"gemini", "live":True, "model":"argon"},
+                            {"provider":"gemini", "live":True, "model":"gemini-3.8-flash"}]
         chart = self.tray.burn_chart("gemini", now)
-        self.assertEqual([(s.label, s.slot) for s in chart.series], [("Argon", 0), ("Gemini", 2)])
+        self.assertEqual([(s.label, s.slot) for s in chart.series], [("Gemini · Argon", 0), ("Gemini", 2)])
         self.assertEqual([round(s.points[-1][1]) for s in chart.series], [26, 78])
+        with patch.object(self.tray, "agents", []):
+            self.assertIsNone(self.tray.burn_chart("gemini", now))
+        self.tray.agents = [{"provider":"gemini", "live":True, "model":"claude-opus-5-5"}]
+        self.assertEqual([s.label for s in self.tray.burn_chart("codex", now).series], ["Gemini · Claude/GPT"])
+        # Restore normal bubble records before exercising the complete renderer.
+        self.tray.agents = []
         model = self.tray.panel("gemini")
         self.assertEqual([q[0] for q in model.quota], ["Argon", "Claude/GPT", "Gemini"])
-        self.assertEqual(len(model.burn.series), 2)
+        self.assertIsNone(model.burn)
         scene = agent_panel.Scene()
         scene.set_model(model, 0.0)
         self.assertIsNotNone(scene.render(1.25))
 
-    def test_idle_windows_show_only_the_most_urgent(self):
+    def test_idle_sources_never_fall_back_to_historical_exhaustion(self):
         from pathlib import Path
         from forecast import QuotaHistory
         now = 1_800_000_000.0
@@ -507,8 +515,28 @@ class AgentPanelTests(unittest.TestCase):
             history.add("codex:secondary", now - 7200 + index * 600, 95, reset + 86400)
         self.tray.snapshots["codex"] = QuotaSnapshot("codex", "Codex", 300, 30, 70, reset, now, False, None, 10080, 95, 5, reset + 86400)
         self.tray.history = history
+        self.tray.agents = []
         chart = self.tray.burn_chart("codex", now)
-        self.assertEqual([s.label for s in chart.series], ["每周"])          # lower remaining wins among idle windows
+        self.assertIsNone(chart)
+
+    def test_global_live_sources_share_one_chart_and_disappear_when_finished(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = time.time()
+        self.tray.history = QuotaHistory(Path(self.folder.name) / 'global.json')
+        for provider in ('codex', 'claude', 'grok'):
+            self.tray.snapshots[provider] = QuotaSnapshot(provider, provider, 300, 25, 75,
+                                                         int(now + 3600), now, False, None)
+        self.tray.agents = [{'provider':'codex', 'live':False}, {'provider':'claude', 'live':True}]
+        self.tray.performance['providers']['grok']['active_sessions'] = 1
+        first = self.tray.burn_chart('codex', now)
+        self.assertEqual({s.letter for s in first.series}, {'A', 'X'})
+        self.assertEqual(first, self.tray.burn_chart('gemini', now))
+        self.assertNotIn('Codex', ' '.join(s.label for s in first.series))
+        # A cached TPS, quota history and an installed/running client are not live work.
+        self.tray.agents = []
+        self.tray.performance['providers']['grok']['active_sessions'] = 0
+        self.assertIsNone(self.tray.burn_chart('grok', now))
 
     def test_mimo_today_stat_uses_current_cache_and_never_yesterdays_total(self):
         from datetime import datetime
