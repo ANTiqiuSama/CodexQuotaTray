@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+import sys
 from pathlib import Path
 
 import providers
@@ -78,3 +79,50 @@ def latest(now: float | None = None, folder: Path | None = None) -> dict | None:
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             continue
     return max(candidates, key=lambda item: item["updated_at"], default=None)
+
+
+def desktop_roots() -> list[Path]:
+    override = os.environ.get("CODEX_QUOTA_CLAUDE_DESKTOP_DIR")
+    if override:
+        return [Path(override)]
+    roots = []
+    if sys.platform == "darwin":
+        roots.append(Path.home() / "Library/Application Support/Claude")
+    else:
+        if os.environ.get("APPDATA"):
+            roots.append(Path(os.environ["APPDATA"]) / "Claude")
+        if os.environ.get("LOCALAPPDATA"):
+            packages = Path(os.environ["LOCALAPPDATA"]) / "Packages"
+            roots.extend(path / "LocalCache/Roaming/Claude" for path in packages.glob("Claude_*"))
+    return roots
+
+
+def recent_desktop_usage(now: float, seconds: float = 1800, roots: list[Path] | None = None) -> float:
+    """Evidence of recent Desktop usage, never process presence or a login alone.
+
+    Read only numeric quota history. Compare within the same opaque account
+    scope; do not return, log or retain that scope's identity.
+    """
+    latest_use = 0.0
+    for root in desktop_roots() if roots is None else roots:
+        path = root / "plan-usage-history.json"
+        try:
+            if path.stat().st_size > 2_000_000:
+                continue
+            rows = json.loads(path.read_text(encoding="utf-8"))["samples"]
+            previous = {}
+            for row in rows[-2000:]:
+                at = float(row["t"]) / 1000
+                scope = row.get("org")
+                values = {key: float(value) for key, value in (row.get("u") or {}).items()
+                          if key in ("fh", "sd") and not isinstance(value, bool)}
+                if not scope or not values or not math.isfinite(at) or any(not math.isfinite(v) or not 0 <= v <= 100 for v in values.values()):
+                    continue
+                old = previous.get(scope)
+                if old and old[0] < at and now - seconds <= at <= now + 30 and any(
+                        key in old[1] and value > old[1][key] for key, value in values.items()):
+                    latest_use = max(latest_use, at)
+                previous[scope] = (at, values)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            continue
+    return latest_use

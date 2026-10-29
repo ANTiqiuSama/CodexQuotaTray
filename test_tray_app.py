@@ -552,6 +552,32 @@ class AgentPanelTests(unittest.TestCase):
             tracker.return_value.view.return_value.today_used = 1234
             self.assertEqual(self.tray.panel("mimo").today_used, 1234)
 
+    def test_completed_claude_reply_keeps_its_chart_for_thirty_minutes(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        from tps_sources import Observation
+        now = time.time()
+        self.tray.history = QuotaHistory(Path(self.folder.name) / 'completed.json')
+        self.tray.snapshots['claude'] = QuotaSnapshot('claude', 'Claude Code', 300, 15, 85, int(now+3600), now, False, None)
+        self.tray.agents = []
+        self.tray.tps_monitor.events = [Observation('done', 'Claude Code', 'session', 'claude', 'claude-opus-5-5', now-1200, 571)]
+        chart = self.tray.burn_chart('gemini', now)
+        self.assertEqual([s.letter for s in chart.series], ['A'])
+        self.assertEqual(chart, self.tray.burn_chart('claude', now))
+        self.assertIsNone(self.tray.burn_chart('claude', now+601))
+
+    def test_recent_desktop_consumption_keeps_claude_chart_without_cli_transcript(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = time.time()
+        self.tray.history = QuotaHistory(Path(self.folder.name) / 'desktop.json')
+        self.tray.snapshots['claude'] = QuotaSnapshot('claude', 'Claude Code', 300, 15, 85, int(now+3600), now, False, None)
+        self.tray.agents = []
+        self.tray.tps_monitor.claude_desktop_last_use = now-20
+        self.assertEqual([s.letter for s in self.tray.burn_chart('codex', now).series], ['A'])
+        self.tray.tps_monitor.claude_desktop_last_use = 0
+        self.assertIsNone(self.tray.burn_chart('claude', now))
+
     def setUp(self):
         import tempfile
         from pathlib import Path

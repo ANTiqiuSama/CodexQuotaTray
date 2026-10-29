@@ -228,6 +228,7 @@ class TpsMonitor:
         self.claude_pending: dict[str, dict[str, Any]] = {}
         self.claude_last_input: dict[str, float] = {}   # session -> last user / tool-result record
         self.claude_request_starts: dict[tuple[str, str], float] = {}
+        self.claude_desktop_last_use = 0.0
         self.home_override = home is not None
         self.mimocode_paths: list[Path] | None = None
         self.mimocode_scanned = 0.0
@@ -428,6 +429,9 @@ class TpsMonitor:
         """Claude Code transcripts: ~/.claude/projects/<project>/<session>.jsonl
         (+ <session>/subagents/*.jsonl).  A project folder's mtime changes when
         a session file is created, so quiet folders are only rescanned slowly."""
+        if not self.home_override:
+            import claude_status
+            self.claude_desktop_last_use = claude_status.recent_desktop_usage(now)
         projects = self.claude_root / "projects"
         if not projects.is_dir():
             return

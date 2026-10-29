@@ -351,6 +351,7 @@ class QuotaTray:
 
     CHART_VIEW_MAX = 8 * 86400       # Longer windows (MiMo's year): only the last 8 days of readings.
     CHART_POINTS = 160
+    CHART_RECENT_SECONDS = 30 * 60  # keep completed work visible long enough to inspect its trend
 
     def quota_windows(self, provider: str) -> list[tuple]:
         """(label, remaining, resets_at, window minutes, history names) in the
@@ -370,7 +371,7 @@ class QuotaTray:
         return windows
 
     def burn_chart(self, provider: str, now: float) -> "agent_panel.BurnChart | None":
-        """Global quota trends of sources with live work, identical on every icon."""
+        """Global trends of live or recently used sources, identical on every icon."""
         if self.history is None:
             return None
         active: dict[str, set[str]] = {}
@@ -380,6 +381,14 @@ class QuotaTray:
         for key, data in self.performance.get("providers", {}).items():
             if data.get("active_sessions", 0) > 0 and key in self.snapshots:
                 active.setdefault(key, set())
+        monitor = getattr(self, "tps_monitor", None)
+        for event in getattr(monitor, "events", ()):
+            if (event.provider in self.snapshots and event.output_tokens > 0
+                    and now - self.CHART_RECENT_SECONDS <= event.ended_at <= now + 5):
+                active.setdefault(event.provider, set()).add((event.model or "").lower())
+        desktop_use = getattr(monitor, "claude_desktop_last_use", 0.0)
+        if "claude" in self.snapshots and desktop_use > 0 and now - self.CHART_RECENT_SECONDS <= desktop_use <= now + 5:
+            active.setdefault("claude", set())
         candidates = []
         for key, snapshot in self.snapshots.items():
             if key not in active:

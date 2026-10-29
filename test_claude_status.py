@@ -14,6 +14,23 @@ import tps_sources
 
 
 class ClaudeStatusTests(unittest.TestCase):
+    def test_desktop_usage_requires_a_real_increase_and_same_account_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'plan-usage-history.json'
+            rows = [{'t':1000_000,'org':'private-scope','u':{'fh':13,'sd':1}},
+                    {'t':1100_000,'org':'private-scope','u':{'fh':15,'sd':2}}]
+            path.write_text(json.dumps({'samples':rows}))
+            self.assertEqual(claude_status.recent_desktop_usage(1200, roots=[root]), 1100)
+            self.assertEqual(claude_status.recent_desktop_usage(3001, roots=[root]), 0)
+            rows[-1]['org'] = 'another-scope'
+            path.write_text(json.dumps({'samples':rows}))
+            self.assertEqual(claude_status.recent_desktop_usage(1200, roots=[root]), 0)
+            rows[-1]['org'] = 'private-scope'
+            rows[-1]['u'] = {'fh':0,'sd':0}
+            path.write_text(json.dumps({'samples':rows}))
+            self.assertEqual(claude_status.recent_desktop_usage(1200, roots=[root]), 0)
+
     def test_newest_native_report_skips_corrupt_and_expired_windows(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1083,7 +1083,7 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
     draw = ImageDraw.Draw(image)
     small = ui_font(px(10))
     if chart is None or not chart.series:
-        draw.text((width / 2, height / 2), "暂无正在工作的 agent", font=small, fill=MUTED_TEXT, anchor="mm")
+        draw.text((width / 2, height / 2), "暂无正在工作或近期使用的 agent", font=small, fill=MUTED_TEXT, anchor="mm")
         return image
     span = max(1.0, chart.end - chart.start)
     # Label row: a legend (one entry per line) and the next reset in view.
