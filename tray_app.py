@@ -340,6 +340,10 @@ class QuotaTray:
         items = self.forecasts(provider)
         if not items:
             return "", "unknown"
+        if provider == "codex" and self.codex_quota_mode():
+            weekly = next((outlook for label, outlook in items if label == "每周"), None)
+            if weekly is not None:
+                return f"每周额度：{weekly.text}", weekly.tone
         rank = {"danger": 0, "warn": 1, "ok": 2, "idle": 3, "unknown": 4}
         label, chosen = min(items, key=lambda item: (rank[item[1].tone], item[1].exhausts_at or float("inf")))
         prefix = f"{label}额度：" if len(items) > 1 and label else ""
@@ -369,6 +373,19 @@ class QuotaTray:
             windows.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent,
                             snapshot.secondary_resets_at, snapshot.secondary_window_minutes, (provider + ":secondary",)))
         return windows
+
+    def source_working(self, provider: str) -> bool:
+        data = (getattr(self, "performance", None) or {}).get("providers", {}).get(provider, {})
+        return bool(data.get("active_sessions", 0) or any(
+            agent.get("live") and agent.get("provider") == provider for agent in getattr(self, "agents", [])))
+
+    def codex_quota_mode(self) -> bool:
+        if "codex" not in self.snapshots or not self.source_working("codex"):
+            return False
+        windows = self.quota_windows("codex")
+        five = next((w for w in windows if w[3] == 300 and w[1] is not None), None)
+        week = next((w for w in windows if w[3] == 10080 and w[1] is not None), None)
+        return bool(five and five[1] <= 0 and week)
 
     def burn_chart(self, provider: str, now: float) -> "agent_panel.BurnChart | None":
         """Global trends of live or recently used sources, identical on every icon."""
@@ -403,7 +420,16 @@ class QuotaTray:
                     elif "gemini" in model:
                         allowed.add("gemini")
             windows = self.quota_windows(key)
+            selected = None
+            quota_mode = key == "codex" and self.codex_quota_mode()
+            if key in ("codex", "claude"):
+                selected = next((index for index, window in enumerate(windows)
+                                 if window[3] == 300 and window[1] is not None), None)
+                if quota_mode:
+                    selected = next(index for index, window in enumerate(windows) if window[3] == 10080)
             for slot, (label, remaining, resets_at, minutes, names) in enumerate(windows):
+                if selected is not None and slot != selected:
+                    continue
                 if remaining is None:
                     continue
                 if key == "gemini" and snapshot.pools and len(snapshot.pools) > 1:
@@ -424,7 +450,10 @@ class QuotaTray:
                     stride = len(points) / self.CHART_POINTS
                     points = [points[int(i * stride)] for i in range(self.CHART_POINTS - 1)] + [points[-1]]
                 name = "Gemini" if key == "gemini" else provider_registry.get(key).label
-                series = agent_panel.BurnSeries(name if label == name else f"{name} · {label}", slot,
+                chart_label = name if label == name else f"{name} · {label}"
+                if quota_mode:
+                    chart_label += "（额度模式工作）"
+                series = agent_panel.BurnSeries(chart_label, slot,
                     tuple((round(t, 1), round(r, 2)) for t, r in points),
                     None if rate is None else round(rate, 3), float(resets_at) if resets_at else None,
                     provider_letter(key), len(windows) > 1)
@@ -582,7 +611,9 @@ class QuotaTray:
                 quota.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent,
                               ""))
         data = self.performance["providers"].get(provider, {})
-        if working:
+        if provider == "codex" and self.codex_quota_mode():
+            status, tone = "额度模式工作", "live"
+        elif working:
             status, tone = f"{working} 个在工作", "live"
         elif snapshot is not None and snapshot.stale:
             status, tone = "旧数据", "stale"

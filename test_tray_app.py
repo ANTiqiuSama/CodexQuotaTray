@@ -444,7 +444,7 @@ class CodexLocalLimitTests(unittest.TestCase):
 
 
 class AgentPanelTests(unittest.TestCase):
-    def test_burn_chart_shows_every_window_being_consumed(self):
+    def test_burn_chart_prefers_five_hour_even_when_weekly_is_more_urgent(self):
         from pathlib import Path
         from forecast import QuotaHistory
         now = 1_800_000_000.0
@@ -457,16 +457,57 @@ class AgentPanelTests(unittest.TestCase):
         snapshot = QuotaSnapshot("codex", "Codex", 300, 22, 78, five_reset, now, False, None, 10080, 90, 10, week_reset)
         self.tray.snapshots["codex"], self.tray.history = snapshot, history
         chart = self.tray.burn_chart("codex", now)
-        self.assertEqual([(s.label, s.slot) for s in chart.series], [("Codex · 5 小时", 0), ("Codex · 每周", 1)])
-        weekly = chart.series[1]
-        self.assertAlmostEqual(weekly.points[-1][1], 10, delta=0.01)
-        self.assertAlmostEqual(weekly.rate, 15.0, delta=0.5)                  # 2.5 % per 10 min
+        self.assertEqual([(s.label, s.slot) for s in chart.series], [("Codex · 5 小时", 0)])
+        primary = chart.series[0]
+        self.assertAlmostEqual(primary.points[-1][1], 78, delta=0.01)
+        self.assertAlmostEqual(primary.rate, 6.0, delta=0.5)
         self.assertLessEqual(chart.start, chart.series[0].points[0][0])
         self.assertGreater(chart.end, now)                                   # room for the projection
         self.assertLess(chart.end, week_reset)                               # not squeezed into a week-long axis
-        self.assertIsNotNone(agent_panel.burn_points(weekly, chart)[2])
+        self.assertNotIn('每周', primary.label)
         self.tray.history = None
         self.assertIsNone(self.tray.burn_chart("codex", now))
+
+    def test_exhausted_codex_switches_to_weekly_only_while_working(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        from tps_sources import Observation
+        now = time.time()
+        self.tray.history = QuotaHistory(Path(self.folder.name) / 'quota-mode.json')
+        snapshot = QuotaSnapshot('codex', 'Codex', 300, 100, 0, int(now+3600), now, False, None,
+                                 10080, 39, 61, int(now+86400))
+        self.tray.snapshots['codex'] = snapshot
+        self.assertTrue(self.tray.codex_quota_mode())
+        chart = self.tray.burn_chart('claude', now)
+        self.assertEqual([(s.label,s.slot,s.points[-1][1]) for s in chart.series],
+                         [('Codex · 每周（额度模式工作）',1,61)])
+        self.assertEqual(self.tray.panel('codex').status, '额度模式工作')
+        self.assertTrue(self.tray.headline_forecast('codex')[0].startswith('每周额度：'))
+        snapshot.remaining_percent = 100
+        self.assertFalse(self.tray.codex_quota_mode())
+        self.assertEqual(self.tray.burn_chart('codex',now).series[0].label, 'Codex · 5 小时')
+        snapshot.remaining_percent = 0
+        self.tray.agents = []
+        self.tray.tps_monitor.events = [Observation('done','Codex','session','codex','gpt-6.1',now-10,50)]
+        self.assertFalse(self.tray.codex_quota_mode())
+        self.assertEqual(self.tray.burn_chart('codex',now).series[0].label, 'Codex · 5 小时')
+        self.tray.performance['providers']['codex']['active_sessions'] = 1
+        self.assertTrue(self.tray.codex_quota_mode())
+        snapshot.secondary_remaining_percent = 0
+        self.assertTrue(self.tray.codex_quota_mode())
+        snapshot.secondary_remaining_percent = None
+        self.assertFalse(self.tray.codex_quota_mode())
+
+    def test_claude_chart_uses_five_hour_instead_of_weekly(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = time.time()
+        self.tray.history = QuotaHistory(Path(self.folder.name) / 'claude-window.json')
+        self.tray.agents = [{'provider':'claude','live':True}]
+        self.tray.snapshots['claude'] = QuotaSnapshot('claude','Claude Code',300,13,87,int(now+3600),now,False,None,
+                                                     10080,2,98,int(now+86400))
+        chart = self.tray.burn_chart('codex',now)
+        self.assertEqual([s.label for s in chart.series], ['Claude Code · 5 小时'])
 
     def test_gemini_pools_in_use_share_the_chart_and_an_idle_one_stays_out(self):
         from pathlib import Path
