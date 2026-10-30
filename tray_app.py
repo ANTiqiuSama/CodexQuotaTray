@@ -635,7 +635,7 @@ class QuotaTray:
         if provider == "mimo":
             view = mimo_tracker().view()
             lines.append(f"已用 {mimo_usage.credits_text(view.used)} / 共 {mimo_usage.credits_text(view.total)}"
-                         f" · 剩余 {mimo_usage.credits_text(view.remaining)} Credits")
+                         f" · 剩余 {mimo_usage.credits_text(view.remaining)}")
             if view.error:
                 lines.append(view.error)
         if self.forecast_line(provider):
@@ -1730,7 +1730,7 @@ def main() -> int:
         try:
             plan = mimo_usage.login(interactive=True)
             text, code, flags = (f"MiMo 登录成功：{plan.plan_name or '套餐'}，剩余 "
-                                 f"{mimo_usage.credits_text((plan.total or 0) - (plan.used or 0))} Credits"), 0, 0x40
+                                 f"{mimo_usage.credits_text((plan.total or 0) - (plan.used or 0))}"), 0, 0x40
         except Exception as error:
             text, code, flags = f"MiMo 登录失败：{error}", 1, 0x30
         print(text)

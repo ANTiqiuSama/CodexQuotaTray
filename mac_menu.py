@@ -99,7 +99,7 @@ def menu_model(provider: str, snapshot: QuotaSnapshot, performance: dict, refres
     if provider == "mimo" and snapshot.today_used is not None:
         today = datetime.fromtimestamp(now).astimezone().date().isoformat()
         if snapshot.today_date == today:
-            quota.append(f"今日用量 {mimo_usage.credits_text(snapshot.today_used)} Credits")
+            quota.append(f"今日用量 {mimo_usage.credits_text(snapshot.today_used)}")
     return {"summary": summary, "quota": quota, "speed": speed,
             "updated": f"更新 {updated} · {refresh}", "error": error,
             "live": active and tps is not None, "tps": tps}

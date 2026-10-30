@@ -354,8 +354,8 @@ class SettingsWindow:
         manual.columnconfigure(1, weight=1)
         self.label(manual, "方式二：手动填写套餐（不登录 / 免费额度 / 登录失败时）", 11, weight="bold").grid(row=0, column=0, columnspan=3, sticky="w")
         self.mimo_fields = {name: tk.StringVar() for name in ("total", "end", "used", "name")}
-        for index, (name, title, hint) in enumerate((("total", "套餐总 Credits", "例如 49.2B、492亿"), ("end", "到期日期", "YYYY-MM-DD"),
-                                                     ("used", "已用 Credits（可选）", "填写控制台当前已用"), ("name", "套餐名（可选）", "例如 Max 年付")), 1):
+        for index, (name, title, hint) in enumerate((("total", "套餐总量", "例如 49.2B、492亿"), ("end", "到期日期", "YYYY-MM-DD"),
+                                                     ("used", "已用量（可选）", "填写控制台当前已用"), ("name", "套餐名（可选）", "例如 Max 年付")), 1):
             self.label(manual, title, 10, view.INK_2).grid(row=index, column=0, sticky="w", pady=S(5), padx=(0, S(16)))
             self.entry(manual, self.mimo_fields[name]).grid(row=index, column=1, sticky="ew", pady=S(5), ipady=S(4))
             self.label(manual, hint, 9, view.INK_3).grid(row=index, column=2, sticky="w", padx=(S(12), 0))
@@ -496,7 +496,7 @@ class SettingsWindow:
         total, used = info.get("total"), info.get("used")
         parts = []
         if total:
-            parts.append(f"套餐 {info.get('plan') or ''} 共 {total / 1e9:.2f}B Credits" + (f"，已用 {used / 1e9:.2f}B" if used is not None else ""))
+            parts.append(f"套餐 {info.get('plan') or ''} 共 {total / 1e9:.2f}B" + (f"，已用 {used / 1e9:.2f}B" if used is not None else ""))
         parts.append("MiMo 来源：" + ("已开启" if info.get("enabled") else "已关闭（在“额度来源”中开启后显示 M 图标）"))
         if not info.get("browser"):
             parts.append("未找到 Edge/Chrome：登录需要其中之一，或设置 CODEX_QUOTA_MIMO_BROWSER 指向浏览器")

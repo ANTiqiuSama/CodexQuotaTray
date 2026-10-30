@@ -379,7 +379,7 @@ def save_manual_plan(total: Any, period_end: Any, used: Any = "", name: str = ""
     """Write mimo.json from the settings page; raises ValueError with a readable message."""
     amount = parse_credits(total)
     if not amount:
-        raise ValueError("请填写套餐总 Credits，例如 49.2B 或 492亿")
+        raise ValueError("请填写套餐总量，例如 49.2B 或 492亿")
     match = re.fullmatch(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", str(period_end or "").strip())
     end = parse_time(f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}") if match else None
     if end is None:
