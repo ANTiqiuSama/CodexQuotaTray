@@ -295,8 +295,8 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
 
 
 @lru_cache(maxsize=64)
-def waiting_icon(hours: int, letter: str, reset_hint: bool = False, stale: bool = False) -> Image.Image:
-    """Old-style dark disc and empty source-coloured ring, with red reset hours."""
+def waiting_icon(amount: int, letter: str, reset_hint: bool = False, stale: bool = False, unit: str = "h") -> Image.Image:
+    """Old-style empty ring with a red countdown and its unit."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
@@ -304,12 +304,13 @@ def waiting_icon(hours: int, letter: str, reset_hint: bool = False, stale: bool 
     # slightly thicker stroke remains visible at 16-pixel tray size.  Use the
     # original empty-ring track rather than a full provider-coloured arc.
     draw.ellipse(DISC, outline=TRACK, width=34)
-    text = str(max(1, int(hours)))
+    text = str(max(1, int(amount)))
     wide = len(text) >= 3
-    face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
-    _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), CLAY)
-    if stale:
-        _stale_badge(canvas)
+    face = _fit(text, number_font, 190 if wide else 180, 132 if wide else 158, 200, draw)
+    _centered_text(draw, text, face, (0, 10, 228, CANVAS), CLAY)
     if reset_hint:
         _reset_badge(canvas)
+    unit = unit if unit in ("d", "h", "m") else "h"
+    unit_face = _fit(unit, number_font, 54, 56, 74, draw)
+    _centered_text(draw, unit, unit_face, (178, 26, 242, 88), IVORY)
     return _finish(canvas)

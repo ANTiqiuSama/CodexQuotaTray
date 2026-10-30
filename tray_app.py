@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import logging.handlers
+import math
 import os
 import subprocess
 import sys
@@ -104,6 +105,15 @@ def quota_exhausted(value: float | None) -> bool:
     return value is not None and value <= EXHAUSTED_REMAINING
 
 
+def countdown_value(seconds: float) -> tuple[int, str]:
+    """A compact time unit, rounded up so it never suggests an early reset."""
+    if seconds >= 86400:
+        return math.ceil(seconds / 86400), "d"
+    if seconds >= 3600:
+        return math.ceil(seconds / 3600), "h"
+    return max(1, math.ceil(seconds / 60)), "m"
+
+
 def usable_again_at(snapshot: QuotaSnapshot, now: float) -> float | None:
     """When a used-up source can run again: the last reset among its empty
     windows (all must recover), or the first pool to come back for model
@@ -127,10 +137,8 @@ def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = 
     now = now or time.time()
     until = usable_again_at(snapshot, now)
     if until is not None:
-        hours = int(-(-(until - now) // 3600))
-        if snapshot.stale:
-            return waiting_icon(hours, letter, bool(reset_hint), True)
-        return waiting_icon(hours, letter, bool(reset_hint))
+        amount, unit = countdown_value(until - now)
+        return waiting_icon(amount, letter, bool(reset_hint), bool(snapshot.stale), unit)
     values, colors = icon_windows(snapshot, letter)
     return ring_icon(tuple(_rounded(value) for value in values), letter, bool(snapshot.stale),
                      _rounded(pace_marker(snapshot)), bool(reset_hint), colors)
