@@ -687,6 +687,55 @@ class SteadyBubbleTests(unittest.TestCase):
         self.assertEqual(codex[0], agent_panel.accent("C"))
         self.assertGreater(sum(abs(x - y) for x, y in zip(codex[0][:3], codex[1][:3])), 120, codex)
 
+    def test_line_ends_are_the_source_glyph_in_the_line_colour(self):
+        self.assertEqual([agent_panel.line_end_sides(letter) for letter in "ACXGM"], [0, 6, 5, 4, 3])
+        self.assertEqual(agent_panel.line_end_sides(""), 0)
+        self.assertEqual(agent_panel.LINE_END_BODY, 3)       # the old endpoint dot was px(3)
+        self.assertEqual(agent_panel.LINE_END_HALO, 1.5)
+        colors = {"A": (220, 48, 48, 255), "C": (36, 170, 96, 255), "X": (232, 196, 64, 255),
+                  "M": (240, 120, 32, 255)}
+        # One chart per line. The cap is the old dot's size; its shape still has to read.
+        # Gemini's three pool colours each end in a square.
+        specs = [("A", colors["A"]), ("C", colors["C"]), ("X", colors["X"]),
+                 ("G", (164, 176, 245, 255)), ("G", (36, 78, 156, 255)), ("G", (40, 212, 236, 255)),
+                 ("M", colors["M"])]
+        scale = 4.0
+        for letter, color in specs:
+            series = agent_panel.BurnSeries(letter, 0, ((0.0, 60.0), (90.0, 60.0)), None, None, letter)
+            chart = agent_panel.BurnChart(0.0, 160.0, 90.0, (series,))
+            sprite = agent_panel.burn_sprite(chart, (color,), scale)
+            pixels = sprite.load()
+            extra = agent_panel.chart_extra(chart)
+            left, right = 34.0, agent_panel.CHART_WIDTH - 10
+            top = agent_panel.CHART_LABEL + extra + 4
+            bottom = agent_panel.CHART_H + extra - 6
+            axis = agent_panel.burn_scale([[60.0]])
+            cx = (left + (right - left) * 90.0 / 160.0) * scale
+            cy = (top + (bottom - top) * axis.position(60.0)) * scale
+            sides = agent_panel.line_end_sides(letter)
+            radius = agent_panel.line_end_radius(sides, agent_panel.LINE_END_BODY * scale)
+
+            def inside(x, y, color=color, pixels=pixels, sprite=sprite):
+                if not (0 <= x < sprite.width and 0 <= y < sprite.height):
+                    return False
+                pixel = pixels[x, y]
+                return pixel[3] > 210 and sum(abs(a - b) for a, b in zip(pixel[:3], color[:3])) < 42
+
+            self.assertTrue(inside(round(cx), round(cy)), letter)
+            # A vertex is filled with the line colour. Just past it is not, except
+            # where the stroke itself arrives from the west.
+            for turn in range(max(sides, 1)):
+                angle = agent_panel.line_end_rotation(sides) + (0 if sides < 3 else turn * 2 * math.pi / sides)
+                reach = agent_panel.line_end_boundary(sides, radius, angle)
+                self.assertTrue(inside(round(cx + 0.62 * reach * math.cos(angle)),
+                                       round(cy + 0.62 * reach * math.sin(angle))), (letter, turn))
+                west = (angle - math.pi + math.pi) % (2 * math.pi) - math.pi
+                if abs(west) < math.radians(14):
+                    continue
+                self.assertFalse(inside(round(cx + (reach + 3.2 * scale) * math.cos(angle)),
+                                        round(cy + (reach + 3.2 * scale) * math.sin(angle))),
+                                 (letter, "outside", turn))
+
     def test_chart_draws_in_on_opening_then_rests(self):
         chart = agent_panel.BurnChart(0, 5 * 3600, 3600, (agent_panel.BurnSeries("5 小时", 0, ((0, 100), (3600, 60)), 40.0, 5 * 3600),))
         model = agent_panel.PanelModel("codex", "C", "Codex", "空闲", (("5 小时", 60.0),), 0.0,

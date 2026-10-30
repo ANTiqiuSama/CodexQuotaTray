@@ -502,13 +502,16 @@ class AgentPanelTests(unittest.TestCase):
         now = time.time()
         reset = int(now+3*3600)
         history = QuotaHistory(Path(self.folder.name) / 'recent-axis.json')
-        for age, used in ((86400,1),(7200,10),(3600,11),(0,12)):
+        for age, used in ((86400,1),(2400,10),(1200,11),(0,12)):
             history.add('codex',now-age,used,reset)
         self.tray.history = history
         self.tray.snapshots['codex'] = QuotaSnapshot('codex','Codex',300,12,88,reset,now,False,None)
         chart = self.tray.burn_chart('codex',now)
-        self.assertGreaterEqual(chart.start,now-7200.1)
-        self.assertLessEqual(chart.end,now+4320.1)
+        times = [t for t, _ in chart.series[0].points]
+        self.assertAlmostEqual(min(times), now - 1200, delta=0.1)          # 20 minutes stays
+        self.assertGreaterEqual(min(times), now - 30 * 60 - 0.1)           # 40 minutes and older are dropped
+        self.assertGreaterEqual(chart.start, now - 30 * 60 - 0.1)
+        self.assertLessEqual(chart.end, now + 0.6 * 30 * 60 + 1)           # projection stays scaled to that span
         self.assertEqual(chart.series[0].points[-1][1],88)
 
     def test_exhausted_codex_switches_to_weekly_only_while_working(self):

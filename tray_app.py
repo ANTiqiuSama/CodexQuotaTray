@@ -475,7 +475,7 @@ class QuotaTray:
         text, _ = self.headline_forecast(provider)
         return f"预测：{text}" if text else ""
 
-    CHART_VIEW_MAX = 2 * 3600        # Focus on recent work; long quota windows must not squeeze it to the edge.
+    CHART_VIEW_MAX = 30 * 60         # The solid line is only the last 30 minutes.
     CHART_POINTS = 160
     CHART_RECENT_SECONDS = 30 * 60  # keep completed work visible long enough to inspect its trend
     CHART_MIN_SPAN = 120.0          # only a lone fresh reading leaves the axis this narrow
