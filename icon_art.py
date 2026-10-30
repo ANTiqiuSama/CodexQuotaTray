@@ -261,9 +261,37 @@ def live_icon(tps: float, letter: str, reset_hint: bool = False) -> Image.Image:
 @lru_cache(maxsize=128)
 def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | None = None,
               reset_hint: bool = False, colors: tuple | None = None) -> Image.Image:
-    """Restore the established single-ring style using the tightest known window."""
-    known = [value for value in values if value is not None]
-    return quota_icon(min(known) if known else None, letter, stale, marker, reset_hint)
+    """Keep the original disc and glyph; draw two windows in the outer ring.
+
+    The left and right halves both fill from the top towards the bottom.  A
+    short gap at each pole separates the two windows even at tray size.
+    """
+    values = values[:2] or (None,)
+    if len(values) == 1:
+        return quota_icon(values[0], letter, stale, marker, reset_hint)
+    canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw.ellipse(DISC, fill=INK)
+    outer = (0, 0, CANVAS - 1, CANVAS - 1)
+    shades = colors or WINDOW_SHADES.get(letter, (accent(letter), accent(letter)))
+    for index, value in enumerate(values):
+        # PIL angles increase clockwise.  The left half is drawn backwards.
+        lo, hi = ((96, 264) if index == 0 else (-84, 84))
+        draw.arc(outer, lo, hi, fill=TRACK, width=RING_W)
+        if value is None or value <= 0:
+            continue
+        sweep = 168 * min(100.0, float(value)) / 100
+        color = shades[index] if colors or value >= 50 or letter in UNIFORM_LETTERS else ring_color(value, letter)
+        start, end = (hi - sweep, hi) if index == 0 else (lo, lo + sweep)
+        draw.arc(outer, start, end, fill=color, width=RING_W)
+    label, fill = (letter, IVORY) if any(value is not None for value in values) else ("?", MUTED)
+    face = _fit(label, letter_font, 176, 168, 212, draw)
+    _centered_text(draw, label, face, (0, 0, CANVAS, CANVAS), fill)
+    if stale:
+        _stale_badge(canvas)
+    if reset_hint:
+        _reset_badge(canvas)
+    return _finish(canvas)
 
 
 @lru_cache(maxsize=64)

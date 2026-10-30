@@ -57,9 +57,12 @@ class SplitRingTests(unittest.TestCase):
         pools[1]['remaining_percent'] = 20
         self.assertIsNone(tray_app.usable_again_at(value,now))
 
-    def test_restored_single_ring_uses_tightest_window_and_encodes_ico(self):
+    def test_two_windows_draw_independent_halves_and_encode_ico(self):
         image = icon_art.ring_icon((83,73),'C')
-        self.assertEqual(image.tobytes(),icon_art.quota_icon(73,'C').tobytes())
+        self.assertNotEqual(image.tobytes(), icon_art.ring_icon((0,73),'C').tobytes())
+        self.assertNotEqual(image.tobytes(), icon_art.ring_icon((83,0),'C').tobytes())
+        self.assertEqual(icon_art.ring_icon((73,),'C').tobytes(), icon_art.quota_icon(73,'C').tobytes())
+        self.assertEqual(image.crop((25,20,39,44)).tobytes(), icon_art.quota_icon(73,'C').crop((25,20,39,44)).tobytes())
         encoded = io.BytesIO()
         image.save(encoded,format='ICO',sizes=[(16,16),(32,32),(64,64)])
         encoded.seek(0)
