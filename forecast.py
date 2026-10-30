@@ -50,6 +50,23 @@ def duration_text(seconds: float) -> str:
     return f"{hours} 小时"
 
 
+def reset_distance(timestamp: float | None, now: float) -> str | None:
+    """Time left until a reset as a column label: "4小时32分钟", "3天7小时",
+    "323天". None when the reset is unknown or already due."""
+    if not timestamp or timestamp <= now:
+        return None
+    minutes = max(1, int((timestamp - now + 59) // 60))   # round up: never "0分钟" before a reset
+    days, rest = divmod(minutes, 1440)
+    hours, minutes = divmod(rest, 60)
+    if days >= 30:
+        return f"{days}天"
+    if days:
+        return f"{days}天{hours}小时" if hours else f"{days}天"
+    if hours:
+        return f"{hours}小时{minutes}分钟" if minutes else f"{hours}小时"
+    return f"{minutes}分钟"
+
+
 def same_window(a: int | None, b: int | None) -> bool:
     if a is None or b is None:
         return a is None and b is None

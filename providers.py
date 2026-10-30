@@ -224,7 +224,7 @@ DESCRIPTIONS = {
     "grok": "读取 Grok CLI /usage 每周额度；需要已安装并登录 Grok CLI。",
     "gemini": "用 agy（Antigravity CLI）读取 Argon、Claude/GPT、Gemini 额度池；需要已安装并登录 Antigravity。",
     "claude": "读取 Claude Code 实时额度、TPS 和本地会话；使用当前已登录的订阅账号。",
-    "mimo": "读取小米 MiMo Token Plan 控制台套餐；需要在设置 → 小米 MiMo 中登录或填写手动套餐。",
+    "mimo": "读取小米 MiMo Token Plan 控制台套餐；在下方登录控制台，或手动填写套餐。",
 }
 
 

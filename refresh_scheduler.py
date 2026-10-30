@@ -209,6 +209,17 @@ class RefreshScheduler:
             return MAX_SLEEP
         return max(0.2, min(MAX_SLEEP, min(pending) - now))
 
+    def plan(self, provider: str, now: float) -> tuple[float | None, str]:
+        """(seconds until the next read, reason); (0, "正在刷新") while reading,
+        (None, "") when nothing is scheduled."""
+        with self.lock:
+            if provider not in self.due:
+                return None, ""
+            if provider in self.running:
+                return 0.0, "正在刷新"
+            due, reason = self.due[provider], self.reason[provider]
+        return (None, "") if due == math.inf else (max(0.0, due - now), reason)
+
     def describe(self, provider: str, now: float) -> str:
         with self.lock:
             if provider in self.running:

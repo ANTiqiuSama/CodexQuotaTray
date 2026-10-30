@@ -34,7 +34,7 @@ PERFORMANCE_PATH = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Lo
 RECENT_SECONDS = 86400          # Only files touched within a day can matter.
 FORGET_SECONDS = 2 * 86400      # Readers idle this long are released.
 SLOW_DISCOVERY_SECONDS = 30     # Process list and full-history globbing.
-PROVIDER_NAMES = {"codex": "GPT / Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude Code", "mimo": "Xiaomi MiMo", "other": "其他模型"}
+PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude Code", "mimo": "Xiaomi MiMo", "other": "其他模型"}
 CLAUDE_IDLE_FLUSH = 30          # Emit an unfinished Claude message after this much silence.
 CLAUDE_STALE_ACTIVITY = 90      # Drop "generating" when a session went quiet this long.
 

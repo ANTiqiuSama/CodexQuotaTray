@@ -13,7 +13,7 @@ import icon_art
 def demo_models() -> tuple[ap.PanelModel, ...]:
     bubble = ap.BubbleModel
     busy = ap.PanelModel(
-        "codex", "C", "GPT / Codex", "购买额度运行",
+        "codex", "C", "Codex", "购买额度运行",
         (("2小时13分钟", 0.0, "购买额度 59.8k"), ("3天4小时", 38.0, "")), 85.0,
         (bubble("a", "重构悬停面板", "编辑 hover_details.py", "C", True, "重构悬停面板气泡交互"),
          bubble("b", "补齐测试", "运行测试", "C", True),

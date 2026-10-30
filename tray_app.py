@@ -21,7 +21,7 @@ from PIL import Image
 import agent_panel
 import agent_tasks
 import forecast as forecast_module
-from forecast import Forecast, QuotaHistory, duration_text
+from forecast import Forecast, QuotaHistory, duration_text, reset_distance
 from hover_details import HoverDetails, HoverIcon
 from icon_art import live_icon, ring_icon, waiting_icon
 from quota_sources import (
@@ -225,23 +225,6 @@ def compact_number(value: float) -> str:
         if value >= limit:
             return f"{value / limit:.1f}".rstrip("0").rstrip(".") + suffix
     return f"{value:.0f}"
-
-
-def reset_distance(timestamp: float | None, now: float) -> str | None:
-    """Time left until a reset as a column label: "4小时32分钟", "3天7小时",
-    "323天". None when the reset is unknown or already due."""
-    if not timestamp or timestamp <= now:
-        return None
-    minutes = max(1, int((timestamp - now + 59) // 60))   # round up: never "0分钟" before a reset
-    days, rest = divmod(minutes, 1440)
-    hours, minutes = divmod(rest, 60)
-    if days >= 30:
-        return f"{days}天"
-    if days:
-        return f"{days}天{hours}小时" if hours else f"{days}天"
-    if hours:
-        return f"{hours}小时{minutes}分钟" if minutes else f"{hours}小时"
-    return f"{minutes}分钟"
 
 
 def reset_text(timestamp: int | None) -> str:
@@ -1249,6 +1232,17 @@ class QuotaTray:
         # Always the last result as it is, however old or whatever the last call returned.
         return tuple((m.short, model_iq.score_text(m), "ok", live) for m, live in models), ""
 
+    def refresh_grok_iq(self, now: float | None = None) -> str:
+        """Read LiveBench for the Grok column now (the IQ loop, or the settings button)."""
+        now = now or time.time()
+        with self.iq_lock:
+            grok_iq.read(self.grok_iq, now)
+            grok_iq.save_state(GROK_IQ_PATH, self.grok_iq)
+        log.info("grok iq: %s release %s%s", grok_iq.score_text(self.grok_iq.score),
+                 self.grok_iq.release or "-", f" ({self.grok_iq.error})" if self.grok_iq.error else "")
+        self.update_ui()
+        return self.grok_iq.error or "已读取"
+
     def model_iq_status(self) -> dict:
         now = time.time()
         state, config = self.iq_state, self.iq_config
@@ -1296,12 +1290,7 @@ class QuotaTray:
                                  f" ({self.iq_state.error})" if self.iq_state.error else "")
                         self.update_ui()
             if grok_iq.due(getattr(self, "grok_iq", None), now):
-                grok_iq.read(self.grok_iq, now)
-                grok_iq.save_state(GROK_IQ_PATH, self.grok_iq)
-                log.info("grok iq: %s release %s%s", grok_iq.score_text(self.grok_iq.score),
-                         self.grok_iq.release or "-",
-                         f" ({self.grok_iq.error})" if self.grok_iq.error else "")
-                self.update_ui()
+                self.refresh_grok_iq(now)
             self.iq_wake.clear()
             self.iq_wake.wait(600)
             if self.stop_event.is_set():
