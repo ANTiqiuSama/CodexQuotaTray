@@ -32,7 +32,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 
 | 图标 | 来源 | 额度读取方式 | 生成速率与输出计数 | 当前边界 |
 | --- | --- | --- | --- | --- |
-| C | GPT / Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
+| C | Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
 | X | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
 | G | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），外圈显示剩余最少的两个池 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
 | A | Claude Code | 原生 status line 同步 5 小时与每周额度 | 本地 `api-request` 与 `requestRef` 关联真实输出计数，计算每次 API 请求的端到端 TPS | Pro/Max 账号；未记录请求开始时间的旧会话只统计输出计数 |
@@ -44,7 +44,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 
 A 来源面向 **Claude Code 的 CLI 和本地会话记录**。Claude 桌面应用的安装状态、免费版聊天额度和桌面端对话记录不通过这条接口读取。
 
-在设置 → **额度来源**打开 **A · Claude Code**，或在托盘菜单勾选“Claude Code 额度与 TPS”。免费桌面端和 API Key 计费环境没有 Pro/Max 的订阅额度窗口。进程列表分别统计 Claude Code 和 Claude 桌面客户端。
+在设置 → **来源**打开 **A · Claude Code**，或在托盘菜单勾选“Claude Code 额度与 TPS”。免费桌面端和 API Key 计费环境没有 Pro/Max 的订阅额度窗口。进程列表分别统计 Claude Code 和 Claude 桌面客户端。
 
 Windows 运行 `CodexQuotaTray.exe --install-claude-statusline` 接入 Claude 官方 status line 数据。它保留其他 Claude 设置，只在没有已有自定义 status line 时安装；当前会话会自动重载，随后把原生 `rate_limits` 同步到本机托盘，不读取 OAuth 凭据、不发送模型请求。脚本只保存会话 ID、采样时间与数值额度，不保存聊天内容。已安装实时接入时不再启动 `/usage` 终端；旧版或未接入环境保留有超时的 `/usage` 兼容读取。`CODEX_QUOTA_PROVIDERS` 和设置页的来源开关仍然有效。
 
@@ -56,9 +56,9 @@ MiMo 面板顶部将套餐额度、今日用量和 TPS 并排显示。今日用�
 
 数据来源（按优先级）：
 
-1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。打开设置 → **小米 MiMo** 点“登录小米 MiMo”（或右键 M 图标选“登录小米 MiMo…”，或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口；登录后程序在控制台页面内读取套餐（与网页本身的登录方式无关），成功后窗口自动关闭并弹出结果。程序只保留 `platform.xiaomimimo.com` 的 cookie 和控制台接口请求自带的令牌请求头（如有），用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；之后直接读取接口；被拒绝（过期或需要更多凭据）时用同一配置无窗口地在页面内读取一次并更新会话，仍失败才提示重新登录（6 小时内不重复尝试）。“退出 MiMo 登录”删除保存的会话。
+1. **控制台（精确，包含所有设备）**：只读 `platform.xiaomimimo.com` 套餐页使用的 `GET /api/v1/tokenPlan/usage` 与 `/api/v1/tokenPlan/detail`。打开设置 → **来源**，在 MiMo 一行下方点“登录小米 MiMo”（或右键 M 图标选“登录小米 MiMo…”，或运行 `CodexQuotaTray.exe --mimo-login`），会在应用自有的 Edge/Chrome 配置 `mimo-edge-profile` 中打开控制台窗口；登录后程序在控制台页面内读取套餐（与网页本身的登录方式无关），成功后窗口自动关闭并弹出结果。程序只保留 `platform.xiaomimimo.com` 的 cookie 和控制台接口请求自带的令牌请求头（如有），用 Windows DPAPI（当前用户）加密为 `mimo-session.bin`，不接触小米账号密码或 `account.xiaomi.com` 的 cookie；之后直接读取接口；被拒绝（过期或需要更多凭据）时用同一配置无窗口地在页面内读取一次并更新会话，仍失败才提示重新登录（6 小时内不重复尝试）。“退出 MiMo 登录”删除保存的会话。
 2. **本机记录（实时，仅本机）**：把 Codex、Claude Code、MiMo Code（`mimocode.db`）中 `mimo-*` 请求的缓存命中 / 未命中输入和输出 token 按官方价格表换算为 Credits（v2.6-pro / v2.5-pro：2.5 / 300 / 600；v2.6-flash / v2.5：2 / 100 / 200；北京时间 0:00–8:00 ×0.8；未收录型号按 pro 估算并注明），记入 `mimo-ledger.json`。两次控制台读取之间，显示值 = 最近一次控制台“已用” + 本机此后增量，下次读取时校准。
-3. **手动配置（不登录）**：在设置 → **小米 MiMo** 的“方式二”填写套餐总 Credits（如 `49.2B`、`492亿`）、到期日期，可选已用 Credits 与套餐名，点“保存手动套餐”；等价于在 `%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`（未给 `period_start` 时按到期日前一年计算）；用量只来自本机记录。
+3. **手动配置（不登录）**：在设置 → **来源** 的 MiMo 一行展开“手动填写套餐”，填写套餐总量（如 `49.2B`、`492亿`）、到期日期，可选已用 Credits 与套餐名，点“保存手动套餐”；等价于在 `%LOCALAPPDATA%\CodexQuotaTray\mimo.json` 写入 `{"total_credits": 49200000000, "period_end": "2027-06-01"}`，可选 `period_start`、`used_credits`、`used_at`、`plan_name`（未给 `period_start` 时按到期日前一年计算）；用量只来自本机记录。
 
 Claude Code 通过 `ANTHROPIC_BASE_URL`（环境变量或 `~/.claude/settings.json`）指向 `xiaomimimo.com` 时没有 Claude 订阅可读，A 不会自动出现，这些会话计入 X。未显式指定来源时，X 在已登录/已配置 MiMo、Codex `config.toml` 或 Claude Code 指向 `xiaomimimo.com`、或存在 MiMo Code 数据目录时自动加入。程序不会用 Token Plan 的 API Key 发请求探测额度（套餐只允许在编程工具中使用，探测也会消耗 Credits）。
 
@@ -110,11 +110,11 @@ macOS 版的 Codex 使用 `codex app-server`，Gemini 使用 `agy /usage`，Grok
 
 ### 3. 确认每个来源的开关
 
-打开设置 → **额度来源**：每个来源一行，显示“当前：已开启/已关闭”以及原因（默认开启、已检测到、手动关闭、环境变量……）。切换开关后点“保存”，托盘自动重启生效。
+打开设置 → **来源**：每个来源一行，显示“当前：已开启/已关闭”以及原因（默认开启、已检测到、手动关闭、环境变量……）。切换开关后点“保存”，托盘自动重启生效。
 
 | 图标 | 来源 | 默认状态 | 需要什么 | 如何开启 / 关闭 |
 | --- | --- | --- | --- | --- |
-| C | Codex | 开启 | 安装并登录 Codex | 设置 → 额度来源开关 |
+| C | Codex | 开启 | 安装并登录 Codex | 设置 → 来源开关 |
 | X | Grok CLI | 开启 | 安装并登录 Grok CLI | 同上 |
 | G | Gemini / Antigravity | 开启 | 安装并登录 Antigravity，`agy` 在 PATH 中 | 同上 |
 | A | Claude Code | **关闭** | Claude Pro/Max 订阅并登录 Claude Code | 开通订阅后在设置里打开 |
@@ -124,17 +124,17 @@ macOS 版的 Codex 使用 `codex app-server`，Gemini 使用 `agy /usage`，Grok
 
 ### 4. 配置小米 MiMo（可选）
 
-打开设置 → **小米 MiMo**，顶部状态卡显示是否开启、是否已登录、使用的浏览器和当前套餐。二选一：
+打开设置 → **来源**，MiMo 一行下方显示是否已登录、使用的浏览器和当前套餐。二选一：
 
 - **方式一：登录控制台（推荐，含所有设备用量）**：点“登录小米 MiMo”，在弹出的 Edge/Chrome 窗口里登录 `platform.xiaomimimo.com` 并停留在控制台页面；读取成功后窗口自动关闭，生成加密的 `mimo-session.bin`。
 - **方式二：手动套餐（不登录）**：填写套餐总 Credits（如 `49.2B` / `492亿`）和到期日期（`2027-06-01`），可选已用 Credits，点“保存手动套餐”，生成 `mimo.json`。用量只统计本机记录。
 
-完成任意一种后，若“额度来源”里 M 仍是关闭，打开它并保存。
+完成任意一种后，若“来源”里 M 仍是关闭，打开它并保存。
 
 ### 5. 可选项
 
-- herdr：设置 → 任务与 herdr（需要本机安装 herdr）。
-- 任务命名 API：设置 → 任务命名 API。
+- herdr：设置 → 任务（需要本机安装 herdr）。
+- 任务命名 API：设置 → 任务。
 
 ### 常见问题
 
@@ -142,7 +142,7 @@ macOS 版的 Codex 使用 `codex app-server`，Gemini 使用 `agy /usage`，Grok
 | --- | --- |
 | 没有 `mimo-session.bin` / `mimo.json`，M 显示“未登录” | 还没登录也没手动配置：按第 4 步任选一种 |
 | 点登录没有反应 | 确认装有 Edge 或 Chrome（MiMo 页状态卡会显示浏览器路径）；查看 `mimo-login.log` |
-| 看不到 Claude（A） | 默认关闭；开通订阅后在设置 → 额度来源打开 |
+| 看不到 Claude（A） | 默认关闭；开通订阅后在设置 → 来源打开 |
 | G 显示 `?` | 确认 `agy` 可在终端运行并已登录 |
 | 日志里偶尔出现数据库锁定 | 客户端写入时短暂锁库，程序最多等待 1.5 秒后跳过本次读取，下次自动重试，无需处理 |
 
@@ -181,12 +181,13 @@ $env:CODEX_QUOTA_PROVIDERS = 'codex,grok,gemini'
 | 移开鼠标 | 关闭详情，图标恢复最新数值 |
 | 左键点击图标 | 打开对应桌面程序或 CLI；Grok 在装有 [herdr](https://github.com/herdrdev/herdr) 时改为打开 herdr，新建并切换到一个 `grok` 标签页，在其中启动 grok agent（名字被占用时依次用 `grok-2`、`grok-3`…；没有打开 herdr 窗口时先用 Windows Terminal 打开一个）；没装 herdr 时仍直接打开 Grok CLI |
 | 右键图标 / 点击面板右下角齿轮 | 收起悬停面板并打开设置页 |
-| 设置 → 概览 | 每个来源一张卡片：当前托盘图标、状态、各额度窗口/模型池的剩余条与重置倒计时、TPS、60 秒速率、会话数与耗尽预测（每 2 秒刷新，点击打开额度详情）；下方为最近 30 分钟按来源堆叠的输出柱状图 |
-| 设置 → 额度来源 | 每个来源（C/X/G/A/M）的开关、当前开启/关闭状态与原因，全部 AI 速率、立即刷新额度，以及各本机记录（Codex、Claude Code、Antigravity、herdr 等）的接入状态 |
-| 设置 → 小米 MiMo | MiMo 状态卡（开关、登录状态、浏览器、套餐），登录/退出控制台，填写或删除手动套餐 |
-| 设置 → 任务与 herdr | herdr 适配开关与状态、当前任务列表（来源色点、任务名、所在文件夹/herdr 窗格、动作与 TPS） |
-| 设置 → 任务命名 API | 启用开关、Base URL、隐藏输入的 API Key 与模型，测试连接，保存并即时应用；启用后会发送任务请求摘要和最近动作 |
-| 设置 → 常规 | 开机自启、诊断信息、全局重置预测、打开数据文件夹、退出全部 |
+| 设置 → 概览 | 按托盘顺序排列的来源卡片，写法与悬停面板一致：每行标题是距重置的时间、旁边注明窗口或模型池，购买额度、已用完等状态同色显示；卡片底部是 TPS 与下次读取的时间和原因（悬停 / 使用中 / 空闲）。有托盘图标收在 `^` 隐藏区时顶部提示并可直接打开任务栏设置；下方为最近 30 分钟按来源堆叠的输出柱状图；点击卡片查看额度详情 |
+| 设置 → 来源 | 每个来源（A/C/G/X/M）的开关与当前状态、原因；MiMo 一行下方直接登录 / 退出控制台或展开填写手动套餐（点击即生效）；各读取器使用的本机记录 |
+| 设置 → 模型智商 | 面板横条的 AI Stupid Level Key、立即读取与要显示的模型；Grok 智商栏（LiveBench 百分比、对比模型、榜单版本）与立即读取 |
+| 设置 → 任务 | herdr 适配开关与状态、当前任务列表；任务命名 API（启用、地址、Key、模型、测试连接） |
+| 设置 → 常规 | 开机自启；各来源静默 / 使用中 / 光标停留的读取间隔与下次读取时间；诊断信息、全局重置预测、全部 AI 速率、数据文件夹；退出全部 |
+
+开关和输入框的改动先暂存：窗口底部列出尚未保存的项目（如“未保存：Grok 开关、任务命名（保存后托盘会重启）”），“保存”在有改动时才可点；关闭窗口时若有未保存的改动会先询问。登录、立即读取、保存手动套餐等按钮点击即生效。
 
 空闲时沿用深色圆盘、来源字母和额度环；环表示剩余最少的窗口，悬停可查看各窗口。生成时为来源主色的实心圆盘加 TPS 数字；额度耗尽且重置时间已知时为淡来源色空环加红色的剩余小时数，向上取整，两种状态以底色和数字颜色区分。未知值显示 `?`，旧数据有琥珀色提示点，Codex 重置预测蓝点仍保留。字母和数字优先使用 Sitka Small Bold，并回退到 Cambria、Palatino、Georgia 等字体。
 
@@ -379,13 +380,13 @@ $env:CODEX_QUOTA_SUMMARY_KEY = 'sk-...'
 $env:CODEX_QUOTA_SUMMARY_MODEL = 'small-model-name'
 ```
 
-也可以在设置页的“任务命名 API”中配置、测试并保存，或写入 `%LOCALAPPDATA%\CodexQuotaTray\agent_summary.json`：`{"url": "...", "key": "...", "model": "...", "enabled": true}`；设置 `enabled: false` 保留配置并停用。环境变量优先于文件。启用后，每个气泡在其请求变化时才发起一次后台请求（结果按输入缓存，失败后 5 分钟内不再请求），合并的大气泡会请求一个总任务名和每个成员的分工；识别期间气泡外圈显示旋转弧线。发送的内容仅为每个成员最近一次请求的前 400 字、项目文件夹名和当前动作。
+也可以在设置 → 任务的“任务命名”中配置、测试并保存，或写入 `%LOCALAPPDATA%\CodexQuotaTray\agent_summary.json`：`{"url": "...", "key": "...", "model": "...", "enabled": true}`；设置 `enabled: false` 保留配置并停用。环境变量优先于文件。启用后，每个气泡在其请求变化时才发起一次后台请求（结果按输入缓存，失败后 5 分钟内不再请求），合并的大气泡会请求一个总任务名和每个成员的分工；识别期间气泡外圈显示旋转弧线。发送的内容仅为每个成员最近一次请求的前 400 字、项目文件夹名和当前动作。
 
 ## 配置
 
 ### 选择来源
 
-推荐在设置 → **额度来源** 中用开关选择（保存到 `providers.json`，优先于环境变量）。也可以用环境变量：
+推荐在设置 → **来源** 中用开关选择（保存到 `providers.json`，优先于环境变量）。也可以用环境变量：
 
 只对当前 PowerShell 会话设置：
 
@@ -460,8 +461,8 @@ Claude 原生实时额度使用 `claude-status/` 中的数值记录；`claude-pr
 | `mimo-session.bin` | MiMo 控制台 cookie（仅 platform 域，DPAPI 加密） |
 | `mimo-edge-profile/` | MiMo 登录用的应用自有浏览器配置 |
 | `mimo-ledger.json`、`mimo-days.json` | 本机 MiMo Credits 账本（40 天）与每日首次控制台读数 |
-| `mimo.json` | 可选的 MiMo 手动套餐配置（设置 → 小米 MiMo 填写） |
-| `providers.json` | 设置 → 额度来源中保存的各来源开关（未列出的来源按自动检测） |
+| `mimo.json` | 可选的 MiMo 手动套餐配置（设置 → 来源 → MiMo 填写） |
+| `providers.json` | 设置 → 来源中保存的各来源开关（未列出的来源按自动检测） |
 | `settings.json` | 设置页中的 herdr 适配与图标排序选择（对应环境变量设置时以环境变量为准） |
 | `agent_groups.json` | 手动合并的任务分组与拆开记录（仅会话 ID，7 天未用自动清理） |
 | `agent_summary.json` | 可选的气泡命名接口配置 |
@@ -529,9 +530,9 @@ New-Item -ItemType Directory -Path work/checks -Force | Out-Null
 | Gemini 没有 TPS | 运行 `--check-gemini-tps <文件>`，查看数据库是否被找到、是否读取出错、回复步骤是否有创建/完成时间 |
 | 生成时没有 TPS | 查看是否取得完整样本，以及该来源是否提供生成 TPS |
 | Gemini 查询超时 | 检查 `agy` 的登录、网络和 `/usage` 输出，旧数值会保留并标记 |
-| Claude 没有显示 | 默认关闭；开通订阅并登录 Claude Code 后，在设置 → 额度来源打开 A 开关 |
+| Claude 没有显示 | 默认关闭；开通订阅并登录 Claude Code 后，在设置 → 来源打开 A 开关 |
 | Claude 有图标却没有额度 | 检查 Claude Code 的登录与订阅窗口；免费桌面端不通过该读取器接入 |
-| M 显示“未登录”或登录窗口不关闭 | 设置 → 小米 MiMo 点“登录小米 MiMo”或填写手动套餐（也可右键 M 选“登录小米 MiMo…”，或运行 `--mimo-login`）。登录后停留在控制台页面；仍不成功时查看 `mimo-login.log`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
+| M 显示“未登录”或登录窗口不关闭 | 设置 → 来源的 MiMo 一行点“登录小米 MiMo”或填写手动套餐（也可右键 M 选“登录小米 MiMo…”，或运行 `--mimo-login`）。登录后停留在控制台页面；仍不成功时查看 `mimo-login.log`；用 `--check-mimo <文件> --raw` 保存去除身份字段的接口原文以核对格式 |
 | 任务面板在全屏应用中没有出现 | 先让任务栏图标可见；独占全屏和安全桌面尚不保证覆盖 |
 | 中文出现方框或显示模糊 | 检查系统中文字体，必要时用 legacy DPI 选项排错 |
 | 构建提示 EXE 被占用 | 退出正在运行的目标程序，或构建到另一输出目录 |

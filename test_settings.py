@@ -34,19 +34,31 @@ class SettingsViewTests(unittest.TestCase):
         self.assertEqual(accent("G"), ring_color(10, "G"))
         self.assertEqual(AMBER, ring_color(40, "C"))          # other sources keep the warning colours
 
-    def test_quota_rows_prefer_model_pools(self):
-        pools = [{"key": "argon", "label": "Argon", "remaining_percent": 40, "resets_at": time.time() + 4000},
+    def test_quota_rows_are_written_like_the_panel_columns(self):
+        now = time.time()
+        pools = [{"key": "argon", "label": "Argon", "remaining_percent": 40, "resets_at": now + 4000},
                  {"key": "opus", "label": "Claude/GPT", "remaining_percent": 85}]
-        rows = view.quota_rows(snapshot(pools=pools))
-        self.assertEqual(["Argon", "Claude/GPT"], [row[0] for row in rows])
-        self.assertIn("后重置", rows[0][2])
-        two = view.quota_rows(snapshot(provider="codex", secondary_window_minutes=10080, secondary_remaining_percent=38))
-        self.assertEqual(["5 小时", "每周"], [row[0] for row in two])
+        rows = view.quota_rows(snapshot(pools=pools), now)
+        self.assertEqual([("1小时7分钟", 40, "Argon"), ("Claude/GPT", 85, "")], [row[:3] for row in rows])
+        two = view.quota_rows(snapshot(provider="codex", resets_at=int(now + 3600), secondary_window_minutes=10080,
+                                       secondary_remaining_percent=38), now)
+        self.assertEqual([("1小时", "5 小时"), ("每周", "")], [(row[0], row[2]) for row in two])   # no weekly reset known
+        self.assertEqual(view.window_name(525600), "年度")
+        self.assertEqual(view.refresh_text(12.4, "悬停"), "12 秒后刷新 · 悬停")
+        self.assertEqual(view.refresh_text(300, "空闲"), "5 分钟后刷新 · 空闲")
+        self.assertEqual(view.refresh_text(0, "正在刷新"), "正在刷新")
+        self.assertEqual(view.refresh_text(None, ""), "")
 
     def test_pictures_render_at_scale(self):
         card = view.SourceCard("gemini", "G", "Gemini", "1 个在工作", "live", view.quota_rows(snapshot()), 142.0, 11.0, 1,
                                "按当前速度可用到重置", "ok")
         self.assertEqual((round(view.CARD_W * 1.5), round(view.CARD_H * 1.5)), view.source_card(card, quota_icon(40, "G"), 1.5).size)
+        # A grid row of one-window sources is shorter: no empty band under a single bar.
+        self.assertEqual(view.card_height(1), view.CARD_H - 2 * view.ROW_H)
+        self.assertEqual(view.source_card(card, None, 1.0, slots=1).size, (view.CARD_W, view.card_height(1)))
+        paid = view.SourceCard("codex", "C", "Codex", "可用购买额度", "paid",
+                               (("1小时", 0.0, "购买额度", "paid", "59.8K"), ("5天3小时", 70.0, "每周", "", None)), 0.0, 0.0, 0, "", "warn")
+        self.assertIsNotNone(view.source_card(paid, None, 1.25))
         now = time.time()
         events = [SimpleNamespace(ended_at=now - 100, provider="gemini", output_tokens=500, count_in_rate=True)]
         self.assertEqual((652, 150), view.activity_chart(events, now, {"gemini": "G"}).size)
@@ -63,6 +75,43 @@ class SettingsViewTests(unittest.TestCase):
         [(card, image)] = settings_window.build_cards(app)
         self.assertIs(image, icon)
         self.assertEqual(("G", "1 个在工作", None, 1), (card.letter, card.status, card.tps, card.active))
+
+    def test_cards_use_the_panel_columns_in_tray_order_with_the_refresh_plan(self):
+        import settings_window
+        from refresh_scheduler import RefreshScheduler
+        now = time.time()
+        codex = snapshot(provider="codex", label="Codex", remaining_percent=0.0, used_percent=100.0,
+                         secondary_window_minutes=10080, secondary_remaining_percent=70.0)
+        model = SimpleNamespace(status="可用购买额度", status_tone="paid", forecast="5 小时额度已用完", forecast_tone="warn",
+                                quota=(("1小时", 0.0, "购买额度"), ("5天3小时", 70.0, "")),
+                                tone_of=lambda slot: "paid" if slot == 0 else "",
+                                figure_of=lambda slot: ("59.8", "K") if slot == 0 else None)
+        scheduler = RefreshScheduler(("codex", "claude"), now)
+        scheduler.take_due(now)
+        for provider in ("codex", "claude"):
+            scheduler.completed(provider, SimpleNamespace(error=None, resets_at=None, secondary_resets_at=None), now)
+        app = SimpleNamespace(snapshots={"codex": codex, "claude": snapshot(provider="claude", label="Claude Code")},
+                              performance={"providers": {}}, icons={}, scheduler=scheduler,
+                              panel=lambda provider: model if provider == "codex" else None)
+        cards = [card for card, _ in settings_window.build_cards(app, now)]
+        self.assertEqual([card.provider for card in cards], ["claude", "codex"])          # the tray's order
+        self.assertEqual(cards[1].rows, (("1小时", 0.0, "购买额度", "paid", "59.8K"), ("5天3小时", 70.0, "每周", "", None)))
+        self.assertRegex(cards[1].refresh, r"^\d+ (秒|分钟)后刷新 · 空闲$")
+        self.assertEqual(scheduler.plan("codex", now), (scheduler.due["codex"] - now, "空闲"))
+        self.assertEqual(scheduler.plan("grok", now), (None, ""))
+
+    def test_paragraphs_wrap_chinese_by_character_and_keep_latin_words_whole(self):
+        import settings_window
+        measure = len                                   # one unit per character
+        text = "Grok 不在 AI Stupid Level 的榜单上，所以改用 LiveBench 最新公开榜单"
+        lines = settings_window.wrap_text(text, measure, 16).split("\n")
+        self.assertTrue(all(len(line) <= 16 for line in lines))
+        self.assertEqual("".join(lines).replace(" ", ""), text.replace(" ", ""))
+        self.assertEqual(lines[1], "Stupid Level 的榜单")                    # Chinese fills the line, not cut at its space
+        self.assertTrue(all(word in " ".join(lines).split() or word in "".join(lines) for word in ("Stupid", "LiveBench")))
+        self.assertFalse(any(line.endswith(("Stu", "LiveBe")) for line in lines))   # a Latin word moves whole
+        self.assertEqual(settings_window.PAGE_ALIASES["mimo"], "sources")
+        self.assertEqual({key for key, _ in settings_window.PAGES}, {"overview", "sources", "iq", "tasks", "general"})
 
     def test_preferences_round_trip_and_apply(self):
         import tray_app
