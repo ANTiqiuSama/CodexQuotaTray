@@ -532,12 +532,9 @@ class SettingsWindow:
         tk, S = self.tk, self.S
         self.heading(page, "任务与 herdr", "任务气泡来自本机 agent 记录；使用 herdr 时，同一窗格的会话合并为一个气泡。")
         self.vars["herdr"] = tk.BooleanVar(value=True)
-        self.vars["order"] = tk.BooleanVar(value=True)
         self.herdr_row = self.row(page, "herdr 适配", "", self.vars["herdr"])
-        self.herdr_row.pack(fill="x", pady=(0, S(8)))
+        self.herdr_row.pack(fill="x", pady=(0, S(14)))
         self.herdr_detail = self.herdr_row.winfo_children()[0].winfo_children()
-        self.row(page, "图标自动排序", "恢复时间近的图标排在左侧，用完的排在最后；关闭后按固定顺序显示。",
-                 self.vars["order"]).pack(fill="x", pady=(0, S(14)))
         self.agent_holder = tk.Frame(page, bg=view.BG)
         self.agent_holder.pack(fill="x")
 
@@ -739,9 +736,6 @@ class SettingsWindow:
             self.mimo_fields[name].set(f"{value / 1e9:g}B" if name in ("total", "used") and isinstance(value, (int, float)) else str(value or ""))
         herdr = getattr(getattr(self.app, "tps_monitor", None), "herdr", None)
         self.vars["herdr"].set(bool(herdr.enabled) if herdr is not None else True)
-        import sys
-        order = getattr(sys.modules.get("tray_app") or sys.modules.get("__main__"), "TRAY_ORDER_MODE", "auto")
-        self.vars["order"].set(order != "fixed")
         if hasattr(self.app, "model_iq_status"):
             info = self.app.model_iq_status()
             self.iq_key.set(info["key"])
@@ -758,7 +752,7 @@ class SettingsWindow:
                 self.app.toggle_startup()
             if hasattr(self.app, "save_model_iq"):
                 self.app.save_model_iq(self.iq_key.get(), list(self.iq_selected) or None)
-            prefs = {"herdr": bool(self.vars["herdr"].get()), "tray_order": "auto" if self.vars["order"].get() else "fixed"}
+            prefs = {"herdr": bool(self.vars["herdr"].get())}
             if hasattr(self.app, "save_preferences"):
                 self.app.save_preferences(prefs)
             self.status.set("✓ 设置已保存并生效")

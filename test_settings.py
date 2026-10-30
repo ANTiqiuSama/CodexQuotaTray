@@ -70,16 +70,15 @@ class SettingsViewTests(unittest.TestCase):
         herdr = SimpleNamespace(enabled=True, status="已接入", rows=[1])
         tray = SimpleNamespace(tps_monitor=SimpleNamespace(herdr=herdr))
         with patch.object(tray_app, "PREFERENCES_PATH", folder / "settings.json"), patch.dict("os.environ", {}, clear=False) as env:
-            env.pop("CODEX_QUOTA_TRAY_ORDER", None)
             env.pop("CODEX_QUOTA_HERDR", None)
+            (folder / "settings.json").write_text('{"herdr": true, "tray_order": "auto"}', encoding="utf-8")
             tray_app.QuotaTray.save_preferences(SimpleNamespace(apply_preferences=lambda prefs: tray_app.QuotaTray.apply_preferences(tray, prefs)),
-                                                {"herdr": False, "tray_order": "fixed"})
-            self.assertEqual({"herdr": False, "tray_order": "fixed"}, tray_app.load_preferences())
+                                                {"herdr": False})
+            self.assertEqual({"herdr": False}, tray_app.load_preferences())   # retired tray_order dropped
             self.assertFalse(herdr.enabled)
-            self.assertEqual("fixed", tray_app.TRAY_ORDER_MODE)
+            self.assertFalse(hasattr(tray_app, "TRAY_ORDER_MODE"))
             tray_app.QuotaTray.apply_preferences(tray, {"tray_order": "auto", "herdr": True})
             self.assertTrue(herdr.enabled)
-            self.assertEqual("auto", tray_app.TRAY_ORDER_MODE)
 
 
 class SourceSwitchTests(unittest.TestCase):

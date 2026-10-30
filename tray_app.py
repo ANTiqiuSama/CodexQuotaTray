@@ -282,9 +282,8 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
     return f"{snapshot.label}: {status}{stale}"
 
 
-# Tray order: soonest quota refresh first, exhausted quotas last.
-# CODEX_QUOTA_TRAY_ORDER: "auto" (default) or "fixed" (registry order).
-TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
+# Tray order is fixed (providers.TRAY_POSITIONS): Claude Code, Codex (GPT),
+# Grok, Gemini, MiMo.  It never changes with remaining quota or exhaustion.
 REORDER_MIN_SECONDS = 60
 PREFERENCES_PATH = DATA_DIR / "settings.json"
 
@@ -301,16 +300,6 @@ IQ_CONFIG_PATH = DATA_DIR / "model_iq_config.json"     # AI Stupid Level key + c
 # Providers whose quota resets raise a Windows notification.
 RESET_NOTIFY = {part.strip().lower() for part in (os.environ.get("CODEX_QUOTA_RESET_NOTIFY") or "codex,grok,claude").split(",") if part.strip()}
 RESET_NOTIFY_MIN_GAIN = 10.0     # percentage points regained before it counts as a reset
-
-
-def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
-    """(remaining %, reset time) of the window that limits use.  MiMo counts
-    its yearly pool; the daily budget is advice, not a quota refresh."""
-    if snapshot.provider == "mimo" or snapshot.secondary_remaining_percent is None:
-        return snapshot.remaining_percent, snapshot.resets_at
-    if snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent:
-        return snapshot.secondary_remaining_percent, snapshot.secondary_resets_at
-    return snapshot.remaining_percent, snapshot.resets_at
 
 
 def reset_changes(old: QuotaSnapshot | None, new: QuotaSnapshot | None, now: float) -> list[str]:
@@ -330,16 +319,6 @@ def reset_changes(old: QuotaSnapshot | None, new: QuotaSnapshot | None, now: flo
         early = bool(old_reset) and now < old_reset - 300
         lines.append(f"{window_label(minutes) or '额度'}窗口：{before:.0f}% → {after:.0f}%" + ("（提前重置）" if early else ""))
     return lines
-
-
-def tray_order(snapshots: dict[str, QuotaSnapshot], keys: list[str]) -> list[str]:
-    """Left to right: soonest refresh first; unknown reset next; used-up last."""
-    def rank(provider: str):
-        remaining, reset = binding_reset(snapshots[provider])
-        exhausted = quota_exhausted(remaining, provider)
-        group = 2 if exhausted else (0 if reset else 1)
-        return group, reset or float("inf"), keys.index(provider)
-    return sorted(keys, key=rank)
 
 
 def startup_command() -> str:
@@ -910,8 +889,7 @@ class QuotaTray:
         self.maybe_reorder(time.time())
 
     def wanted_order(self) -> list[str]:
-        keys = list(PROVIDERS)
-        return keys if TRAY_ORDER_MODE == "fixed" else tray_order(self.snapshots, keys)
+        return provider_registry.tray_positions(PROVIDERS)
 
     def slots_by_position(self) -> list:
         """The tray icons ("slots") as Windows currently shows them, left to
@@ -943,9 +921,11 @@ class QuotaTray:
         """Show providers in wanted_order() by assigning them to the existing
         tray icons by on-screen position.  Icons are never deleted or re-added:
         Explorer restores its own remembered layout for re-added icons, so
-        moving them does not stick; swapping what each icon shows does."""
+        moving them does not stick; swapping what each icon shows does.
+        The wanted order is fixed, so this only acts when Explorer's own
+        layout (startup, reflow, a manual drag) differs from it."""
         icons = getattr(self, "icons", None)
-        if not icons or (TRAY_ORDER_MODE == "fixed" and not force):
+        if not icons:
             return False
         if not force and now - self.reordered_at < REORDER_MIN_SECONDS:
             return False
@@ -1491,9 +1471,6 @@ class QuotaTray:
 
     def apply_preferences(self, prefs: dict) -> None:
         """Settings-page choices; an explicitly set environment variable still wins."""
-        global TRAY_ORDER_MODE
-        if not os.environ.get("CODEX_QUOTA_TRAY_ORDER") and prefs.get("tray_order") in ("auto", "fixed"):
-            TRAY_ORDER_MODE = prefs["tray_order"]
         if not os.environ.get("CODEX_QUOTA_HERDR") and "herdr" in prefs:
             herdr = self.tps_monitor.herdr
             herdr.enabled = bool(prefs["herdr"])
@@ -1503,16 +1480,12 @@ class QuotaTray:
 
     def save_preferences(self, prefs: dict) -> None:
         merged = {**load_preferences(), **prefs}
+        merged.pop("tray_order", None)     # retired: tray positions are fixed
         PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary = PREFERENCES_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, PREFERENCES_PATH)
         self.apply_preferences(merged)
-        if getattr(self, "icons", None):
-            try:
-                self.maybe_reorder(time.time(), force=True)
-            except Exception:
-                log.warning("reorder after preference change failed", exc_info=True)
 
     def apply_summary_settings(self, config: dict, enabled: bool) -> None:
         from settings_window import save_summary
