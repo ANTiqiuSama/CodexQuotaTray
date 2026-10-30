@@ -161,6 +161,11 @@ def reset_text(timestamp: int | None) -> str:
     return moment.strftime("%Y-%m-%d %H:%M") + f"（{zone}）"
 
 
+def window_idle(snapshot: QuotaSnapshot) -> bool:
+    """A fresh window nobody has used yet: full quota, no reset scheduled."""
+    return snapshot.resets_at is None and snapshot.used_percent == 0 and snapshot.error is None
+
+
 def reset_countdown(timestamp: int | None) -> str:
     if not timestamp:
         return "未知"
@@ -176,12 +181,17 @@ def reset_countdown(timestamp: int | None) -> str:
 
 
 def quota_line(snapshot: QuotaSnapshot) -> str:
-    if snapshot.remaining_percent is None:
+    second = window_label(snapshot.secondary_window_minutes) or "第二窗口"
+    if snapshot.remaining_percent is None and snapshot.secondary_remaining_percent is None:
         status = "未知/获取失败"
+    elif snapshot.remaining_percent is None:
+        # One window known is still worth showing (e.g. Claude weekly without its 5 h reading).
+        first = window_label(snapshot.window_minutes) or "当前窗口"
+        status = f"{first}未知 · {second}剩余 {snapshot.secondary_remaining_percent:.0f}%"
     else:
-        status = f"剩余 {snapshot.remaining_percent:.0f}% · 已用 {snapshot.used_percent:.0f}%"
+        used = 100.0 - snapshot.remaining_percent if snapshot.used_percent is None else snapshot.used_percent
+        status = f"剩余 {snapshot.remaining_percent:.0f}% · 已用 {used:.0f}%"
         if snapshot.secondary_remaining_percent is not None:
-            second = window_label(snapshot.secondary_window_minutes) or "第二窗口"
             status += f" · {second}剩余 {snapshot.secondary_remaining_percent:.0f}%"
         for pool in (snapshot.pools or [])[1:]:
             if pool.get("remaining_percent") is not None:
@@ -695,10 +705,13 @@ class QuotaTray:
 
     def menu_reset(self, provider: str) -> str:
         snapshot = self.snapshots[provider]
+        if window_idle(snapshot):
+            return "重置时间：窗口未开始（下次使用时开始计时）"
         return f"重置时间：{reset_text(snapshot.resets_at)}"
 
     def menu_countdown(self, provider: str) -> str:
-        return f"距离重置：{reset_countdown(self.snapshots[provider].resets_at)}"
+        snapshot = self.snapshots[provider]
+        return f"距离重置：{'未开始' if window_idle(snapshot) else reset_countdown(snapshot.resets_at)}"
 
     def menu_updated(self, provider: str) -> str:
         updated = self.snapshots[provider].updated_at
@@ -1363,6 +1376,10 @@ class QuotaTray:
             icon.stop()
 
     def run(self) -> None:
+        if "claude" in PROVIDERS:
+            import claude_status
+            if claude_status.refresh_receiver():
+                log.info("Claude status-line receiver updated")
         threading.Thread(target=self.refresh_loop, name="quota-refresh", daemon=True).start()
         threading.Thread(target=self.tps_loop, name="tps-reader", daemon=True).start()
         if reset_watch.ENABLED and "codex" in PROVIDERS:
