@@ -619,7 +619,7 @@ class AgentPanelTests(unittest.TestCase):
         # Restore normal bubble records before exercising the complete renderer.
         self.tray.agents = []
         model = self.tray.panel("gemini")
-        self.assertEqual([q[0] for q in model.quota], ["Argon", "Claude/GPT", "Gemini"])
+        self.assertEqual([q[2] for q in model.quota], ["Argon", "Claude/GPT", "Gemini"])
         self.assertIsNone(model.burn)
         scene = agent_panel.Scene()
         scene.set_model(model, 0.0)
@@ -751,10 +751,11 @@ class AgentPanelTests(unittest.TestCase):
                           {"key": "gemini", "label": "Gemini", "remaining_percent": 90.0, "resets_at": int(time.time()) + 3 * 86400}]
         self.tray.snapshots["gemini"] = snapshot
         model = self.tray.panel("gemini")
-        self.assertEqual([item[:2] for item in model.quota], [("Argon", 25.0), ("Claude/GPT", 40.0), ("Gemini", 90.0)])
-        self.assertIn("小时", model.quota[0][2])     # pools keep their names; the countdown sits under the bar
-        self.assertEqual(model.quota[1][2], "")       # no reset known
-        self.assertIn("天", model.quota[2][2])
+        self.assertEqual([item[1] for item in model.quota], [25.0, 40.0, 90.0])
+        self.assertIn("小时", model.quota[0][0])      # countdown on top, model name under the bar
+        self.assertEqual(model.quota[0][2], "Argon")
+        self.assertEqual(model.quota[1][:3:2], ("Claude/GPT", ""))   # no reset known: the name stays on top
+        self.assertEqual((model.quota[2][0][-1], model.quota[2][2]), ("天", "Gemini"))
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
 
@@ -796,7 +797,7 @@ class AgentPanelTests(unittest.TestCase):
         scene.set_model(self.tray.panel("gemini"), 0)
         snapshot.pools = [third, native]
         model = self.tray.panel("gemini")
-        self.assertNotIn("Argon", [q[0] for q in model.quota])
+        self.assertNotIn("Argon", [q[0] for q in model.quota] + [q[2] for q in model.quota])
         scene.set_model(model, 1)
         for scale in (1, 1.25, 1.5):
             self.assertIsNotNone(scene.render(scale))

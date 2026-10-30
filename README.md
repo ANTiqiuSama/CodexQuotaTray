@@ -223,7 +223,7 @@ Gemini TPS = 输出 token 数 / 回复步骤创建至完成的时间（含首字
 
 数据库被 Antigravity 锁定时读取其临时副本。
 
-Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。G 图标圆环、排序和预测跟随实际返回的最高优先级池（Argon > Claude/GPT > Gemini）；任务面板顶部并列显示各池剩余，每个池的重置倒计时写在其额度条下方。
+Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。G 图标圆环、排序和预测跟随实际返回的最高优先级池（Argon > Claude/GPT > Gemini）；任务面板顶部并列显示各池剩余：与其他来源一样，列标题是距重置的时间，模型池名称写在额度条下方。
 
 切换账号后，在设置中点“立即刷新”或等待下一次定期读取。额度池完整替换为新返回的数据：无 Argon 时不保留该项，改由实际存在的 Opus／Gemini 参与倒计时；池或周期变化时重新积累 Gemini 消耗预测。Gemini 读取失败时显示未知，避免把旧账号额度误当成新账号。
 

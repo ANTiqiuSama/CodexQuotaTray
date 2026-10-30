@@ -137,7 +137,7 @@ class PanelModel:
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
-FOOTER = 54                 # Two forecast lines plus a separate settings button.
+FOOTER = 40                 # Two forecast lines plus a separate settings button.
 CHART = 80                  # Burn chart under the task field.
 CHART_TOP = 16              # Field bottom to chart sprite; the two plates keep an 8 px gap.
 CHART_H = 64                # Chart sprite: label row and plot.
@@ -148,9 +148,11 @@ GEAR_HIT = 17.0
 
 def meter_columns(count: int) -> list[tuple[float, float]]:
     """(left, bar end) of each header column; the last column is TPS."""
-    # At least three slots, so a single quota (Grok) does not stretch across half the panel.
-    column = (WIDTH - 2 * PAD) / max(3, count + 1)
-    return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in range(count + 1)]
+    # At least three slots, so a single quota (Grok) does not stretch across half
+    # the panel; TPS always takes the rightmost slot, as on every other source.
+    slots = max(3, count + 1)
+    column = (WIDTH - 2 * PAD) / slots
+    return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in [*range(count), slots - 1]]
 
 
 def chart_top(model, field_h: float) -> float:
@@ -162,7 +164,7 @@ def chart_extra_for(model: PanelModel) -> float:
 
 
 def footer_middle(model, field_h: float) -> float:
-    return field_top(model) + field_h + CHART + chart_extra_for(model) + 30
+    return field_top(model) + field_h + CHART + chart_extra_for(model) + 24
 
 
 def gear_center(model, field_h: float) -> tuple[float, float]:
@@ -1244,8 +1246,16 @@ def forecast_text(text: str, limit: float, face, probe) -> str:
     return text + "…"
 
 
+FORECAST_BREAKS = "；，。、 "
+
+
 def forecast_lines(text: str, limit: float, face, probe) -> list[str]:
     lines = _wrap(probe, text, face, limit)
+    if len(lines) > 1:
+        # Break after punctuation or a space rather than inside a name ("Claude/GP" + "T").
+        cut = max(lines[0].rfind(mark) for mark in FORECAST_BREAKS)
+        if cut >= len(lines[0]) // 2:
+            lines = [lines[0][:cut + 1].rstrip()] + _wrap(probe, text[cut + 1:].lstrip(), face, limit)
     if len(lines) > 2:
         lines = [lines[0], forecast_text("".join(lines[1:]), limit, face, probe)]
     return lines

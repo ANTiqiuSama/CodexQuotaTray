@@ -378,6 +378,27 @@ class SceneTests(unittest.TestCase):
         from dataclasses import replace
         self.assertEqual(model.header, replace(model, today_used=2e9).header)
 
+    def test_tps_takes_the_rightmost_header_slot_for_every_source(self):
+        right = agent_panel.meter_columns(2)[-1]
+        for count in (1, 2):                                   # Grok has a single quota column
+            columns = agent_panel.meter_columns(count)
+            self.assertEqual(len(columns), count + 1)
+            self.assertEqual(columns[-1], right)
+        self.assertGreater(agent_panel.meter_columns(3)[-1][0], right[0])   # Gemini's three pools push it further
+
+    def test_forecast_wraps_between_pools_not_inside_a_name(self):
+        from PIL import Image, ImageDraw
+        text = "Argon 预计 2 小时后用完；Gemini 预计 13 小时后用完；Claude/GPT 预计 20 小时后用完"
+        for scale in (1.0, 1.25, 1.5):
+            face = agent_panel.ui_font(round(11 * scale))
+            probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+            limit = round((agent_panel.WIDTH - 2 * agent_panel.PAD - 48) * scale)
+            lines = agent_panel.forecast_lines(text, limit, face, probe)
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(lines[0].endswith("；"))
+            self.assertTrue(lines[1].startswith("Claude/GPT"))
+            self.assertTrue(all(probe.textlength(line, font=face) <= limit for line in lines))
+
     def test_long_quota_forecast_wraps_without_losing_the_ending_at_each_dpi(self):
         from PIL import Image, ImageDraw
         text = "5 小时额度：按当前速度，预计 2 小时 40 分后用完，早于下次重置约 35 分钟"
