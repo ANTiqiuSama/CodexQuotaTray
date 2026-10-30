@@ -589,13 +589,14 @@ class QuotaTray:
         quota: list[tuple] = []
         # Window columns are titled by the time left until their reset; the
         # window name stays as a fallback when no reset is scheduled. Model
-        # pools keep their names and show the countdown under the bar.
+        # pools follow suit and name the model under the bar.
         if snapshot is not None and provider == "mimo":
             quota.append((reset_distance(snapshot.resets_at, now) or "套餐额度", snapshot.display_remaining, ""))
         elif snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
             for pool in snapshot.pools[:3]:
-                quota.append((pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"),
-                              reset_distance(pool.get("resets_at"), now) or ""))
+                name = pool.get("label") or pool.get("key") or "额度"
+                countdown = reset_distance(pool.get("resets_at"), now)
+                quota.append((countdown or name, pool.get("remaining_percent"), name if countdown else ""))
         elif snapshot is not None:
             quota.append((reset_distance(snapshot.resets_at, now) or window_label(snapshot.window_minutes) or "当前",
                           snapshot.remaining_percent, ""))
