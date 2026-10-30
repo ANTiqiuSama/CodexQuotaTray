@@ -160,7 +160,7 @@ def _stale_badge(canvas: Image.Image) -> None:
 # Shared geometry: both states are full-bleed discs so the icon uses the
 # whole tray slot.  The ring hugs the edge; the glyph gets the rest.
 DISC = (0, 0, CANVAS - 1, CANVAS - 1)
-RING_W = 26
+RING_W = 32
 RING_BOX = (RING_W / 2 + 1, RING_W / 2 + 1, CANVAS - RING_W / 2 - 2, CANVAS - RING_W / 2 - 2)
 
 
@@ -295,16 +295,22 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
 
 
 @lru_cache(maxsize=64)
-def waiting_icon(hours: int, letter: str, reset_hint: bool = False) -> Image.Image:
-    """Old-style dark disc and empty source-coloured ring, with red reset hours."""
+def waiting_icon(amount: int, letter: str, reset_hint: bool = False, stale: bool = False, unit: str = "h") -> Image.Image:
+    """Old-style empty ring with a red countdown and its unit."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
-    _ring(draw, None, MUTED, _mix(INK, accent(letter), .38))
-    text = str(max(1, int(hours)))
+    # Keep the empty outline as large as the original full-bleed disc.  A
+    # slightly thicker stroke remains visible at 16-pixel tray size.  Use the
+    # original empty-ring track rather than a full provider-coloured arc.
+    draw.ellipse(DISC, outline=TRACK, width=38)
+    text = str(max(1, int(amount)))
     wide = len(text) >= 3
-    face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
-    _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), CLAY)
+    face = _fit(text, number_font, 190 if wide else 180, 132 if wide else 158, 200, draw)
+    _centered_text(draw, text, face, (0, 10, 228, CANVAS), CLAY)
     if reset_hint:
         _reset_badge(canvas)
+    unit = unit if unit in ("d", "h", "m") else "h"
+    unit_face = _fit(unit, number_font, 96, 96, 132, draw)
+    _centered_text(draw, unit, unit_face, (166, 0, 256, 100), IVORY)
     return _finish(canvas)

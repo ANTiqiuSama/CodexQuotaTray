@@ -132,7 +132,7 @@ class PanelModel:
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], item[2] if len(item) > 2 else "", self.tone_of(slot)) for slot, item in enumerate(self.quota[:3])),
                 (self.banner, self.banner_alert, self.intel, self.intel_note),
-                (self.forecast, self.forecast_tone), self.provider == "mimo", chart_extra_for(self))
+                (self.forecast, self.forecast_tone), self.provider == "mimo", chart_extra_for(self), self.provider != "gemini")
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
@@ -145,13 +145,14 @@ GEAR_RADIUS = 7.5
 GEAR_HIT = 17.0
 
 
-def meter_columns(count: int) -> list[tuple[float, float]]:
+def meter_columns(count: int, show_tps: bool = True) -> list[tuple[float, float]]:
     """(left, bar end) of each header column; the last column is TPS."""
     # At least three slots, so a single quota (Grok) does not stretch across half
     # the panel; TPS always takes the rightmost slot, as on every other source.
-    slots = max(3, count + 1)
+    slots = max(3, count + 1) if show_tps else max(1, count)
     column = (WIDTH - 2 * PAD) / slots
-    return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in [*range(count), slots - 1]]
+    indices = [*range(count), slots - 1] if show_tps else range(count)
+    return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in indices]
 
 
 def chart_top(model, field_h: float) -> float:
@@ -696,7 +697,7 @@ class Scene:
         ping on the title dot while agents work, drifting shells when idle."""
         draw = ImageDraw.Draw(frame)
         meter_top = METER_TOP + header_offset(model)
-        columns = meter_columns(len(self.meters) + (model.provider == "mimo"))
+        columns = meter_columns(len(self.meters) + (model.provider == "mimo"), model.provider != "gemini")
         for slot, ((x, end), spring, item) in enumerate(zip(columns, self.meters, model.quota[:3])):
             value = item[1]
             paid = model.tone_of(slot) == "paid"     # used up but covered by purchased credits: a full gold bar
@@ -716,11 +717,12 @@ class Scene:
             number, unit = compact_usage(None if model.today_used is None else self.today_usage.value)
             blit_at(frame, figure(number, unit, accent(model.letter), SECONDARY_TEXT, scale),
                     at(columns[-2][0]), at(meter_top + 38))
-        x = columns[-1][0]
-        color = accent(model.letter)
-        rate = max(0.0, self.rate.value)
-        blit_at(frame, figure(f"{rate:.0f}", "tok/s", color if model.tps and rate >= 0.5 else TEXT, SECONDARY_TEXT, scale),
-                at(x), at(meter_top + 38))
+        if model.provider != "gemini":
+            x = columns[-1][0]
+            color = accent(model.letter)
+            rate = max(0.0, self.rate.value)
+            blit_at(frame, figure(f"{rate:.0f}", "tok/s", color if model.tps and rate >= 0.5 else TEXT, SECONDARY_TEXT, scale),
+                    at(x), at(meter_top + 38))
         if model.status_tone == "live":
             p = (self.time % 1.8) / 1.8
             blit(frame, faded(ring(round((4 + 7 * ease_out_cubic(p)) * scale), max(1, round(1.2 * scale)), model.letter),
@@ -1329,8 +1331,8 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 
 def _header_model(header: tuple) -> PanelModel:
-    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, chart_padding = header
-    return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset, _ in meters), None, (),
+    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, chart_padding, show_tps = header
+    return PanelModel("mimo" if daily else "" if show_tps else "gemini", letter, title, status, tuple((label, None, reset) for label, reset, _ in meters), None, (),
                       tone, banner, forecast[0], forecast[1], banner_alert=alert,
                       intel=intel, intel_note=note, chart_padding=chart_padding,
                       quota_tones=tuple(column_tone for _, _, column_tone in meters))
@@ -1420,7 +1422,7 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, lette
 @lru_cache(maxsize=12)
 def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     model = _header_model(header)
-    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, _padding = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, _padding, show_tps = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -1440,8 +1442,8 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
 
     y = METER_TOP + header_offset(model)
     label_font, small = ui_font(px(11)), ui_font(px(10))
-    columns = meter_columns(len(meters) + daily)
-    labels = tuple(meters) + ((("今日用量", "Credits", ""),) if daily else ()) + (("TPS", "", ""),)
+    columns = meter_columns(len(meters) + daily, show_tps)
+    labels = tuple(meters) + ((("今日用量", "Credits", ""),) if daily else ()) + ((("TPS", "", ""),) if show_tps else ())
     for (x, end), (label, reset, column_tone) in zip(columns, labels):
         draw.text((px(x), px(y)), label, font=label_font, fill=MUTED_TEXT, anchor="lt")
         if daily and label == "今日用量":

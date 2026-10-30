@@ -47,7 +47,53 @@ class SplitRingTests(unittest.TestCase):
         self.assertIsNone(tray_app.usable_again_at(snapshot(remaining=0,second=0,reset=now+3600,second_reset=None),now))
         with patch.object(tray_app, 'waiting_icon', return_value='waiting') as icon:
             self.assertEqual(tray_app.make_provider_icon(snapshot(reset=now+3601),'C',now=now),'waiting')
-            icon.assert_called_once_with(2,'C',False)
+            icon.assert_called_once_with(2,'C',False,False,'h')
+
+    def test_countdown_units_round_up_at_boundaries(self):
+        for seconds, expected in ((1,(1,'m')), (60,(1,'m')), (61,(2,'m')),
+                                  (3599,(60,'m')), (3600,(1,'h')), (3601,(2,'h')),
+                                  (86399,(24,'h')), (86400,(1,'d')), (86401,(2,'d'))):
+            self.assertEqual(tray_app.countdown_value(seconds),expected)
+
+    def test_five_percent_remaining_is_treated_as_exhausted_without_changing_data(self):
+        now = 1000000
+        for remaining in (0, 1, 5):
+            value = snapshot('claude', remaining=remaining, reset=now+3601)
+            self.assertEqual(tray_app.usable_again_at(value, now), now+3601)
+            with patch.object(tray_app, 'waiting_icon', return_value='waiting') as icon:
+                self.assertEqual(tray_app.make_provider_icon(value, 'A', now=now), 'waiting')
+                icon.assert_called_once_with(2, 'A', False, False, 'h')
+            self.assertEqual(value.remaining_percent, remaining)
+        self.assertIsNone(tray_app.usable_again_at(snapshot('claude', remaining=5.01, reset=now+3601), now))
+
+    def test_codex_and_grok_use_ten_percent_for_both_windows(self):
+        now = time.time()
+        for provider in ('codex', 'grok'):
+            for primary, secondary in ((10, 60), (60, 10)):
+                with self.subTest(provider=provider, primary=primary, secondary=secondary):
+                    value = snapshot(provider, primary, secondary, now+7200, now+10800)
+                    expected = now+7200 if primary == 10 else now+10800
+                    self.assertEqual(tray_app.usable_again_at(value, now), expected)
+                    with patch.object(tray_app, 'make_provider_icon', return_value='countdown'):
+                        self.assertEqual(tray_app.make_display_icon(value, 'C', {'active_sessions':1, 'display_tps':25}), 'countdown')
+            self.assertIsNone(tray_app.usable_again_at(snapshot(provider, 10.01, 60, now+7200), now))
+
+    def test_gemini_icon_never_switches_to_tps(self):
+        value = snapshot('gemini', 40, None)
+        with patch.object(tray_app, 'make_provider_icon', return_value='quota'):
+            self.assertEqual(tray_app.make_display_icon(value, 'G', {'active_sessions':1, 'display_tps':25}), 'quota')
+
+    def test_stale_countdown_and_live_tps_priority(self):
+        now = time.time()
+        value = snapshot('claude', remaining=1, reset=now+3601)
+        value.stale = True
+        with patch.object(tray_app, 'waiting_icon', return_value='waiting') as icon:
+            self.assertEqual(tray_app.make_provider_icon(value, 'A', now=now), 'waiting')
+            icon.assert_called_once_with(2, 'A', False, True, 'h')
+        with patch.object(tray_app, 'make_tps_icon', return_value='live'):
+            self.assertEqual(tray_app.make_display_icon(value, 'A', {'active_sessions':1, 'display_tps':12}), 'live')
+        self.assertEqual(icon_art.waiting_icon(2, 'A', stale=True, unit='h').tobytes(),
+                         icon_art.waiting_icon(2, 'A', stale=False, unit='h').tobytes())
 
     def test_gemini_recovers_when_any_exhausted_pool_resets(self):
         now = 1000000
@@ -55,6 +101,8 @@ class SplitRingTests(unittest.TestCase):
         value = snapshot('gemini',remaining=0,second=None,pools=pools)
         self.assertEqual(tray_app.usable_again_at(value,now),now+3600)
         pools[1]['remaining_percent'] = 20
+        self.assertIsNone(tray_app.usable_again_at(value,now))
+        pools[1]['remaining_percent'] = None
         self.assertIsNone(tray_app.usable_again_at(value,now))
 
     def test_two_windows_draw_independent_halves_and_encode_ico(self):
@@ -86,6 +134,9 @@ class SplitRingTests(unittest.TestCase):
     def test_waiting_and_live_icons_are_visually_distinct_at_real_sizes(self):
         waiting = icon_art.waiting_icon(120,'C')
         live = icon_art.live_icon(120,'C')
+        self.assertEqual(waiting.getpixel((32, 2)), icon_art.TRACK)
+        self.assertNotEqual(icon_art.waiting_icon(2, 'C', unit='d').tobytes(),
+                            icon_art.waiting_icon(2, 'C', unit='h').tobytes())
         for size in (16,20,24,32):
             a = waiting.resize((size,size),Image.Resampling.LANCZOS)
             b = live.resize((size,size),Image.Resampling.LANCZOS)
@@ -133,6 +184,15 @@ class CreditStateTests(unittest.TestCase):
         self.assertEqual(tray.exhausted_state('codex'),('blocked',(0,)))
         tray.snapshots['codex'].stale = True
         self.assertEqual(tray.exhausted_state('codex'),(None,()))
+
+    def test_threshold_is_not_claimed_as_paid_or_exactly_empty(self):
+        tray = tray_app.QuotaTray.__new__(tray_app.QuotaTray)
+        tray.snapshots = {'codex': snapshot(remaining=5, credits_balance=100)}
+        tray.agents = []
+        tray.performance = {'providers': {}}
+        self.assertEqual(tray.exhausted_state('codex'), ('near', (0,)))
+        tray.agents = [{'provider': 'codex', 'live': True}]
+        self.assertEqual(tray.exhausted_state('codex'), ('near_working', (0,)))
 
     def test_claude_extra_usage_is_explicitly_inferred_from_recent_output(self):
         now = time.time()

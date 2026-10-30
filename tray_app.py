@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import logging.handlers
+import math
 import os
 import subprocess
 import sys
@@ -97,19 +98,39 @@ def icon_windows(snapshot: QuotaSnapshot, letter: str) -> tuple[tuple, tuple | N
     return (snapshot.remaining_percent,), None
 
 
+EXHAUSTED_REMAINING = 5.0  # User treats 95% used as exhausted for display.
+
+
+def exhaustion_threshold(provider: str) -> float:
+    return 10.0 if provider in ("codex", "grok") else EXHAUSTED_REMAINING
+
+
+def quota_exhausted(value: float | None, provider: str = "") -> bool:
+    return value is not None and value <= exhaustion_threshold(provider)
+
+
+def countdown_value(seconds: float) -> tuple[int, str]:
+    """A compact time unit, rounded up so it never suggests an early reset."""
+    if seconds >= 86400:
+        return math.ceil(seconds / 86400), "d"
+    if seconds >= 3600:
+        return math.ceil(seconds / 3600), "h"
+    return max(1, math.ceil(seconds / 60)), "m"
+
+
 def usable_again_at(snapshot: QuotaSnapshot, now: float) -> float | None:
     """When a used-up source can run again: the last reset among its empty
     windows (all must recover), or the first pool to come back for model
     pools. None while it still has quota or the time is unknown."""
     if snapshot.pools and len(snapshot.pools) > 1:
         known = [(p.get("remaining_percent"), p.get("resets_at")) for p in snapshot.pools if p.get("remaining_percent") is not None]
-        if not known or any(value >= 0.5 for value, _ in known):
+        if not known or len(known) != len(snapshot.pools) or any(not quota_exhausted(value, snapshot.provider) for value, _ in known):
             return None
         stamps = [stamp for _, stamp in known if stamp and stamp > now]
         return float(min(stamps)) if stamps else None
     empty = [(value, stamp) for value, stamp in ((snapshot.remaining_percent, snapshot.resets_at),
                                                   (snapshot.secondary_remaining_percent, snapshot.secondary_resets_at))
-             if value is not None and value < 0.5]
+             if quota_exhausted(value, snapshot.provider)]
     if not empty or any(not stamp or stamp <= now for _, stamp in empty):
         return None
     return float(max(stamp for _, stamp in empty))
@@ -118,9 +139,10 @@ def usable_again_at(snapshot: QuotaSnapshot, now: float) -> float | None:
 def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = False, now: float | None = None) -> Image.Image:
     # Icons are cached in icon_art and shared: never draw on them afterwards.
     now = now or time.time()
-    until = None if snapshot.stale else usable_again_at(snapshot, now)
+    until = usable_again_at(snapshot, now)
     if until is not None:
-        return waiting_icon(int(-(-(until - now) // 3600)), letter, bool(reset_hint))
+        amount, unit = countdown_value(until - now)
+        return waiting_icon(amount, letter, bool(reset_hint), bool(snapshot.stale), unit)
     values, colors = icon_windows(snapshot, letter)
     return ring_icon(tuple(_rounded(value) for value in values), letter, bool(snapshot.stale),
                      _rounded(pace_marker(snapshot)), bool(reset_hint), colors)
@@ -131,6 +153,11 @@ def make_tps_icon(performance: dict, letter: str, reset_hint: bool = False) -> I
 
 
 def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, reset_hint: bool = False) -> Image.Image:
+    provider = getattr(snapshot, "provider", None)
+    if provider in ("codex", "grok") and usable_again_at(snapshot, time.time()) is not None:
+        return make_provider_icon(snapshot, letter, reset_hint)
+    if provider == "gemini":
+        return make_provider_icon(snapshot, letter, reset_hint)
     if performance.get("active_sessions", 0) and performance.get("display_tps") is not None:
         return make_tps_icon(performance, letter, reset_hint)
     return make_provider_icon(snapshot, letter, reset_hint)
@@ -309,7 +336,7 @@ def tray_order(snapshots: dict[str, QuotaSnapshot], keys: list[str]) -> list[str
     """Left to right: soonest refresh first; unknown reset next; used-up last."""
     def rank(provider: str):
         remaining, reset = binding_reset(snapshots[provider])
-        exhausted = remaining is not None and remaining < 0.5
+        exhausted = quota_exhausted(remaining, provider)
         group = 2 if exhausted else (0 if reset else 1)
         return group, reset or float("inf"), keys.index(provider)
     return sorted(keys, key=rank)
@@ -412,6 +439,8 @@ class QuotaTray:
             names = "、".join(window_label(minutes[slot]) or "当前" for slot in empty)
             until = usable_again_at(snapshot, now)
             back = f"{reset_distance(until, now)}后恢复" if until else "恢复时间未知"
+            if state in ("near", "near_working"):
+                return f"{names}剩余不超过 {exhaustion_threshold(provider):g}%，按耗尽处理；{back}", "warn"
             if state == "paid":
                 using = "正在用购买的额度" if self.source_working(provider) else "可用购买的额度继续"
                 return f"{names}额度已用完，{using}；{back}", "warn"
@@ -491,10 +520,12 @@ class QuotaTray:
         snapshot = self.snapshots.get(provider)
         if snapshot is None or snapshot.stale or provider == "mimo" or (snapshot.pools and len(snapshot.pools) > 1):
             return None, ()
-        empty = tuple(slot for slot, value in enumerate((snapshot.remaining_percent, snapshot.secondary_remaining_percent))
-                      if value is not None and value < 0.5)
+        values = (snapshot.remaining_percent, snapshot.secondary_remaining_percent)
+        empty = tuple(slot for slot, value in enumerate(values) if quota_exhausted(value, provider))
         if not empty:
             return None, ()
+        if all(values[slot] >= 0.5 for slot in empty):
+            return ("near_working" if self.source_working(provider) else "near"), empty
         if provider == "codex" and snapshot.credits_balance is not None and snapshot.credits_balance > 0:
             return "paid", empty
         if self.source_working(provider):
@@ -513,7 +544,7 @@ class QuotaTray:
         windows = self.quota_windows("codex")
         five = next((w for w in windows if w[3] == 300 and w[1] is not None), None)
         week = next((w for w in windows if w[3] == 10080 and w[1] is not None), None)
-        return bool(five and five[1] <= 0 and week)
+        return bool(five and quota_exhausted(five[1], "codex") and week)
 
     def active_sources(self, now: float) -> dict[str, set[str]]:
         """Sources working now or with real output in the last half hour, and
@@ -630,8 +661,8 @@ class QuotaTray:
                 lines.append(view.error)
         if self.forecast_line(provider):
             lines.append(self.forecast_line(provider))
-        lines += ["", self.performance_line(provider),
-            self.output_rate_line(provider), f"活动会话：{data['active_sessions']}", "",
+        lines += (["", self.performance_line(provider), self.output_rate_line(provider)] if provider != "gemini" else [])
+        lines += [f"活动会话：{data['active_sessions']}", "",
             self.menu_reset(provider), self.menu_countdown(provider), self.menu_updated(provider)]
         if snapshot.error:
             lines.extend(("", "读取状态：" + snapshot.error))
@@ -707,7 +738,7 @@ class QuotaTray:
             tones = [""] * len(quota)
             for slot in empty:
                 if slot < len(quota):
-                    note = paid if state == "paid" else "可能额外额度" if state == "inferred" else "已用完"
+                    note = paid if state == "paid" else "可能额外额度" if state == "inferred" else "接近用尽" if state in ("near", "near_working") else "已用完"
                     quota[slot] = quota[slot][:2] + (note,)
                     tones[slot] = "paid" if state in ("paid", "inferred") else "blocked"
         data = self.performance["providers"].get(provider, {})
@@ -715,8 +746,10 @@ class QuotaTray:
             status, tone = ("购买额度运行" if working or self.source_working(provider) else "可用购买额度"), "paid"
         elif state == "inferred":
             status, tone = "可能使用额外额度", "paid"
-        elif state == "working":
+        elif state in ("working", "near_working"):
             status, tone = "额度模式工作", "live"
+        elif state == "near":
+            status, tone = "接近用尽", "blocked"
         elif state == "blocked":
             status, tone = "等待重置", "blocked"
         elif working:
@@ -743,7 +776,7 @@ class QuotaTray:
             today_used = (snapshot.today_used if snapshot and snapshot.today_date == today
                           else mimo_tracker().view(now).today_used)
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
-                                      status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
+                                      status, tuple(quota), None if provider == "gemini" else data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used,
                                       self.burn_chart(provider, now), alert, intel, intel_note,
                                       quota_tones=tuple(tones))
@@ -770,6 +803,8 @@ class QuotaTray:
         value = performance.get("generation_tps")
         generation = "暂无完整计数" if value is None else f"{value:.1f}"
         hint = f"可能即将全局重置（24h {self.reset_outlook.prob_24}%）\n" if provider == "codex" and self.reset_level() == "high" else ""
+        if provider == "gemini":
+            return f"{quota_line(snapshot)}\n{self.menu_reset(provider)}"[:127]
         return f"{hint}{quota_line(snapshot)}\n最近TPS {generation} · 60秒 {performance['output_tps_60']:.1f} tok/s\n{self.menu_reset(provider)}"[:127]
 
     def build_menu(self, provider: str) -> pystray.Menu:
@@ -826,7 +861,8 @@ class QuotaTray:
         lines = [quota_line(snapshot)] + (pool_lines(snapshot) if snapshot.pools and len(snapshot.pools) > 1 else [])
         for label, item in self.forecasts(provider):
             lines.append(f"预测{f'（{label}）' if label else ''}：{item.text}")
-        lines += ["", self.performance_line(provider), self.output_rate_line(provider), "", self.menu_reset(provider), self.menu_countdown(provider)]
+        lines += (["", self.performance_line(provider), self.output_rate_line(provider)] if provider != "gemini" else [])
+        lines += ["", self.menu_reset(provider), self.menu_countdown(provider)]
         if snapshot.secondary_resets_at:
             lines.append(f"{window_label(snapshot.secondary_window_minutes)}重置：{reset_text(snapshot.secondary_resets_at)}")
         lines += ["", self.menu_updated(provider)]
@@ -856,6 +892,8 @@ class QuotaTray:
     def open_all_performance(self, _icon=None, _item=None) -> None:
         sections = [f"本机合计 · 最近60秒：{self.performance['total_output_tps_60']:.1f} tok/s", ""]
         for provider, data in self.performance["providers"].items():
+            if provider == "gemini":
+                continue
             sections.extend((data["label"], self.performance_line(provider), self.output_rate_line(provider), ""))
         sections.append("检测到的软件：")
         sections.extend(f"{item['name']}：{item['status']}" for item in self.performance.get("software", []))
