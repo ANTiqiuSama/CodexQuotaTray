@@ -390,7 +390,7 @@ class TrayOrderTests(unittest.TestCase):
     def test_fixed_order_ignores_quota_and_exhaustion(self):
         import providers
         self.assertEqual(providers.tray_positions(["codex", "grok", "gemini", "claude", "mimo"]),
-                         ["claude", "codex", "grok", "gemini", "mimo"])
+                         ["claude", "codex", "gemini", "grok", "mimo"])
         self.assertEqual(providers.tray_positions(["mimo", "gemini", "codex"]), ["codex", "gemini", "mimo"])
         tray = QuotaTray.__new__(QuotaTray)
         snapshots = {
@@ -402,9 +402,9 @@ class TrayOrderTests(unittest.TestCase):
         }
         tray.snapshots = snapshots
         with patch.object(tray_app, "PROVIDERS", {key: key[0].upper() for key in snapshots}):
-            self.assertEqual(tray.wanted_order(), ["claude", "codex", "grok", "gemini", "mimo"])
+            self.assertEqual(tray.wanted_order(), ["claude", "codex", "gemini", "grok", "mimo"])
             tray.snapshots = {**snapshots, "claude": self.snap("claude", 90, 50), "grok": self.snap("grok", 90, 10)}
-            self.assertEqual(tray.wanted_order(), ["claude", "codex", "grok", "gemini", "mimo"])
+            self.assertEqual(tray.wanted_order(), ["claude", "codex", "gemini", "grok", "mimo"])
 
     def test_reorder_assigns_providers_to_icons_by_screen_position(self):
         tray = QuotaTray.__new__(QuotaTray)
@@ -427,9 +427,9 @@ class TrayOrderTests(unittest.TestCase):
                 patch.object(tray_app.hover_details, "icon_rect", rect):
             self.assertTrue(tray.maybe_reorder(1000.0))
             # Left to right on screen: slot1, slot0, then the unplaced slot2.
-            self.assertEqual({p: i.name for p, i in tray.icons.items()}, {"codex": "slot1", "grok": "slot0", "gemini": "slot2"})
+            self.assertEqual({p: i.name for p, i in tray.icons.items()}, {"codex": "slot1", "gemini": "slot0", "grok": "slot2"})
             self.assertEqual(slots[1].menu, "menu-codex")
-            self.assertEqual(tray.shown_order, ["codex", "grok", "gemini"])
+            self.assertEqual(tray.shown_order, ["codex", "gemini", "grok"])
             self.assertFalse(tray.maybe_reorder(2000.0))          # already right: nothing changes
             tray.snapshots["codex"] = self.snap("codex", 0, 50)   # used up: position stays
             self.assertFalse(tray.maybe_reorder(3000.0))

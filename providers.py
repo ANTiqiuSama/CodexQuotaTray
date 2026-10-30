@@ -184,7 +184,7 @@ BY_KEY = {spec.key: spec for spec in SPECS}
 
 # Fixed tray positions, left to right (top to bottom on a vertical taskbar).
 # Positions never depend on remaining quota, reset times or exhaustion.
-TRAY_POSITIONS: tuple[str, ...] = ("claude", "codex", "grok", "gemini", "mimo")
+TRAY_POSITIONS: tuple[str, ...] = ("claude", "codex", "gemini", "grok", "mimo")
 
 
 def tray_positions(keys) -> list[str]:
