@@ -19,7 +19,7 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from icon_art import AMBER, CLAY, UNIFORM_LETTERS, accent, ring_color
+from icon_art import AMBER, CLAY, PAID, POOL_BLUES, UNIFORM_LETTERS, WINDOW_SHADES, accent, ring_color
 
 WIDTH = 420
 PAD = 18
@@ -80,11 +80,6 @@ class BurnChart:
     series: tuple[BurnSeries, ...]
 
 
-POOL_BLUES = ((35, 90, 230, 255), (40, 212, 236, 255))    # deep cobalt, sky blue: after the source's own periwinkle
-# Two-window sources get a second shade far from their accent in lightness and
-# hue, so the 5 h and weekly lines (and bars) can be told apart at a glance.
-WINDOW_SHADES = {"C": (accent("C"), (38, 140, 168, 255)),     # sage, deep teal
-                 "A": (accent("A"), (240, 196, 150, 255))}    # clay, light peach
 # Reset notices: a quiet steel blue that sits with the panel's muted palette
 # (the bright blue bar with an amber badge clashed with it).
 RESET_TINT = (150, 178, 214, 255)
@@ -125,13 +120,17 @@ class PanelModel:
     intel: tuple = ()                           # coding IQ on the banner's right: (name, score, tone, running)
     intel_note: str = ""                        # shown there instead when there are no scores (e.g. "未设置")
     chart_padding: float = 0.0                   # static-background copy of wrapped legend space
+    quota_tones: tuple[str, ...] = ()            # per column: "" | "active" (pool in use) | "paid" | "blocked"
+
+    def tone_of(self, slot: int) -> str:
+        return self.quota_tones[slot] if slot < len(self.quota_tones) else ""
 
     @property
     def header(self) -> tuple:
         """Static part of the panel (cached background). Quota figures, bars,
         TPS and the burn chart are drawn per frame; the reset line is cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]),
+                tuple((item[0], item[2] if len(item) > 2 else "", self.tone_of(slot)) for slot, item in enumerate(self.quota[:3])),
                 (self.banner, self.banner_alert, self.intel, self.intel_note),
                 (self.forecast, self.forecast_tone), self.provider == "mimo", chart_extra_for(self))
 
@@ -700,11 +699,15 @@ class Scene:
         columns = meter_columns(len(self.meters) + (model.provider == "mimo"))
         for slot, ((x, end), spring, item) in enumerate(zip(columns, self.meters, model.quota[:3])):
             value = item[1]
-            shade = TEXT if value is None or value >= 50 or model.letter in UNIFORM_LETTERS else ring_color(value, model.letter)
+            paid = model.tone_of(slot) == "paid"     # used up but covered by purchased credits: a full gold bar
+            shade = PAID if paid else TEXT if value is None or value >= 50 or model.letter in UNIFORM_LETTERS else ring_color(value, model.letter)
             shown = None if value is None else spring.value
             blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
                                   shade, shade, scale), at(x), at(meter_top + 38))
-            if shown and shown > 0.3:
+            if paid:
+                draw.rounded_rectangle((round(at(x)), round(at(meter_top + 45)), round(at(end)), round(at(meter_top + 49))),
+                                       radius=max(1, round(2 * scale)), fill=PAID)
+            elif shown and shown > 0.3:
                 fill = quota_shade(model.letter, slot, value, pooled(model))
                 draw.rounded_rectangle((round(at(x)), round(at(meter_top + 45)),
                                         round(at(x + max(4.0, (end - x) * min(100.0, shown) / 100))), round(at(meter_top + 49))),
@@ -1269,6 +1272,7 @@ def _trend(draw, x, cy, s, color, stroke):
 
 
 PILL_TONES = {"stale": ((229, 168, 75, 46), (229, 168, 75, 255)), "error": ((226, 92, 92, 46), (226, 92, 92, 255)),
+              "paid": (PAID[:3] + (46,), PAID), "blocked": ((226, 92, 92, 46), (226, 92, 92, 255)),
               "idle": ((240, 238, 230, 20), SECONDARY_TEXT)}
 
 
@@ -1326,9 +1330,10 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 def _header_model(header: tuple) -> PanelModel:
     letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, chart_padding = header
-    return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (),
+    return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset, _ in meters), None, (),
                       tone, banner, forecast[0], forecast[1], banner_alert=alert,
-                      intel=intel, intel_note=note, chart_padding=chart_padding)
+                      intel=intel, intel_note=note, chart_padding=chart_padding,
+                      quota_tones=tuple(column_tone for _, _, column_tone in meters))
 
 
 @lru_cache(maxsize=8)
@@ -1436,8 +1441,8 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     y = METER_TOP + header_offset(model)
     label_font, small = ui_font(px(11)), ui_font(px(10))
     columns = meter_columns(len(meters) + daily)
-    labels = tuple(meters) + ((("今日用量", "Credits"),) if daily else ()) + (("TPS", ""),)
-    for (x, end), (label, reset) in zip(columns, labels):
+    labels = tuple(meters) + ((("今日用量", "Credits", ""),) if daily else ()) + (("TPS", "", ""),)
+    for (x, end), (label, reset, column_tone) in zip(columns, labels):
         draw.text((px(x), px(y)), label, font=label_font, fill=MUTED_TEXT, anchor="lt")
         if daily and label == "今日用量":
             draw.text((px(x), px(y + 51)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
@@ -1445,7 +1450,9 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
         if label != "TPS":
             draw.rounded_rectangle((px(x), px(y + 45), px(end), px(y + 49)), radius=px(2), fill=TRACK)
             if reset:
-                draw.text((px(x), px(y + 55)), reset, font=small, fill=MUTED_TEXT, anchor="lt")
+                ink = {"active": accent(letter), "paid": PAID, "blocked": CLAY}.get(column_tone, MUTED_TEXT)
+                face = ui_font(px(10), "bold") if column_tone == "active" else small
+                draw.text((px(x), px(y + 55)), reset, font=face, fill=ink, anchor="lt")
     if header_offset(model):
         _banner(draw, px, s, banner, alert, intel, note, letter)
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),

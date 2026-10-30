@@ -47,6 +47,10 @@ CLAY = ROSE                        # legacy name for the danger colour
 # Accents live in the provider registry; letters map to them.
 ACCENTS = {spec.letter: spec.accent for spec in SPECS}
 TILE_TEXT = (31, 30, 28, 255)      # dark numerals on a lit tile
+POOL_BLUES = ((35, 90, 230, 255), (40, 212, 236, 255))
+WINDOW_SHADES = {"C": (ACCENTS["C"], (38, 140, 168, 255)),
+                 "A": (ACCENTS["A"], (240, 196, 150, 255))}
+PAID = (247, 201, 72, 255)
 
 
 def _font_dirs() -> list[Path]:
@@ -210,6 +214,7 @@ def _reset_badge(canvas: Image.Image) -> None:
     ImageDraw.Draw(canvas).ellipse((cx - r, cy - r, cx + r, cy + r), fill=RESET_BLUE)
 
 
+@lru_cache(maxsize=128)
 def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker: float | None = None,
                reset_hint: bool = False) -> Image.Image:
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
@@ -236,6 +241,7 @@ def tps_text(value: float) -> str:
     return f"{value / 1000:.0f}k" if value < 10_000 else "9k+"
 
 
+@lru_cache(maxsize=64)
 def live_icon(tps: float, letter: str, reset_hint: bool = False) -> Image.Image:
     """Same disc, lit in the provider accent, carrying the TPS number."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
@@ -247,6 +253,30 @@ def live_icon(tps: float, letter: str, reset_hint: bool = False) -> Image.Image:
     wide = len(text) >= 3
     face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
     _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), TILE_TEXT)
+    if reset_hint:
+        _reset_badge(canvas)
+    return _finish(canvas)
+
+
+@lru_cache(maxsize=128)
+def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | None = None,
+              reset_hint: bool = False, colors: tuple | None = None) -> Image.Image:
+    """Restore the established single-ring style using the tightest known window."""
+    known = [value for value in values if value is not None]
+    return quota_icon(min(known) if known else None, letter, stale, marker, reset_hint)
+
+
+@lru_cache(maxsize=64)
+def waiting_icon(hours: int, letter: str, reset_hint: bool = False) -> Image.Image:
+    """Old-style dark disc and empty source-coloured ring, with red reset hours."""
+    canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw.ellipse(DISC, fill=INK)
+    _ring(draw, None, MUTED, _mix(INK, accent(letter), .38))
+    text = str(max(1, int(hours)))
+    wide = len(text) >= 3
+    face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
+    _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), CLAY)
     if reset_hint:
         _reset_badge(canvas)
     return _finish(canvas)
