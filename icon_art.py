@@ -295,16 +295,21 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
 
 
 @lru_cache(maxsize=64)
-def waiting_icon(hours: int, letter: str, reset_hint: bool = False) -> Image.Image:
+def waiting_icon(hours: int, letter: str, reset_hint: bool = False, stale: bool = False) -> Image.Image:
     """Old-style dark disc and empty source-coloured ring, with red reset hours."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
-    _ring(draw, None, MUTED, _mix(INK, accent(letter), .38))
+    # Keep the empty outline as large as the original full-bleed disc.  A
+    # slightly thicker stroke remains visible at 16-pixel tray size.  Use the
+    # original empty-ring track rather than a full provider-coloured arc.
+    draw.ellipse(DISC, outline=TRACK, width=34)
     text = str(max(1, int(hours)))
     wide = len(text) >= 3
     face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
     _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), CLAY)
+    if stale:
+        _stale_badge(canvas)
     if reset_hint:
         _reset_badge(canvas)
     return _finish(canvas)
