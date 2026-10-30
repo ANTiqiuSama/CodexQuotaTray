@@ -792,6 +792,13 @@ class QuotaTray:
             placed.sort(key=lambda item: (item[0][axis], item[1]))
         return [slot for _, _, slot in placed] + [slot for _, _, slot in unplaced]
 
+    def ensure_icons_registered(self) -> None:
+        with self.ui_lock:
+            for index, slot in enumerate(getattr(self, "slots", ())):
+                ensure = getattr(slot, "ensure_registered", None)
+                if ensure is not None and ensure():
+                    log.warning("tray icon %d was missing from the notification area; added again", index)
+
     def maybe_reorder(self, now: float, force: bool = False) -> bool:
         """Show providers in wanted_order() by assigning them to the existing
         tray icons by on-screen position.  Icons are never deleted or re-added:
@@ -943,6 +950,7 @@ class QuotaTray:
                     self.update_claude_locally(now)
                 if now - getattr(self, "order_checked_at", 0.0) >= 30:
                     self.order_checked_at = now
+                    self.ensure_icons_registered()
                     self.maybe_reorder(now)   # resets pass between refreshes
                 for provider, letter in PROVIDERS.items():
                     if self.icons[provider].visible:

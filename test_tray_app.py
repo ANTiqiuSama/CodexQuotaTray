@@ -162,6 +162,25 @@ class HoverTests(unittest.TestCase):
         self.assertEqual(args[1].uVersion, 4)
         icon._hwnd = None
 
+    def test_icon_the_shell_dropped_is_added_again(self):
+        icon = HoverIcon("hover-reregister-test", Image.new("RGBA", (16, 16)))
+        icon._hwnd = 123
+        with patch.object(HoverIcon, "visible", True), patch.object(icon, "_show") as show, \
+                patch.object(icon, "_message", return_value=True):
+            self.assertFalse(icon.ensure_registered())   # NIM_MODIFY succeeds: still in the tray
+            show.assert_not_called()
+        with patch.object(HoverIcon, "visible", True), patch.object(icon, "_show") as show, \
+                patch.object(icon, "_message", return_value=False):
+            self.assertTrue(icon.ensure_registered())
+            show.assert_called_once()
+        icon._hwnd = None
+        tray = QuotaTray.__new__(QuotaTray)
+        tray.slots = [Mock(ensure_registered=Mock(return_value=False)), Mock(ensure_registered=Mock(return_value=True))]
+        with self.assertLogs(tray_app.log, "WARNING"):
+            tray.ensure_icons_registered()
+        for slot in tray.slots:
+            slot.ensure_registered.assert_called_once()
+
     def test_unchanged_pixels_do_not_rebuild_native_icons(self):
         tray = QuotaTray.__new__(QuotaTray)
         image = Image.new("RGBA", (64, 64), "green")
