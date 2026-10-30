@@ -387,16 +387,24 @@ class TrayOrderTests(unittest.TestCase):
                              1.0, False, None, 10080 if second is not None else None,
                              None if second is None else 100 - second, second, second_reset)
 
-    def test_soonest_refresh_first_unknown_next_exhausted_last(self):
-        import tray_app
+    def test_fixed_order_ignores_quota_and_exhaustion(self):
+        import providers
+        self.assertEqual(providers.tray_positions(["codex", "grok", "gemini", "claude", "mimo"]),
+                         ["claude", "codex", "gemini", "grok", "mimo"])
+        self.assertEqual(providers.tray_positions(["mimo", "gemini", "codex"]), ["codex", "gemini", "mimo"])
+        tray = QuotaTray.__new__(QuotaTray)
         snapshots = {
-            "codex": self.snap("codex", 80, 5000, second=40, second_reset=9000),   # weekly window binds
+            "codex": self.snap("codex", 80, 5000, second=40, second_reset=9000),
             "grok": self.snap("grok", 0, 1000),                                     # used up
             "gemini": self.snap("gemini", 50, 3000),
-            "claude": self.snap("claude", None, None),
-            "mimo": self.snap("mimo", 60, 99999, second=5, second_reset=2000),      # daily budget is not a refresh
+            "claude": self.snap("claude", 0, 100),                                  # used up
+            "mimo": self.snap("mimo", 60, 99999, second=5, second_reset=2000),
         }
-        self.assertEqual(tray_app.tray_order(snapshots, list(snapshots)), ["gemini", "codex", "mimo", "claude", "grok"])
+        tray.snapshots = snapshots
+        with patch.object(tray_app, "PROVIDERS", {key: key[0].upper() for key in snapshots}):
+            self.assertEqual(tray.wanted_order(), ["claude", "codex", "gemini", "grok", "mimo"])
+            tray.snapshots = {**snapshots, "claude": self.snap("claude", 90, 50), "grok": self.snap("grok", 90, 10)}
+            self.assertEqual(tray.wanted_order(), ["claude", "codex", "gemini", "grok", "mimo"])
 
     def test_reorder_assigns_providers_to_icons_by_screen_position(self):
         tray = QuotaTray.__new__(QuotaTray)
@@ -416,21 +424,22 @@ class TrayOrderTests(unittest.TestCase):
                           "gemini": self.snap("gemini", 50, 300)}
         rect = lambda icon: None if icon.left is None else (icon.left, 0, icon.left + 24, 24)
         with patch.object(tray_app, "PROVIDERS", {"codex": "C", "grok": "G", "gemini": "M"}), \
-                patch.object(tray_app, "TRAY_ORDER_MODE", "auto"), patch.object(tray_app.hover_details, "icon_rect", rect):
+                patch.object(tray_app.hover_details, "icon_rect", rect):
             self.assertTrue(tray.maybe_reorder(1000.0))
             # Left to right on screen: slot1, slot0, then the unplaced slot2.
-            self.assertEqual({p: i.name for p, i in tray.icons.items()}, {"gemini": "slot1", "codex": "slot0", "grok": "slot2"})
-            self.assertEqual(slots[1].menu, "menu-gemini")
-            self.assertEqual(tray.shown_order, ["gemini", "codex", "grok"])
+            self.assertEqual({p: i.name for p, i in tray.icons.items()}, {"codex": "slot1", "gemini": "slot0", "grok": "slot2"})
+            self.assertEqual(slots[1].menu, "menu-codex")
+            self.assertEqual(tray.shown_order, ["codex", "gemini", "grok"])
             self.assertFalse(tray.maybe_reorder(2000.0))          # already right: nothing changes
-            tray.snapshots["codex"] = self.snap("codex", 50, 50)
-            self.assertFalse(tray.maybe_reorder(1010.0))          # too soon after the last change
-            slots[0].hover_open = True
-            self.assertFalse(tray.maybe_reorder(3000.0))          # pointer is on an icon
-            slots[0].hover_open = False
-            self.assertTrue(tray.maybe_reorder(3000.0))
+            tray.snapshots["codex"] = self.snap("codex", 0, 50)   # used up: position stays
+            self.assertFalse(tray.maybe_reorder(3000.0))
             self.assertEqual(tray.icons["codex"].name, "slot1")
             slots[0].left, slots[1].left = 100, 200               # user dragged the icons
+            tray.reordered_at = 3000.0
+            self.assertFalse(tray.maybe_reorder(3010.0))          # too soon after the last change
+            slots[0].hover_open = True
+            self.assertFalse(tray.maybe_reorder(4000.0))          # pointer is on an icon
+            slots[0].hover_open = False
             self.assertTrue(tray.maybe_reorder(4000.0))
             self.assertEqual(tray.icons["codex"].name, "slot0")
 
@@ -493,13 +502,16 @@ class AgentPanelTests(unittest.TestCase):
         now = time.time()
         reset = int(now+3*3600)
         history = QuotaHistory(Path(self.folder.name) / 'recent-axis.json')
-        for age, used in ((86400,1),(7200,10),(3600,11),(0,12)):
+        for age, used in ((86400,1),(2400,10),(1200,11),(0,12)):
             history.add('codex',now-age,used,reset)
         self.tray.history = history
         self.tray.snapshots['codex'] = QuotaSnapshot('codex','Codex',300,12,88,reset,now,False,None)
         chart = self.tray.burn_chart('codex',now)
-        self.assertGreaterEqual(chart.start,now-7200.1)
-        self.assertLessEqual(chart.end,now+4320.1)
+        times = [t for t, _ in chart.series[0].points]
+        self.assertAlmostEqual(min(times), now - 1200, delta=0.1)          # 20 minutes stays
+        self.assertGreaterEqual(min(times), now - 30 * 60 - 0.1)           # 40 minutes and older are dropped
+        self.assertGreaterEqual(chart.start, now - 30 * 60 - 0.1)
+        self.assertLessEqual(chart.end, now + 0.6 * 30 * 60 + 1)           # projection stays scaled to that span
         self.assertEqual(chart.series[0].points[-1][1],88)
 
     def test_exhausted_codex_switches_to_weekly_only_while_working(self):
@@ -771,6 +783,23 @@ class AgentPanelTests(unittest.TestCase):
         self.assertEqual((model.quota[2][0][-1], model.quota[2][2]), ("天", "Gemini"))
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
+
+    def test_codex_at_zero_shows_its_purchased_credits_instead_of_zero_percent(self):
+        now = time.time()
+        codex = tray_app.QuotaSnapshot("codex", "Codex", 300, 100.0, 0.0, int(now + 3600), now, False, None,
+                                       10080, 40.0, 60.0, int(now + 86400), credits_balance=59773.36)
+        self.tray.snapshots["codex"] = codex
+        model = self.tray.panel("codex")
+        self.assertEqual(model.figure_of(0), ("59.8", "K"))
+        self.assertEqual((model.quota[0][2], model.tone_of(0)), ("购买额度", "paid"))
+        self.assertIsNone(model.figure_of(1))                      # the weekly window keeps its %
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0)
+        self.assertIsNotNone(scene.render(1.25))
+        codex.credits_balance = float("inf")
+        self.assertEqual(self.tray.panel("codex").figure_of(0), ("∞", ""))
+        codex.credits_balance = 0                                  # nothing to spend: waiting shows 0 %
+        self.assertIsNone(self.tray.panel("codex").figure_of(0))
 
     def test_quota_columns_are_titled_by_the_time_left_until_reset(self):
         distance = tray_app.reset_distance

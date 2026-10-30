@@ -177,10 +177,21 @@ SPECS: tuple[ProviderSpec, ...] = (
         "mimo", "M", "Xiaomi MiMo", None, (255, 112, 30, 255), 20 * 60, 5 * 60, 30,
         ("url", lambda: "https://platform.xiaomimimo.com/console/plan-manage"),
         default=False, detect=_mimo_used,
-        source_note="MiMo 控制台套餐用量（登录后只读）+ 本机 Codex / Claude Code / MiMo Code 记录折算 Credits",
+        source_note="MiMo 控制台套餐用量（登录后只读）+ 本机 Codex / Claude Code / MiMo Code 记录折算用量",
     ),
 )
 BY_KEY = {spec.key: spec for spec in SPECS}
+
+# Fixed tray positions, left to right (top to bottom on a vertical taskbar).
+# Positions never depend on remaining quota, reset times or exhaustion.
+TRAY_POSITIONS: tuple[str, ...] = ("claude", "codex", "gemini", "grok", "mimo")
+
+
+def tray_positions(keys) -> list[str]:
+    """Shown providers in their fixed tray order; unknown keys go last."""
+    keys = list(keys)
+    rank = {key: index for index, key in enumerate(TRAY_POSITIONS)}
+    return sorted(keys, key=lambda key: (rank.get(key, len(rank)), keys.index(key)))
 
 
 def get(key: str) -> ProviderSpec:

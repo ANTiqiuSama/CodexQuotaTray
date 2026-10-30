@@ -11,6 +11,7 @@ from pathlib import Path
 
 import agent_panel
 import agent_tasks
+import icon_art
 from agent_tasks import AgentGroups, AgentNotes, Cluster, Summarizer, clean, describe, tool_action
 from tps_sources import TpsMonitor
 
@@ -669,6 +670,14 @@ class SteadyBubbleTests(unittest.TestCase):
         lightness = [colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))[1] for color in pools]
         self.assertGreater(lightness[0] - lightness[1], 0.2)               # Argon vs Claude/GPT: light vs dark
         self.assertEqual(shade("G", 0, 40.0, True), agent_panel.accent("G"))
+        # The sources' signature colours: Claude clay + light peach, GPT sage +
+        # deep teal, Gemini's Claude/GPT pool cobalt. Do not trade them away.
+        self.assertEqual(shade("A", 0, 60.0, True), agent_panel.accent("A"))
+        self.assertEqual(shade("A", 1, 60.0, True), (240, 196, 150, 255))
+        self.assertEqual(shade("C", 0, 60.0, True), agent_panel.accent("C"))
+        self.assertEqual(shade("C", 1, 60.0, True), (38, 140, 168, 255))
+        self.assertEqual(shade("G", 1, 40.0, True), (35, 90, 230, 255))
+        self.assertEqual(icon_art.WINDOW_SHADES["A"][0], icon_art.accent("A"))
         self.assertEqual(shade("C", 1, 11.0, False), agent_panel.ring_color(11.0, "C"))   # low Codex window: red, like its bar
         model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),
                                        0.0, (), "live")
@@ -677,6 +686,55 @@ class SteadyBubbleTests(unittest.TestCase):
         codex = [shade("C", slot, 60.0, True) for slot in range(2)]
         self.assertEqual(codex[0], agent_panel.accent("C"))
         self.assertGreater(sum(abs(x - y) for x, y in zip(codex[0][:3], codex[1][:3])), 120, codex)
+
+    def test_line_ends_are_the_source_glyph_in_the_line_colour(self):
+        self.assertEqual([agent_panel.line_end_sides(letter) for letter in "ACXGM"], [0, 6, 5, 4, 3])
+        self.assertEqual(agent_panel.line_end_sides(""), 0)
+        self.assertEqual(agent_panel.LINE_END_BODY, 3)       # the old endpoint dot was px(3)
+        self.assertEqual(agent_panel.LINE_END_HALO, 1.5)
+        colors = {"A": (220, 48, 48, 255), "C": (36, 170, 96, 255), "X": (232, 196, 64, 255),
+                  "M": (240, 120, 32, 255)}
+        # One chart per line. The cap is the old dot's size; its shape still has to read.
+        # Gemini's three pool colours each end in a square.
+        specs = [("A", colors["A"]), ("C", colors["C"]), ("X", colors["X"]),
+                 ("G", (164, 176, 245, 255)), ("G", (36, 78, 156, 255)), ("G", (40, 212, 236, 255)),
+                 ("M", colors["M"])]
+        scale = 4.0
+        for letter, color in specs:
+            series = agent_panel.BurnSeries(letter, 0, ((0.0, 60.0), (90.0, 60.0)), None, None, letter)
+            chart = agent_panel.BurnChart(0.0, 160.0, 90.0, (series,))
+            sprite = agent_panel.burn_sprite(chart, (color,), scale)
+            pixels = sprite.load()
+            extra = agent_panel.chart_extra(chart)
+            left, right = 34.0, agent_panel.CHART_WIDTH - 10
+            top = agent_panel.CHART_LABEL + extra + 4
+            bottom = agent_panel.CHART_H + extra - 6
+            axis = agent_panel.burn_scale([[60.0]])
+            cx = (left + (right - left) * 90.0 / 160.0) * scale
+            cy = (top + (bottom - top) * axis.position(60.0)) * scale
+            sides = agent_panel.line_end_sides(letter)
+            radius = agent_panel.line_end_radius(sides, agent_panel.LINE_END_BODY * scale)
+
+            def inside(x, y, color=color, pixels=pixels, sprite=sprite):
+                if not (0 <= x < sprite.width and 0 <= y < sprite.height):
+                    return False
+                pixel = pixels[x, y]
+                return pixel[3] > 210 and sum(abs(a - b) for a, b in zip(pixel[:3], color[:3])) < 42
+
+            self.assertTrue(inside(round(cx), round(cy)), letter)
+            # A vertex is filled with the line colour. Just past it is not, except
+            # where the stroke itself arrives from the west.
+            for turn in range(max(sides, 1)):
+                angle = agent_panel.line_end_rotation(sides) + (0 if sides < 3 else turn * 2 * math.pi / sides)
+                reach = agent_panel.line_end_boundary(sides, radius, angle)
+                self.assertTrue(inside(round(cx + 0.62 * reach * math.cos(angle)),
+                                       round(cy + 0.62 * reach * math.sin(angle))), (letter, turn))
+                west = (angle - math.pi + math.pi) % (2 * math.pi) - math.pi
+                if abs(west) < math.radians(14):
+                    continue
+                self.assertFalse(inside(round(cx + (reach + 3.2 * scale) * math.cos(angle)),
+                                        round(cy + (reach + 3.2 * scale) * math.sin(angle))),
+                                 (letter, "outside", turn))
 
     def test_chart_draws_in_on_opening_then_rests(self):
         chart = agent_panel.BurnChart(0, 5 * 3600, 3600, (agent_panel.BurnSeries("5 小时", 0, ((0, 100), (3600, 60)), 40.0, 5 * 3600),))
@@ -906,6 +964,99 @@ class HerdrAndHelperTests(unittest.TestCase):
         self.assertEqual([("conv", "p2", 55.0)], [(a["key"], a.get("pane"), a["tps"]) for a in agents])
         self.assertEqual(0, herdr.working("gemini", {"conv"}))
         self.assertEqual(1, herdr.working("gemini", set()))
+
+
+class GrokIqColumnTests(unittest.TestCase):
+    CSV = ("model,long_agentic,reasoning,coding,browser,data_analysis,research,design\n"
+           "grok-4.6,28.0,91.2,89.1,49.4,75.3,84.5,79.8\n"
+           "grok-4.7,46.1,82.7,84.5,49.3,76.9,86.4,78.0\n"
+           "claude-fable-5.1,80.0,90.0,88.0,70.0,85.0,90.0,86.0\n")
+    CATEGORIES = {"Long Agentic": ["long_agentic"], "Reasoning": ["reasoning"], "Coding": ["coding"],
+                  "Browser": ["browser"], "Data Analysis": ["data_analysis"], "Research": ["research"],
+                  "Design": ["design"], "_overall_weights": {"Long Agentic": 2.0, "Coding": 1.5, "Design": 1.5}}
+    HTML = '<script src="./static/js/main.abc123.js"></script>'
+    SCRIPT = 'before Yt=["20261014","20261025"] after'
+
+    def fetch(self, pages):
+        def get(url):
+            self.assertIn(url, pages)
+            return pages[url]
+        return get
+
+    def test_livebench_overall_for_grok_4_7_is_the_published_70_point_1(self):
+        import grok_iq
+        row = grok_iq.parse_row(self.CSV)
+        self.assertEqual(grok_iq.score_text(grok_iq.overall(row, self.CATEGORIES)), "70.1")
+        self.assertIsNone(grok_iq.parse_row(self.CSV, "grok-4"))
+        self.assertEqual(grok_iq.latest_release(self.SCRIPT), "20261025")
+        self.assertIsNone(grok_iq.latest_release("Yt=[]"))
+        pages = {"https://livebench.ai/": self.HTML,
+                 "https://livebench.ai/static/js/main.abc123.js": self.SCRIPT,
+                 "https://livebench.ai/data/20261025/table.csv": self.CSV,
+                 "https://livebench.ai/data/20261025/categories.json": json.dumps(self.CATEGORIES)}
+        state = grok_iq.read(grok_iq.GrokIq(), 1000.0, self.fetch(pages))
+        best = grok_iq.overall(grok_iq.parse_row(self.CSV, "claude-fable-5.1"), self.CATEGORIES)
+        self.assertEqual(grok_iq.leader(self.CSV, self.CATEGORIES), ("claude-fable-5.1", best))
+        # The smartest model is the 100 % mark; the caption names both models.
+        self.assertEqual(grok_iq.column(state), ("智商", f"{100 * state.score / best:.0f}", "Grok 4.7/Fable 5.1", "%"))
+        self.assertEqual(grok_iq.column(None), ("智商", "—", "Grok 4.7", ""))
+        self.assertEqual(state.release, "20261025")
+        self.assertEqual(state.error, "")
+        # A cache from before the comparison is read again to learn the leader.
+        stale = grok_iq.GrokIq(score=state.score, release=state.release, script=state.script, attempted_at=1490.0)
+        self.assertTrue(grok_iq.due(stale, 1500.0))
+        self.assertFalse(grok_iq.due(state, 1500.0))
+        self.assertEqual(grok_iq.read(stale, 1500.0, self.fetch(pages)).top_model, "claude-fable-5.1")
+        # The same bundle is not downloaded again; a failed refresh keeps 70.1.
+        state = grok_iq.read(state, 2000.0, self.fetch({"https://livebench.ai/": self.HTML}))
+        self.assertEqual(round(state.score, 1), 70.1)
+
+        def down(_url):
+            raise OSError("down")
+
+        broken = grok_iq.read(state, 3000.0, down)
+        self.assertEqual(grok_iq.score_text(broken.score), "70.1")
+        self.assertIn("OSError", broken.error)
+
+    def test_grok_spare_column_shows_the_score_and_leaves_tps_on_the_right(self):
+        from PIL import Image, ImageChops, ImageDraw
+        grok = agent_panel.PanelModel("grok", "X", "Grok", "空闲", (("每周", 75, ""),), 12, (),
+                                      column_iq=("智商", "82", "Grok 4.7/Fable 5.1", "%"))
+        self.assertEqual(grok.header[-2], ("智商", "82", "Grok 4.7/Fable 5.1", "%"))
+        self.assertTrue(grok.header[-1])
+        codex = agent_panel.PanelModel("codex", "C", "Codex", "空闲", (("5小时", 40, ""), ("每周", 80, "")), 3, ())
+        gemini = agent_panel.PanelModel("gemini", "G", "Gemini", "空闲",
+                                        (("Argon", 30), ("Claude/GPT", 40), ("Gemini", 50)), None, ())
+        mimo = agent_panel.PanelModel("mimo", "M", "MiMo", "空闲", (("套餐额度", 90, ""),), 4, (), today_used=10)
+        self.assertEqual(codex.header[-2], ())
+        self.assertTrue(codex.header[-1])
+        self.assertEqual(gemini.header[-2], ())
+        self.assertFalse(gemini.header[-1])
+        self.assertEqual(mimo.header[-2], ())
+        spare = agent_panel.spare_slot(1, True)
+        columns = agent_panel.meter_columns(1)
+        self.assertIsNotNone(spare)
+        self.assertLess(columns[0][0], spare[0])
+        self.assertLess(spare[0], columns[-1][0])
+        self.assertIsNone(agent_panel.spare_slot(2, True))
+        self.assertEqual(columns[-1], agent_panel.meter_columns(2)[-1])
+        from dataclasses import replace
+        shown = agent_panel.background(grok.header, 120, 1)
+        plain = agent_panel.background(replace(grok, column_iq=()).header, 120, 1)
+        self.assertEqual(shown.size, plain.size)
+        span = (agent_panel.WIDTH - 2 * agent_panel.PAD) / 3
+        left = round(agent_panel.MARGIN + agent_panel.PAD + span)
+        right = round(agent_panel.MARGIN + agent_panel.PAD + 2 * span)
+        self.assertIsNone(ImageChops.difference(shown.crop((0, 0, left - 2, shown.height)),
+                                                plain.crop((0, 0, left - 2, plain.height))).getbbox())
+        self.assertIsNone(ImageChops.difference(shown.crop((right + 2, 0, shown.width, shown.height)),
+                                                plain.crop((right + 2, 0, plain.width, plain.height))).getbbox())
+        self.assertIsNotNone(ImageChops.difference(shown.crop((left, 0, right, shown.height)),
+                                                   plain.crop((left, 0, right, plain.height))).getbbox())
+        number, _ = agent_panel.figure("82", "%", agent_panel.TEXT, agent_panel.TEXT, 1)
+        self.assertLess(number.width, span)
+        caption = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textlength("Grok 4.7/Fable 5.1", font=agent_panel.ui_font(10))
+        self.assertLess(caption, span - 16)
 
 
 if __name__ == "__main__":

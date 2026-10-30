@@ -354,8 +354,8 @@ class SettingsWindow:
         manual.columnconfigure(1, weight=1)
         self.label(manual, "方式二：手动填写套餐（不登录 / 免费额度 / 登录失败时）", 11, weight="bold").grid(row=0, column=0, columnspan=3, sticky="w")
         self.mimo_fields = {name: tk.StringVar() for name in ("total", "end", "used", "name")}
-        for index, (name, title, hint) in enumerate((("total", "套餐总 Credits", "例如 49.2B、492亿"), ("end", "到期日期", "YYYY-MM-DD"),
-                                                     ("used", "已用 Credits（可选）", "填写控制台当前已用"), ("name", "套餐名（可选）", "例如 Max 年付")), 1):
+        for index, (name, title, hint) in enumerate((("total", "套餐总量", "例如 49.2B、492亿"), ("end", "到期日期", "YYYY-MM-DD"),
+                                                     ("used", "已用量（可选）", "填写控制台当前已用"), ("name", "套餐名（可选）", "例如 Max 年付")), 1):
             self.label(manual, title, 10, view.INK_2).grid(row=index, column=0, sticky="w", pady=S(5), padx=(0, S(16)))
             self.entry(manual, self.mimo_fields[name]).grid(row=index, column=1, sticky="ew", pady=S(5), ipady=S(4))
             self.label(manual, hint, 9, view.INK_3).grid(row=index, column=2, sticky="w", padx=(S(12), 0))
@@ -496,7 +496,7 @@ class SettingsWindow:
         total, used = info.get("total"), info.get("used")
         parts = []
         if total:
-            parts.append(f"套餐 {info.get('plan') or ''} 共 {total / 1e9:.2f}B Credits" + (f"，已用 {used / 1e9:.2f}B" if used is not None else ""))
+            parts.append(f"套餐 {info.get('plan') or ''} 共 {total / 1e9:.2f}B" + (f"，已用 {used / 1e9:.2f}B" if used is not None else ""))
         parts.append("MiMo 来源：" + ("已开启" if info.get("enabled") else "已关闭（在“额度来源”中开启后显示 M 图标）"))
         if not info.get("browser"):
             parts.append("未找到 Edge/Chrome：登录需要其中之一，或设置 CODEX_QUOTA_MIMO_BROWSER 指向浏览器")
@@ -532,12 +532,9 @@ class SettingsWindow:
         tk, S = self.tk, self.S
         self.heading(page, "任务与 herdr", "任务气泡来自本机 agent 记录；使用 herdr 时，同一窗格的会话合并为一个气泡。")
         self.vars["herdr"] = tk.BooleanVar(value=True)
-        self.vars["order"] = tk.BooleanVar(value=True)
         self.herdr_row = self.row(page, "herdr 适配", "", self.vars["herdr"])
-        self.herdr_row.pack(fill="x", pady=(0, S(8)))
+        self.herdr_row.pack(fill="x", pady=(0, S(14)))
         self.herdr_detail = self.herdr_row.winfo_children()[0].winfo_children()
-        self.row(page, "图标自动排序", "恢复时间近的图标排在左侧，用完的排在最后；关闭后按固定顺序显示。",
-                 self.vars["order"]).pack(fill="x", pady=(0, S(14)))
         self.agent_holder = tk.Frame(page, bg=view.BG)
         self.agent_holder.pack(fill="x")
 
@@ -739,9 +736,6 @@ class SettingsWindow:
             self.mimo_fields[name].set(f"{value / 1e9:g}B" if name in ("total", "used") and isinstance(value, (int, float)) else str(value or ""))
         herdr = getattr(getattr(self.app, "tps_monitor", None), "herdr", None)
         self.vars["herdr"].set(bool(herdr.enabled) if herdr is not None else True)
-        import sys
-        order = getattr(sys.modules.get("tray_app") or sys.modules.get("__main__"), "TRAY_ORDER_MODE", "auto")
-        self.vars["order"].set(order != "fixed")
         if hasattr(self.app, "model_iq_status"):
             info = self.app.model_iq_status()
             self.iq_key.set(info["key"])
@@ -758,7 +752,7 @@ class SettingsWindow:
                 self.app.toggle_startup()
             if hasattr(self.app, "save_model_iq"):
                 self.app.save_model_iq(self.iq_key.get(), list(self.iq_selected) or None)
-            prefs = {"herdr": bool(self.vars["herdr"].get()), "tray_order": "auto" if self.vars["order"].get() else "fixed"}
+            prefs = {"herdr": bool(self.vars["herdr"].get())}
             if hasattr(self.app, "save_preferences"):
                 self.app.save_preferences(prefs)
             self.status.set("✓ 设置已保存并生效")

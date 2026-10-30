@@ -42,6 +42,7 @@ import hover_details
 import mimo_usage
 import providers as provider_registry
 import model_iq
+import grok_iq
 import reset_watch
 from refresh_scheduler import RefreshScheduler
 from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
@@ -79,11 +80,19 @@ def _rounded(value, digits=1):
 
 def icon_windows(snapshot: QuotaSnapshot, letter: str) -> tuple[tuple, tuple | None]:
     """(values, colours) of the ring: left half the short window, right half
-    the long one. Model pools show their two tightest pools in panel order,
-    each in the colour of its panel column."""
+    the long one. Model pools (Gemini) show every pool in panel order, each in
+    the colour of its panel column: three pools split the ring into equal
+    120-degree thirds (Argon top-left, Claude/GPT bottom, Gemini top-right),
+    two pools into halves."""
     if snapshot.provider == "mimo":
         return (snapshot.display_remaining,), None
     pools = snapshot.pools or []
+    if len(pools) >= 3:
+        shown = list(enumerate(pools[:3]))
+        if all(pool.get("remaining_percent") is None for _, pool in shown):
+            return (None,), None
+        values = tuple(pool.get("remaining_percent") for _, pool in shown)
+        return values, tuple(agent_panel.quota_shade(letter, index, value, True) for index, value in enumerate(values))
     if len(pools) > 1:
         known = [(index, pool) for index, pool in enumerate(pools[:3]) if pool.get("remaining_percent") is not None]
         tight = sorted(sorted(known, key=lambda item: item[1]["remaining_percent"])[:2], key=lambda item: item[0])
@@ -282,9 +291,8 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
     return f"{snapshot.label}: {status}{stale}"
 
 
-# Tray order: soonest quota refresh first, exhausted quotas last.
-# CODEX_QUOTA_TRAY_ORDER: "auto" (default) or "fixed" (registry order).
-TRAY_ORDER_MODE = (os.environ.get("CODEX_QUOTA_TRAY_ORDER") or "auto").strip().lower()
+# Tray order is fixed (providers.TRAY_POSITIONS): Claude Code, Codex (GPT),
+# Grok, Gemini, MiMo.  It never changes with remaining quota or exhaustion.
 REORDER_MIN_SECONDS = 60
 PREFERENCES_PATH = DATA_DIR / "settings.json"
 
@@ -298,19 +306,10 @@ def load_preferences() -> dict:
 RESET_PATH = DATA_DIR / "codex_reset.json"
 IQ_STATE_PATH = DATA_DIR / "model_iq.json"
 IQ_CONFIG_PATH = DATA_DIR / "model_iq_config.json"     # AI Stupid Level key + chosen models
+GROK_IQ_PATH = DATA_DIR / "grok_iq.json"               # LiveBench overall for the Grok column
 # Providers whose quota resets raise a Windows notification.
 RESET_NOTIFY = {part.strip().lower() for part in (os.environ.get("CODEX_QUOTA_RESET_NOTIFY") or "codex,grok,claude").split(",") if part.strip()}
 RESET_NOTIFY_MIN_GAIN = 10.0     # percentage points regained before it counts as a reset
-
-
-def binding_reset(snapshot: QuotaSnapshot) -> tuple[float | None, float | None]:
-    """(remaining %, reset time) of the window that limits use.  MiMo counts
-    its yearly pool; the daily budget is advice, not a quota refresh."""
-    if snapshot.provider == "mimo" or snapshot.secondary_remaining_percent is None:
-        return snapshot.remaining_percent, snapshot.resets_at
-    if snapshot.remaining_percent is None or snapshot.secondary_remaining_percent <= snapshot.remaining_percent:
-        return snapshot.secondary_remaining_percent, snapshot.secondary_resets_at
-    return snapshot.remaining_percent, snapshot.resets_at
 
 
 def reset_changes(old: QuotaSnapshot | None, new: QuotaSnapshot | None, now: float) -> list[str]:
@@ -330,16 +329,6 @@ def reset_changes(old: QuotaSnapshot | None, new: QuotaSnapshot | None, now: flo
         early = bool(old_reset) and now < old_reset - 300
         lines.append(f"{window_label(minutes) or '额度'}窗口：{before:.0f}% → {after:.0f}%" + ("（提前重置）" if early else ""))
     return lines
-
-
-def tray_order(snapshots: dict[str, QuotaSnapshot], keys: list[str]) -> list[str]:
-    """Left to right: soonest refresh first; unknown reset next; used-up last."""
-    def rank(provider: str):
-        remaining, reset = binding_reset(snapshots[provider])
-        exhausted = quota_exhausted(remaining, provider)
-        group = 2 if exhausted else (0 if reset else 1)
-        return group, reset or float("inf"), keys.index(provider)
-    return sorted(keys, key=rank)
 
 
 def startup_command() -> str:
@@ -393,6 +382,7 @@ class QuotaTray:
         self.reset_outlook = reset_watch.load(RESET_PATH) if reset_watch.ENABLED else None
         self.iq_state = model_iq.load_state(IQ_STATE_PATH)
         self.iq_config = model_iq.load_config(IQ_CONFIG_PATH)
+        self.grok_iq = grok_iq.load_state(GROK_IQ_PATH)
         self.iq_lock = threading.Lock()
         self.iq_wake = threading.Event()
         # Cached figures may use a different alert threshold.  Notify once
@@ -488,7 +478,7 @@ class QuotaTray:
         text, _ = self.headline_forecast(provider)
         return f"预测：{text}" if text else ""
 
-    CHART_VIEW_MAX = 2 * 3600        # Focus on recent work; long quota windows must not squeeze it to the edge.
+    CHART_VIEW_MAX = 30 * 60         # The solid line is only the last 30 minutes.
     CHART_POINTS = 160
     CHART_RECENT_SECONDS = 30 * 60  # keep completed work visible long enough to inspect its trend
     CHART_MIN_SPAN = 120.0          # only a lone fresh reading leaves the axis this narrow
@@ -656,7 +646,7 @@ class QuotaTray:
         if provider == "mimo":
             view = mimo_tracker().view()
             lines.append(f"已用 {mimo_usage.credits_text(view.used)} / 共 {mimo_usage.credits_text(view.total)}"
-                         f" · 剩余 {mimo_usage.credits_text(view.remaining)} Credits")
+                         f" · 剩余 {mimo_usage.credits_text(view.remaining)}")
             if view.error:
                 lines.append(view.error)
         if self.forecast_line(provider):
@@ -732,6 +722,7 @@ class QuotaTray:
                               or window_label(snapshot.secondary_window_minutes) or "第二窗口",
                               snapshot.secondary_remaining_percent, ""))
         state, empty = self.exhausted_state(provider)
+        figures: list = [None] * len(quota)
         if state:
             balance = snapshot.credits_balance
             paid = "购买额度" if balance is None else "购买额度 无限" if balance == float("inf") else f"购买额度 {compact_number(balance)}"
@@ -739,6 +730,10 @@ class QuotaTray:
             for slot in empty:
                 if slot < len(quota):
                     note = paid if state == "paid" else "可能额外额度" if state == "inferred" else "接近用尽" if state in ("near", "near_working") else "已用完"
+                    if state == "paid" and balance is not None:
+                        # The credits left replace the "0 %" figure itself.
+                        figures[slot] = ("∞", "") if balance == float("inf") else agent_panel.compact_usage(balance)
+                        note = "购买额度"
                     quota[slot] = quota[slot][:2] + (note,)
                     tones[slot] = "paid" if state in ("paid", "inferred") else "blocked"
         data = self.performance["providers"].get(provider, {})
@@ -775,11 +770,12 @@ class QuotaTray:
             today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
             today_used = (snapshot.today_used if snapshot and snapshot.today_date == today
                           else mimo_tracker().view(now).today_used)
+        column_iq = grok_iq.column(getattr(self, "grok_iq", None)) if provider == "grok" else ()
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), None if provider == "gemini" else data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used,
                                       self.burn_chart(provider, now), alert, intel, intel_note,
-                                      quota_tones=tuple(tones))
+                                      quota_tones=tuple(tones), quota_figures=tuple(figures), column_iq=column_iq)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
@@ -910,8 +906,7 @@ class QuotaTray:
         self.maybe_reorder(time.time())
 
     def wanted_order(self) -> list[str]:
-        keys = list(PROVIDERS)
-        return keys if TRAY_ORDER_MODE == "fixed" else tray_order(self.snapshots, keys)
+        return provider_registry.tray_positions(PROVIDERS)
 
     def slots_by_position(self) -> list:
         """The tray icons ("slots") as Windows currently shows them, left to
@@ -943,9 +938,11 @@ class QuotaTray:
         """Show providers in wanted_order() by assigning them to the existing
         tray icons by on-screen position.  Icons are never deleted or re-added:
         Explorer restores its own remembered layout for re-added icons, so
-        moving them does not stick; swapping what each icon shows does."""
+        moving them does not stick; swapping what each icon shows does.
+        The wanted order is fixed, so this only acts when Explorer's own
+        layout (startup, reflow, a manual drag) differs from it."""
         icons = getattr(self, "icons", None)
-        if not icons or (TRAY_ORDER_MODE == "fixed" and not force):
+        if not icons:
             return False
         if not force and now - self.reordered_at < REORDER_MIN_SECONDS:
             return False
@@ -1245,6 +1242,13 @@ class QuotaTray:
                         log.info("model iq read: %d models%s", len(self.iq_state.models),
                                  f" ({self.iq_state.error})" if self.iq_state.error else "")
                         self.update_ui()
+            if grok_iq.due(getattr(self, "grok_iq", None), now):
+                grok_iq.read(self.grok_iq, now)
+                grok_iq.save_state(GROK_IQ_PATH, self.grok_iq)
+                log.info("grok iq: %s release %s%s", grok_iq.score_text(self.grok_iq.score),
+                         self.grok_iq.release or "-",
+                         f" ({self.grok_iq.error})" if self.grok_iq.error else "")
+                self.update_ui()
             self.iq_wake.clear()
             self.iq_wake.wait(600)
             if self.stop_event.is_set():
@@ -1491,9 +1495,6 @@ class QuotaTray:
 
     def apply_preferences(self, prefs: dict) -> None:
         """Settings-page choices; an explicitly set environment variable still wins."""
-        global TRAY_ORDER_MODE
-        if not os.environ.get("CODEX_QUOTA_TRAY_ORDER") and prefs.get("tray_order") in ("auto", "fixed"):
-            TRAY_ORDER_MODE = prefs["tray_order"]
         if not os.environ.get("CODEX_QUOTA_HERDR") and "herdr" in prefs:
             herdr = self.tps_monitor.herdr
             herdr.enabled = bool(prefs["herdr"])
@@ -1503,16 +1504,12 @@ class QuotaTray:
 
     def save_preferences(self, prefs: dict) -> None:
         merged = {**load_preferences(), **prefs}
+        merged.pop("tray_order", None)     # retired: tray positions are fixed
         PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary = PREFERENCES_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, PREFERENCES_PATH)
         self.apply_preferences(merged)
-        if getattr(self, "icons", None):
-            try:
-                self.maybe_reorder(time.time(), force=True)
-            except Exception:
-                log.warning("reorder after preference change failed", exc_info=True)
 
     def apply_summary_settings(self, config: dict, enabled: bool) -> None:
         from settings_window import save_summary
@@ -1757,7 +1754,7 @@ def main() -> int:
         try:
             plan = mimo_usage.login(interactive=True)
             text, code, flags = (f"MiMo 登录成功：{plan.plan_name or '套餐'}，剩余 "
-                                 f"{mimo_usage.credits_text((plan.total or 0) - (plan.used or 0))} Credits"), 0, 0x40
+                                 f"{mimo_usage.credits_text((plan.total or 0) - (plan.used or 0))}"), 0, 0x40
         except Exception as error:
             text, code, flags = f"MiMo 登录失败：{error}", 1, 0x30
         print(text)

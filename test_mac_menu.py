@@ -50,7 +50,8 @@ class MacMenuTests(unittest.TestCase):
                              today_date=datetime.now().astimezone().date().isoformat(), stale=True)
         model = mac_menu.menu_model("mimo", snap, {}, "空闲", now=time.time())
         self.assertIn("年度套餐额度", model["quota"][0])
-        self.assertIn("Credits", model["quota"][1])
+        self.assertEqual(model["quota"][1], "今日用量 12.5 万")
+        self.assertNotIn("Credits", " ".join(model["quota"]))
         self.assertIn("旧数据", model["summary"])
         snap.today_date = "2020-01-01"
         self.assertEqual(len(mac_menu.menu_model("mimo", snap, {}, "空闲", now=time.time())["quota"]), 1)
