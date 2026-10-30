@@ -587,26 +587,31 @@ class SteadyBubbleTests(unittest.TestCase):
                 sprite = agent_panel.burn_sprite(chart, colors, scale)
                 self.assertEqual(sprite.size, (round(agent_panel.CHART_WIDTH * scale), round(agent_panel.CHART_H * scale)))
 
-    def test_log_quota_axis_handles_zero_and_spreads_small_consumption(self):
-        position = agent_panel.burn_log_position
-        self.assertEqual(position(100), 0)
-        self.assertEqual(position(0), 1)
-        self.assertEqual(position(-1), 1)
-        self.assertEqual(position(101), 0)
-        values = [position(value) for value in (100,99,90,50,0)]
+    def test_quota_axis_adapts_to_the_readings_and_always_shows_zero(self):
+        scale = agent_panel.burn_scale([[90, 85, 80]])
+        self.assertEqual(scale.top, 90)
+        self.assertEqual((scale.position(90), scale.position(0)), (0, 1))
+        self.assertEqual((scale.position(101), scale.position(-1)), (0, 1))
+        values = [scale.position(value) for value in (90, 85, 80, 50, 0)]
         self.assertEqual(values, sorted(values))
-        self.assertGreater(position(99)-position(100), .1)  # 1% used is visible, rather than 1% of plot height
-        curve = agent_panel.burn_projection_curve([(0,100),(100,0)])
-        self.assertEqual((curve[0],curve[-1]), ((0,100),(100,0)))
-        self.assertEqual(curve[16], (50,50))
-        self.assertGreater(position(curve[16][1]), .5)      # projection follows the log curve, not an endpoint chord
-        bounds = agent_panel.burn_log_bounds([61,80,85,90])
-        self.assertLess(bounds[1]-bounds[0], 1)
-        self.assertLessEqual(bounds[0], position(90))
-        self.assertGreaterEqual(bounds[1], position(61))
-        flat = agent_panel.burn_log_bounds([80,80])
-        self.assertGreaterEqual(flat[1]-flat[0], .159)
-        self.assertEqual(agent_panel.burn_log_ticks((0,1)), (100,90,0))
+        self.assertGreater(scale.position(80), .3)                     # 10 points take real height, not 11%
+        self.assertLess(scale.position(80), agent_panel.BURN_BAND + .01)  # ...and leave room down to 0%
+        self.assertGreater(scale.position(85) - scale.position(90), .25 * scale.position(80))  # not bent too hard
+        ticks = agent_panel.burn_ticks(scale, [90, 85, 80])
+        self.assertEqual((ticks[0], ticks[-1]), (90, 0))
+        gaps = [scale.position(b) - scale.position(a) for a, b in zip(ticks, ticks[1:])]
+        self.assertTrue(all(gap >= agent_panel.BURN_TICK_GAP - 1e-9 for gap in gaps))
+        # A flat reading is not magnified; the top is the next round level.
+        flat = agent_panel.burn_scale([[94.45, 94.45]])
+        self.assertEqual((flat.top, flat.width), (95, 95))
+        self.assertEqual(agent_panel.burn_scale([]), agent_panel.BurnScale())
+        # A full and a busy window share the plot; neither is squeezed flat.
+        both = agent_panel.burn_scale([[100, 99.5, 99], [90, 80]])
+        self.assertGreater(min(both.position(99), both.position(80) - both.position(90)), .12)
+        curve = agent_panel.burn_projection_curve([(0, 100), (100, 0)])
+        self.assertEqual((curve[0], curve[-1]), ((0, 100), (100, 0)))
+        self.assertEqual(curve[16], (50, 50))
+        self.assertGreater(both.position(curve[16][1]), .5)      # projection follows the curve, not an endpoint chord
 
     def test_global_chart_legends_wrap_and_keep_the_plot_and_footer_clear(self):
         labels = ('Codex · 5 小时', 'Codex · 每周', 'Claude Code · 5 小时', 'Claude Code · 每周',

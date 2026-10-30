@@ -1037,14 +1037,70 @@ def burn_points(series: BurnSeries, chart: BurnChart) -> tuple[list[tuple[float,
     return history, [(t0, r0), (stop, max(0.0, r0 - series.rate * (stop - t0) / 3600))], seen
 
 
-def burn_log_position(remaining: float) -> float:
-    """Top=100% left, bottom=0% left; log1p(spent) expands small consumption.
+BURN_TOPS = (1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 98, 99, 100)
+BURN_TICKS = (99.5, 99, 98, 95, 90, 85, 80, 75, 70, 60, 50, 40, 30, 20, 10, 5, 2, 1)
+BURN_MIN_SPREAD = 1.0     # % points: flatter series are readings, not trends to magnify
+BURN_BAND = .6            # share of the plot a trend may take; the rest keeps 0% in sight
+BURN_TICK_GAP = .28       # of plot height, so 8 px labels never touch
 
-    Keep raw quota/rate data untouched. The +1 gives both full and exhausted
-    windows finite positions, unlike a logarithm of remaining quota.
+
+@dataclass(frozen=True)
+class BurnScale:
+    """Remaining-% axis: `top` at the upper edge, 0% always at the baseline.
+
+    Depth below the top maps like matplotlib's asinh/symlog scales: about
+    linear within `width` points of the top and logarithmic beyond, so a few
+    points of consumption stay readable while the exhaustion line stays in view.
     """
-    remaining = max(0.0, min(100.0, remaining))
-    return math.log1p(100.0 - remaining) / math.log(101.0)
+    top: float = 100.0
+    width: float = 100.0
+
+    def position(self, remaining: float) -> float:
+        """0 at the top edge, 1 at 0% left."""
+        depth = self.top - max(0.0, min(self.top, remaining))
+        return math.log1p(depth / self.width) / math.log1p(self.top / self.width)
+
+
+def burn_scale(series_values) -> BurnScale:
+    """Fit the axis to the readings in view, one list of values per series.
+
+    The top is the next round level above the highest reading. The width is
+    chosen so that the series with the least room still gets as much height as
+    possible (up to BURN_BAND); among equal fits the most linear one wins,
+    and no series is bent harder than its own spread warrants.
+    """
+    series_values = [list(values) for values in series_values if values]
+    if not series_values:
+        return BurnScale()
+    highest = max(max(values) for values in series_values)
+    top = float(next((level for level in BURN_TOPS if level >= highest - 1e-9), 100))
+    trends = [(min(values), max(values)) for values in series_values if max(values) - min(values) >= BURN_MIN_SPREAD]
+    if not trends:
+        return BurnScale(top, top)
+    floor = max(.05, min(high - low for low, high in trends) / 3)
+    best, chosen = -1.0, top * 50
+    for step in range(64):
+        width = top * 50 * (floor / (top * 50)) ** (step / 63)    # most linear first
+        scale = BurnScale(top, width)
+        fit = min(BURN_BAND, min(scale.position(low) - scale.position(high) for low, high in trends))
+        if fit > best + 1e-3:
+            best, chosen = fit, width
+    return BurnScale(top, chosen)
+
+
+def burn_ticks(scale: BurnScale, values=()) -> tuple[float, ...]:
+    """Top and 0% always; round levels between them, nearest the data first."""
+    ticks = [scale.top, 0.0]
+    values = list(values)
+    middle = (sum(scale.position(value) for value in values) / len(values)) if values else .5
+    candidates = sorted((level for level in BURN_TICKS if 0 < level < scale.top),
+                        key=lambda level: abs(scale.position(level) - middle))
+    for level in candidates:
+        if len(ticks) >= 4:
+            break
+        if all(abs(scale.position(level) - scale.position(tick)) >= BURN_TICK_GAP for tick in ticks):
+            ticks.append(level)
+    return tuple(sorted(ticks, reverse=True))
 
 
 def burn_projection_curve(projection: list, steps: int = 32) -> list:
@@ -1052,36 +1108,6 @@ def burn_projection_curve(projection: list, steps: int = 32) -> list:
         return projection
     (t0, r0), (t1, r1) = projection[0], projection[-1]
     return [(t0 + (t1-t0)*index/steps, r0 + (r1-r0)*index/steps) for index in range(steps+1)]
-
-
-def burn_log_bounds(values) -> tuple[float, float]:
-    positions = [burn_log_position(value) for value in values]
-    if not positions:
-        return 0.0, 1.0
-    low, high = min(positions), max(positions)
-    padding = max(.015, (high-low)*.12)
-    low, high = max(0.0,low-padding), min(1.0,high+padding)
-    # Do not magnify a flat reading or rounding noise into a large movement.
-    if high-low < .16:
-        center = (low+high)/2
-        low = max(0.0,min(.84,center-.08))
-        high = low+.16
-    return low, high
-
-
-def burn_log_ticks(bounds: tuple[float, float]) -> tuple[float, ...]:
-    low, high = bounds
-    nice = (100,99.5,99,98,95,90,85,80,75,70,60,50,40,30,20,10,0)
-    available = [value for value in nice if low <= burn_log_position(value) <= high]
-    ticks = set()
-    for target in (low,(low+high)/2,high):
-        if available:
-            ticks.add(min(available,key=lambda value:abs(burn_log_position(value)-target)))
-    result = []
-    for value in sorted(ticks,reverse=True):
-        if not result or (burn_log_position(value)-burn_log_position(result[-1]))/(high-low) >= .24:
-            result.append(value)
-    return tuple(result)
 
 
 def _dashed_curve(pen, points, color, width, dash, gap):
@@ -1153,12 +1179,12 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
         last_x = x + draw.textlength(text, font=small) + px(12)
     resets = sorted(s.reset_at for s in chart.series if s.reset_at)
     drawn = [(series, color, *burn_points(series, chart)) for series, color in zip(chart.series, colors)]
-    bounds = burn_log_bounds(value for _,_,history,projection,_ in drawn for _,value in history+projection)
-    ticks = burn_log_ticks(bounds)
+    axis = burn_scale([value for _, value in history] for _, _, history, _, _ in drawn)
+    ticks = burn_ticks(axis, (value for _, _, history, _, _ in drawn for _, value in history))
     exhausting = [(exhausts, series, color) for series, color, _, _, exhausts in drawn if exhausts is not None]
     first = min(exhausting, key=lambda item: item[0]) if exhausting else None
     row = px(CHART_LABEL / 2 + 1)
-    tag_right = width - px(38)       # reserve the right edge for the axis-mode label
+    tag_right = width - px(10)
     if first is not None:
         # The earliest exhaustion is named in the label row, where no line runs;
         # the reset stays visible as its blue marker.
@@ -1170,14 +1196,13 @@ def burn_sprite(chart: BurnChart | None, colors: tuple, scale: float) -> Image.I
         tag = f"{prefix} {_clock(resets[0], chart.now)}"
         if single and tag_right - draw.textlength(tag, font=small) > last_x:
             draw.text((tag_right, row), tag, font=small, fill=MUTED_TEXT, anchor="rm")
-    draw.text((width-px(10), row), "log", font=small, fill=MUTED_TEXT, anchor="rm")
 
     k = SUPERSAMPLE
     left, top, right, bottom = 34, CHART_LABEL + extra + 4, CHART_WIDTH - 10, CHART_H + extra - 6
     big = Image.new("RGBA", (width * k, height * k), (0, 0, 0, 0))
     pen = ImageDraw.Draw(big)
     X = lambda t: (left + (right - left) * (t - chart.start) / span) * scale * k  # noqa: E731
-    Y = lambda r: (top + (bottom - top) * (burn_log_position(r)-bounds[0])/(bounds[1]-bounds[0])) * scale * k  # noqa: E731
+    Y = lambda r: (top + (bottom - top) * axis.position(r)) * scale * k  # noqa: E731
     hair = max(1, round(scale * k))
     for level in ticks:
         pen.line((X(chart.start), Y(level), X(chart.end), Y(level)), fill=(240, 238, 230, 34 if level == 0 else 16), width=hair)
