@@ -42,6 +42,7 @@ import hover_details
 import mimo_usage
 import providers as provider_registry
 import model_iq
+import grok_iq
 import reset_watch
 from refresh_scheduler import RefreshScheduler
 from tps_sources import PERFORMANCE_PATH, TpsMonitor, performance_signature, save_performance
@@ -305,6 +306,7 @@ def load_preferences() -> dict:
 RESET_PATH = DATA_DIR / "codex_reset.json"
 IQ_STATE_PATH = DATA_DIR / "model_iq.json"
 IQ_CONFIG_PATH = DATA_DIR / "model_iq_config.json"     # AI Stupid Level key + chosen models
+GROK_IQ_PATH = DATA_DIR / "grok_iq.json"               # LiveBench overall for the Grok column
 # Providers whose quota resets raise a Windows notification.
 RESET_NOTIFY = {part.strip().lower() for part in (os.environ.get("CODEX_QUOTA_RESET_NOTIFY") or "codex,grok,claude").split(",") if part.strip()}
 RESET_NOTIFY_MIN_GAIN = 10.0     # percentage points regained before it counts as a reset
@@ -380,6 +382,7 @@ class QuotaTray:
         self.reset_outlook = reset_watch.load(RESET_PATH) if reset_watch.ENABLED else None
         self.iq_state = model_iq.load_state(IQ_STATE_PATH)
         self.iq_config = model_iq.load_config(IQ_CONFIG_PATH)
+        self.grok_iq = grok_iq.load_state(GROK_IQ_PATH)
         self.iq_lock = threading.Lock()
         self.iq_wake = threading.Event()
         # Cached figures may use a different alert threshold.  Notify once
@@ -762,11 +765,12 @@ class QuotaTray:
             today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
             today_used = (snapshot.today_used if snapshot and snapshot.today_date == today
                           else mimo_tracker().view(now).today_used)
+        column_iq = grok_iq.column(getattr(self, "grok_iq", None)) if provider == "grok" else ()
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), None if provider == "gemini" else data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used,
                                       self.burn_chart(provider, now), alert, intel, intel_note,
-                                      quota_tones=tuple(tones))
+                                      quota_tones=tuple(tones), column_iq=column_iq)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
@@ -1233,6 +1237,13 @@ class QuotaTray:
                         log.info("model iq read: %d models%s", len(self.iq_state.models),
                                  f" ({self.iq_state.error})" if self.iq_state.error else "")
                         self.update_ui()
+            if grok_iq.due(getattr(self, "grok_iq", None), now):
+                grok_iq.read(self.grok_iq, now)
+                grok_iq.save_state(GROK_IQ_PATH, self.grok_iq)
+                log.info("grok iq: %s release %s%s", grok_iq.score_text(self.grok_iq.score),
+                         self.grok_iq.release or "-",
+                         f" ({self.grok_iq.error})" if self.grok_iq.error else "")
+                self.update_ui()
             self.iq_wake.clear()
             self.iq_wake.wait(600)
             if self.stop_event.is_set():

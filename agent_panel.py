@@ -121,6 +121,7 @@ class PanelModel:
     intel_note: str = ""                        # shown there instead when there are no scores (e.g. "未设置")
     chart_padding: float = 0.0                   # static-background copy of wrapped legend space
     quota_tones: tuple[str, ...] = ()            # per column: "" | "active" (pool in use) | "paid" | "blocked"
+    column_iq: tuple = ()                       # spare header slot, Grok only: (label, figure, caption, unit)
 
     def tone_of(self, slot: int) -> str:
         return self.quota_tones[slot] if slot < len(self.quota_tones) else ""
@@ -132,7 +133,8 @@ class PanelModel:
         return (self.letter, self.title, self.status, self.status_tone,
                 tuple((item[0], item[2] if len(item) > 2 else "", self.tone_of(slot)) for slot, item in enumerate(self.quota[:3])),
                 (self.banner, self.banner_alert, self.intel, self.intel_note),
-                (self.forecast, self.forecast_tone), self.provider == "mimo", chart_extra_for(self), self.provider != "gemini")
+                (self.forecast, self.forecast_tone), self.provider == "mimo", chart_extra_for(self),
+                self.column_iq, self.provider != "gemini")
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
@@ -153,6 +155,18 @@ def meter_columns(count: int, show_tps: bool = True) -> list[tuple[float, float]
     column = (WIDTH - 2 * PAD) / slots
     indices = [*range(count), slots - 1] if show_tps else range(count)
     return [(PAD + index * column, PAD + (index + 1) * column - 16) for index in indices]
+
+
+def spare_slot(count: int, show_tps: bool = True) -> tuple[float, float] | None:
+    """The first header column `meter_columns` leaves empty, if any."""
+    slots = max(3, count + 1) if show_tps else max(1, count)
+    used = {*range(count), slots - 1} if show_tps else set(range(count))
+    free = [index for index in range(slots) if index not in used]
+    if not free:
+        return None
+    column = (WIDTH - 2 * PAD) / slots
+    index = free[0]
+    return PAD + index * column, PAD + (index + 1) * column - 16
 
 
 def chart_top(model, field_h: float) -> float:
@@ -1394,7 +1408,7 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 
 def _header_model(header: tuple) -> PanelModel:
-    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, chart_padding, show_tps = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, chart_padding, _iq, show_tps = header
     return PanelModel("mimo" if daily else "" if show_tps else "gemini", letter, title, status, tuple((label, None, reset) for label, reset, _ in meters), None, (),
                       tone, banner, forecast[0], forecast[1], banner_alert=alert,
                       intel=intel, intel_note=note, chart_padding=chart_padding,
@@ -1485,7 +1499,7 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, lette
 @lru_cache(maxsize=12)
 def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     model = _header_model(header)
-    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, _padding, show_tps = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, _padding, column_iq, show_tps = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -1519,6 +1533,17 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
                 ink = {"active": accent(letter), "paid": PAID, "blocked": CLAY}.get(column_tone, MUTED_TEXT)
                 face = ui_font(px(10), "bold") if column_tone == "active" else small
                 draw.text((px(x), px(y + 55)), reset, font=face, fill=ink, anchor="lt")
+    if column_iq:
+        slot = spare_slot(len(meters) + daily, show_tps)
+        if slot:
+            # Same label and figure as the other columns, and no bar: the slot
+            # was the gap left so a single quota would not stretch.
+            x, _end = slot
+            label, value, caption, unit = (tuple(column_iq) + ("",))[:4]
+            draw.text((px(x), px(y)), label, font=label_font, fill=MUTED_TEXT, anchor="lt")
+            if caption:
+                draw.text((px(x), px(y + 51)), caption, font=small, fill=MUTED_TEXT, anchor="lt")
+            blit_at(content, figure(value or "—", unit, TEXT, TEXT, s), px(x), px(y + 38))
     if header_offset(model):
         _banner(draw, px, s, banner, alert, intel, note, letter)
     draw.rounded_rectangle((px(PAD - 6), px(top - 6), px(right + 6), px(top + field_h + 4)), radius=px(12),

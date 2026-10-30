@@ -966,5 +966,96 @@ class HerdrAndHelperTests(unittest.TestCase):
         self.assertEqual(1, herdr.working("gemini", set()))
 
 
+class GrokIqColumnTests(unittest.TestCase):
+    CSV = ("model,long_agentic,reasoning,coding,browser,data_analysis,research,design\n"
+           "grok-4.6,28.0,91.2,89.1,49.4,75.3,84.5,79.8\n"
+           "grok-4.7,46.1,82.7,84.5,49.3,76.9,86.4,78.0\n"
+           "claude-fable-5.1,80.0,90.0,88.0,70.0,85.0,90.0,86.0\n")
+    CATEGORIES = {"Long Agentic": ["long_agentic"], "Reasoning": ["reasoning"], "Coding": ["coding"],
+                  "Browser": ["browser"], "Data Analysis": ["data_analysis"], "Research": ["research"],
+                  "Design": ["design"], "_overall_weights": {"Long Agentic": 2.0, "Coding": 1.5, "Design": 1.5}}
+    HTML = '<script src="./static/js/main.abc123.js"></script>'
+    SCRIPT = 'before Yt=["20261014","20261025"] after'
+
+    def fetch(self, pages):
+        def get(url):
+            self.assertIn(url, pages)
+            return pages[url]
+        return get
+
+    def test_livebench_overall_for_grok_4_7_is_the_published_70_point_1(self):
+        import grok_iq
+        row = grok_iq.parse_row(self.CSV)
+        self.assertEqual(grok_iq.score_text(grok_iq.overall(row, self.CATEGORIES)), "70.1")
+        self.assertIsNone(grok_iq.parse_row(self.CSV, "grok-4"))
+        self.assertEqual(grok_iq.latest_release(self.SCRIPT), "20261025")
+        self.assertIsNone(grok_iq.latest_release("Yt=[]"))
+        pages = {"https://livebench.ai/": self.HTML,
+                 "https://livebench.ai/static/js/main.abc123.js": self.SCRIPT,
+                 "https://livebench.ai/data/20261025/table.csv": self.CSV,
+                 "https://livebench.ai/data/20261025/categories.json": json.dumps(self.CATEGORIES)}
+        state = grok_iq.read(grok_iq.GrokIq(), 1000.0, self.fetch(pages))
+        best = grok_iq.overall(grok_iq.parse_row(self.CSV, "claude-fable-5.1"), self.CATEGORIES)
+        self.assertEqual(grok_iq.leader(self.CSV, self.CATEGORIES), ("claude-fable-5.1", best))
+        # The smartest model is the 100 % mark; the caption names both models.
+        self.assertEqual(grok_iq.column(state), ("智商", f"{100 * state.score / best:.0f}", "Grok 4.7/Fable 5.1", "%"))
+        self.assertEqual(grok_iq.column(None), ("智商", "—", "Grok 4.7", ""))
+        self.assertEqual(state.release, "20261025")
+        self.assertEqual(state.error, "")
+        # A cache from before the comparison is read again to learn the leader.
+        stale = grok_iq.GrokIq(score=state.score, release=state.release, script=state.script)
+        self.assertEqual(grok_iq.read(stale, 1500.0, self.fetch(pages)).top_model, "claude-fable-5.1")
+        # The same bundle is not downloaded again; a failed refresh keeps 70.1.
+        state = grok_iq.read(state, 2000.0, self.fetch({"https://livebench.ai/": self.HTML}))
+        self.assertEqual(round(state.score, 1), 70.1)
+
+        def down(_url):
+            raise OSError("down")
+
+        broken = grok_iq.read(state, 3000.0, down)
+        self.assertEqual(grok_iq.score_text(broken.score), "70.1")
+        self.assertIn("OSError", broken.error)
+
+    def test_grok_spare_column_shows_the_score_and_leaves_tps_on_the_right(self):
+        from PIL import Image, ImageChops, ImageDraw
+        grok = agent_panel.PanelModel("grok", "X", "Grok", "空闲", (("每周", 75, ""),), 12, (),
+                                      column_iq=("智商", "82", "Grok 4.7/Fable 5.1", "%"))
+        self.assertEqual(grok.header[-2], ("智商", "82", "Grok 4.7/Fable 5.1", "%"))
+        self.assertTrue(grok.header[-1])
+        codex = agent_panel.PanelModel("codex", "C", "Codex", "空闲", (("5小时", 40, ""), ("每周", 80, "")), 3, ())
+        gemini = agent_panel.PanelModel("gemini", "G", "Gemini", "空闲",
+                                        (("Argon", 30), ("Claude/GPT", 40), ("Gemini", 50)), None, ())
+        mimo = agent_panel.PanelModel("mimo", "M", "MiMo", "空闲", (("套餐额度", 90, ""),), 4, (), today_used=10)
+        self.assertEqual(codex.header[-2], ())
+        self.assertTrue(codex.header[-1])
+        self.assertEqual(gemini.header[-2], ())
+        self.assertFalse(gemini.header[-1])
+        self.assertEqual(mimo.header[-2], ())
+        spare = agent_panel.spare_slot(1, True)
+        columns = agent_panel.meter_columns(1)
+        self.assertIsNotNone(spare)
+        self.assertLess(columns[0][0], spare[0])
+        self.assertLess(spare[0], columns[-1][0])
+        self.assertIsNone(agent_panel.spare_slot(2, True))
+        self.assertEqual(columns[-1], agent_panel.meter_columns(2)[-1])
+        from dataclasses import replace
+        shown = agent_panel.background(grok.header, 120, 1)
+        plain = agent_panel.background(replace(grok, column_iq=()).header, 120, 1)
+        self.assertEqual(shown.size, plain.size)
+        span = (agent_panel.WIDTH - 2 * agent_panel.PAD) / 3
+        left = round(agent_panel.MARGIN + agent_panel.PAD + span)
+        right = round(agent_panel.MARGIN + agent_panel.PAD + 2 * span)
+        self.assertIsNone(ImageChops.difference(shown.crop((0, 0, left - 2, shown.height)),
+                                                plain.crop((0, 0, left - 2, plain.height))).getbbox())
+        self.assertIsNone(ImageChops.difference(shown.crop((right + 2, 0, shown.width, shown.height)),
+                                                plain.crop((right + 2, 0, plain.width, plain.height))).getbbox())
+        self.assertIsNotNone(ImageChops.difference(shown.crop((left, 0, right, shown.height)),
+                                                   plain.crop((left, 0, right, plain.height))).getbbox())
+        number, _ = agent_panel.figure("82", "%", agent_panel.TEXT, agent_panel.TEXT, 1)
+        self.assertLess(number.width, span)
+        caption = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textlength("Grok 4.7/Fable 5.1", font=agent_panel.ui_font(10))
+        self.assertLess(caption, span - 16)
+
+
 if __name__ == "__main__":
     unittest.main()

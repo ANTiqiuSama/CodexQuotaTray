@@ -322,6 +322,10 @@ OpenAI 的 Codex 团队有时会提前重置所有用户的 Codex 用量（通�
 - 该来源正在运行的模型（显示 TPS 的那个，用来源颜色标出）始终排在最前，其余位置默认为编程分最高的模型（每次读取后自动更新）；在设置页的完整列表中勾选最多 3 个模型可自定义，按勾选顺序显示，“恢复默认”清空选择。点击面板顶部横条直接打开该设置页。
 - 按该站条款，展示数据时须注明来源 aistupidlevel.info；设置页底部有来源链接。
 
+### Grok 智商栏
+
+AI Stupid Level 不收录 xAI 的模型，所以 Grok 面板中间空出的那一栏改用 [LiveBench](https://livebench.ai/) 最新的公开榜单：计算每个模型的加权总分（LiveBench 首页的 Overall），以榜上最高分的模型为 100%，显示 Grok 4.7 达到它的百分之几，下方写明对比的两个模型，如 `Grok 4.7/Fable 5.1`。已发布的榜单不会再变，程序每 3 小时检查一次首页，只在出现新版本时重新下载；读取失败时保留上一次结果。
+
 ## Agent 任务气泡
 
 悬停任一额度图标都会打开任务面板（旧的详情卡片已移除）；没有在工作的 agent 时也照常显示。未开通订阅的 Claude 没有额度可显示，仍用文字提示。指针可以移入面板操作，移出约半秒后收起；面板不抢键盘焦点。
@@ -442,6 +446,7 @@ Claude 原生实时额度使用 `claude-status/` 中的数值记录；`claude-pr
 | `performance.json` | 数值化输出计数、速率、来源及可观测状态 |
 | `history.json` | 预测用的时间、已用百分比、重置时间 |
 | `codex_reset.json` | 最近一次 Codex 全局重置预测 |
+| `grok_iq.json` | 最近一次 LiveBench 榜单版本、Grok 4.7 与最高分模型的总分 |
 | `model_iq.json`、`model_iq_config.json` | 最近一次模型智商读数与当天调用次数；AI Stupid Level API Key 与悬停面板所选模型 |
 | `app.log` | 运行日志（错误与每次额度刷新结果），达到约 1 MB 后轮转，保留两份备份 |
 | `diagnostics.txt` | 从菜单生成的诊断信息 |
@@ -536,6 +541,7 @@ refresh_scheduler.py  按需刷新、失败退避和重置调度
 forecast.py           数值历史与额度耗尽估计
 reset_watch.py        Codex 全局重置的社区预测读取与提示文案
 model_iq.py           AI Stupid Level 模型智商读取、每日调用预算与面板显示选择
+grok_iq.py            LiveBench 榜单读取：Grok 4.7 相对最高分模型的百分比
 icon_art.py           额度与 TPS 圆盘绘制、字体缓存
 detail_card.py        面板共用的字体、配色、阴影与合成
 hover_details.py      Win32 分层窗口、DPI、悬停、任务面板窗口及文字提示回退
