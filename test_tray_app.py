@@ -490,6 +490,45 @@ class TrayOrderTests(unittest.TestCase):
             self.assertEqual(tray.icons["codex"].name, "slot0")
 
 
+class RefreshCadenceTests(unittest.TestCase):
+    def tray(self):
+        from refresh_scheduler import RefreshScheduler
+        tray = QuotaTray.__new__(QuotaTray)
+        tray.scheduler = RefreshScheduler(("codex", "grok"), 0)
+        tray.scheduler.take_due(0)
+        for provider in ("codex", "grok"):
+            tray.scheduler.completed(provider, SimpleNamespace(error=None, resets_at=None, secondary_resets_at=None), 0)
+        tray.icons = {"codex": SimpleNamespace(details_visible=False, hover_open=True),
+                      "grok": SimpleNamespace(details_visible=False, hover_open=False)}
+        tray.performance = {"providers": {"codex": {}, "grok": {}}}
+        tray.agents = [{"provider": "grok", "live": True}]
+        tray.last_samples = {}
+        tray.wake = threading.Event()
+        return tray
+
+    def test_pointer_on_an_icon_or_panel_sets_the_hover_cadence_and_live_agents_count_as_use(self):
+        tray = self.tray()
+        tray.feed_scheduler(tray.performance, 100)
+        self.assertTrue(tray.scheduler.hovered["codex"])
+        self.assertEqual((tray.scheduler.due["codex"], tray.scheduler.reason["codex"]), (100, "悬停"))
+        self.assertTrue(tray.scheduler.active["grok"])            # a live grok agent, not only generation
+        self.assertFalse(tray.scheduler.hovered["grok"])
+        self.assertTrue(tray.wake.is_set())
+        tray.icons["codex"].hover_open, tray.icons["grok"].details_visible = False, True   # panel open on Grok
+        tray.feed_scheduler(tray.performance, 200)
+        self.assertEqual((tray.scheduler.hovered["codex"], tray.scheduler.hovered["grok"]), (False, True))
+
+    def test_a_failing_read_never_leaves_its_source_stuck_running(self):
+        tray = self.tray()
+        tray.scheduler.request(["grok"], 50)
+        self.assertEqual(tray.scheduler.take_due(50), ["grok"])
+        with patch.object(tray, "refresh_providers", side_effect=RuntimeError("boom")):
+            tray.refresh_one("grok")
+        self.assertNotIn("grok", tray.scheduler.running)
+        self.assertEqual(tray.scheduler.failures["grok"], 1)
+        self.assertTrue(tray.wake.is_set())
+
+
 class CodexLocalLimitTests(unittest.TestCase):
     def test_session_record_replaces_older_snapshot_and_limit_error_requests_refresh(self):
         tray = QuotaTray.__new__(QuotaTray)

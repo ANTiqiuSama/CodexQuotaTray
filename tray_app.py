@@ -1007,8 +1007,12 @@ class QuotaTray:
         providers = list(providers)
         if not providers:
             return
+        # Read outside the lock: a slow source (a Grok CLI session) must not
+        # hold up the others. Only merging the results is serialised.
+        started = time.monotonic()
+        results = collect(providers, self.snapshots)
+        duration = time.monotonic() - started
         with self.refresh_lock:
-            results = collect(providers, self.snapshots)
             now = time.time()
             for provider, snapshot in results.items():
                 old = self.snapshots.get(provider)
@@ -1027,12 +1031,12 @@ class QuotaTray:
                     self.history.save()
             if self.scheduler is not None:
                 for provider, snapshot in results.items():
-                    self.scheduler.completed(provider, snapshot, now)
+                    self.scheduler.completed(provider, snapshot, now, duration)
             for provider, snapshot in results.items():
-                log.info("quota %s: left=%s second=%s reset=%s/%s stale=%s error=%s", provider,
+                log.info("quota %s: left=%s second=%s reset=%s/%s stale=%s error=%s (%.1fs)", provider,
                          snapshot.remaining_percent, snapshot.secondary_remaining_percent, snapshot.resets_at,
-                         snapshot.secondary_resets_at, snapshot.stale, snapshot.error)
-        self.update_ui()
+                         snapshot.secondary_resets_at, snapshot.stale, snapshot.error, duration)
+            self.update_ui()
 
     def refresh(self) -> None:
         """Synchronous refresh of every provider (used by checks and tests)."""
@@ -1046,21 +1050,35 @@ class QuotaTray:
         self.wake.set()
 
     def refresh_loop(self) -> None:
+        """Each due source is read on its own thread, so a hovered Codex is
+        not kept waiting behind a Grok CLI session."""
         while not self.stop_event.is_set():
             try:
-                due = self.scheduler.take_due(time.time())
-                if due:
-                    self.refresh_providers(due)
+                for provider in self.scheduler.take_due(time.time()):
+                    threading.Thread(target=self.refresh_one, args=(provider,), name=f"quota-{provider}", daemon=True).start()
             except Exception:
-                log.exception("quota refresh failed")
-                for provider in PROVIDERS:  # Never leave a provider stuck "running".
-                    if provider in self.scheduler.running:
-                        self.scheduler.completed(provider, placeholder(provider, "刷新异常"), time.time())
+                log.exception("quota refresh scheduling failed")
             self.wake.wait(self.scheduler.next_wake(time.time()))
             self.wake.clear()
 
+    def refresh_one(self, provider: str) -> None:
+        try:
+            self.refresh_providers([provider])
+        except Exception:
+            log.exception("quota refresh of %s failed", provider)
+        finally:
+            if provider in self.scheduler.running:    # never leave a provider stuck "running"
+                self.scheduler.completed(provider, placeholder(provider, "刷新异常"), time.time())
+            self.wake.set()                          # its next due time may be the earliest now
+
     def feed_scheduler(self, performance: dict, now: float) -> None:
+        """Live state for the refresh cadence: generating or a live agent of
+        the source (active), and the pointer on its icon or panel (hover)."""
         moved = False
+        for provider, icon in (getattr(self, "icons", None) or {}).items():
+            if provider in self.scheduler.providers:
+                pointed = bool(getattr(icon, "details_visible", False) or getattr(icon, "hover_open", False))
+                moved |= self.scheduler.hover(provider, pointed, now)
         for provider in self.scheduler.providers:
             data = performance["providers"].get(provider)
             if data is None:
@@ -1072,7 +1090,7 @@ class QuotaTray:
                 self.last_samples[provider] = sample
             elif provider not in self.last_samples:
                 self.last_samples[provider] = None
-            moved |= self.scheduler.activity(provider, data.get("active_sessions", 0) > 0, finished, now)
+            moved |= self.scheduler.activity(provider, self.source_working(provider), finished, now)
         if moved:
             self.wake.set()
 
