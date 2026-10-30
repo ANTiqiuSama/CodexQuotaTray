@@ -164,13 +164,14 @@ def source_card(card: SourceCard, icon: Image.Image | None, scale: float = 1.0, 
     # Rates.
     y = 166
     draw.line((px(16), px(y - 6), px(CARD_W - 16), px(y - 6)), fill=RULE, width=max(1, round(s)))
-    tps = card.tps or 0.0
-    big = figure_font(px(20))
-    number = f"{tps:.0f}"
-    draw.text((px(16), px(y + 15)), number, font=big, fill=color if card.tps else TEXT, anchor="ls")
-    after = 16 + draw.textlength(number, font=big) / s + 4
-    draw.text((px(after), px(y + 15)), "tok/s", font=tiny, fill=SECONDARY_TEXT, anchor="ls")
-    meta = f"60 秒 {card.rate60:.1f} tok/s · {card.active} 个会话"
+    if card.provider != "gemini":
+        tps = card.tps or 0.0
+        big = figure_font(px(20))
+        number = f"{tps:.0f}"
+        draw.text((px(16), px(y + 15)), number, font=big, fill=color if card.tps else TEXT, anchor="ls")
+        after = 16 + draw.textlength(number, font=big) / s + 4
+        draw.text((px(after), px(y + 15)), "tok/s", font=tiny, fill=SECONDARY_TEXT, anchor="ls")
+    meta = f"{card.active} 个会话" if card.provider == "gemini" else f"60 秒 {card.rate60:.1f} tok/s · {card.active} 个会话"
     draw.text((px(CARD_W - 16), px(y + 15)), meta, font=tiny, fill=MUTED_TEXT, anchor="rs")
     forecast = card.forecast or card.note or "正在积累用量，稍后给出预测"
     tint = TONE_COLORS.get(card.forecast_tone, MUTED_TEXT) if card.forecast else MUTED_TEXT
@@ -264,7 +265,8 @@ def agent_rows(agents: list[dict], letters: dict[str, str], scale: float = 1.0, 
         draw.text((px(38), px(cy + 9)), _fit(draw, where, tiny, px(width * .5)), font=tiny, fill=MUTED_TEXT, anchor="lm")
         doing = str(agent.get("doing") or ("工作中" if agent.get("live") else "刚完成"))
         tps = agent.get("tps")
-        draw.text((px(width - 16), px(cy - 7)), f"{tps:.0f} tok/s" if tps else "—", font=ui_font(px(11)), fill=color if tps else MUTED_TEXT, anchor="rm")
+        if agent.get("provider") != "gemini":
+            draw.text((px(width - 16), px(cy - 7)), f"{tps:.0f} tok/s" if tps else "—", font=ui_font(px(11)), fill=color if tps else MUTED_TEXT, anchor="rm")
         draw.text((px(width - 16), px(cy + 9)), _fit(draw, doing, tiny, px(width * .35)), font=tiny,
                   fill=SECONDARY_TEXT if agent.get("live") else MUTED_TEXT, anchor="rm")
     return image

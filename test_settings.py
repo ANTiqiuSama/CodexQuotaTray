@@ -19,6 +19,16 @@ def snapshot(**extra):
 
 
 class SettingsViewTests(unittest.TestCase):
+    def test_gemini_panel_uses_full_width_for_quota_without_tps(self):
+        import agent_panel
+        model = agent_panel.PanelModel('gemini', 'G', 'Gemini', '空闲',
+            (('Argon', 30), ('Claude/GPT', 40), ('Gemini', 50)), 99, ())
+        self.assertFalse(model.header[-1])
+        self.assertEqual(agent_panel._header_model(model.header).provider, 'gemini')
+        self.assertEqual(len(agent_panel.meter_columns(3, False)), 3)
+        self.assertGreater(agent_panel.meter_columns(3, False)[0][1], agent_panel.meter_columns(3, True)[0][1])
+        agent_panel.background(model.header, 120, 1.0)
+
     def test_gemini_always_uses_its_tps_colour(self):
         self.assertEqual(accent("G"), ring_color(40, "G"))
         self.assertEqual(accent("G"), ring_color(10, "G"))
@@ -52,7 +62,7 @@ class SettingsViewTests(unittest.TestCase):
                               panel=lambda provider: SimpleNamespace(status="1 个在工作", status_tone="live", forecast="够用", forecast_tone="ok"))
         [(card, image)] = settings_window.build_cards(app)
         self.assertIs(image, icon)
-        self.assertEqual(("G", "1 个在工作", 99.0, 1), (card.letter, card.status, card.tps, card.active))
+        self.assertEqual(("G", "1 个在工作", None, 1), (card.letter, card.status, card.tps, card.active))
 
     def test_preferences_round_trip_and_apply(self):
         import tray_app

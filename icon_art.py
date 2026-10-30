@@ -160,7 +160,7 @@ def _stale_badge(canvas: Image.Image) -> None:
 # Shared geometry: both states are full-bleed discs so the icon uses the
 # whole tray slot.  The ring hugs the edge; the glyph gets the rest.
 DISC = (0, 0, CANVAS - 1, CANVAS - 1)
-RING_W = 26
+RING_W = 32
 RING_BOX = (RING_W / 2 + 1, RING_W / 2 + 1, CANVAS - RING_W / 2 - 2, CANVAS - RING_W / 2 - 2)
 
 
@@ -303,7 +303,7 @@ def waiting_icon(amount: int, letter: str, reset_hint: bool = False, stale: bool
     # Keep the empty outline as large as the original full-bleed disc.  A
     # slightly thicker stroke remains visible at 16-pixel tray size.  Use the
     # original empty-ring track rather than a full provider-coloured arc.
-    draw.ellipse(DISC, outline=TRACK, width=34)
+    draw.ellipse(DISC, outline=TRACK, width=38)
     text = str(max(1, int(amount)))
     wide = len(text) >= 3
     face = _fit(text, number_font, 190 if wide else 180, 132 if wide else 158, 200, draw)

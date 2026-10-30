@@ -67,7 +67,7 @@ def build_cards(app, now: float | None = None) -> list[tuple[view.SourceCard, ob
             status, tone, forecast, forecast_tone = ("读取异常" if snapshot is not None and snapshot.error else "空闲"), "idle", "", "unknown"
         note = (snapshot.error or "") if snapshot is not None else ""
         card = view.SourceCard(provider, letter, PROVIDER_NAMES.get(provider, provider), status, tone, view.quota_rows(snapshot, now),
-                               data.get("display_tps"), float(data.get("output_tps_60") or 0.0), int(data.get("active_sessions") or 0),
+                               None if provider == "gemini" else data.get("display_tps"), float(data.get("output_tps_60") or 0.0), int(data.get("active_sessions") or 0),
                                forecast, forecast_tone, note)
         icon = getattr((getattr(app, "icons", None) or {}).get(provider), "icon", None)
         result.append((card, icon))

@@ -66,6 +66,23 @@ class SplitRingTests(unittest.TestCase):
             self.assertEqual(value.remaining_percent, remaining)
         self.assertIsNone(tray_app.usable_again_at(snapshot('claude', remaining=5.01, reset=now+3601), now))
 
+    def test_codex_and_grok_use_ten_percent_for_both_windows(self):
+        now = time.time()
+        for provider in ('codex', 'grok'):
+            for primary, secondary in ((10, 60), (60, 10)):
+                with self.subTest(provider=provider, primary=primary, secondary=secondary):
+                    value = snapshot(provider, primary, secondary, now+7200, now+10800)
+                    expected = now+7200 if primary == 10 else now+10800
+                    self.assertEqual(tray_app.usable_again_at(value, now), expected)
+                    with patch.object(tray_app, 'make_provider_icon', return_value='countdown'):
+                        self.assertEqual(tray_app.make_display_icon(value, 'C', {'active_sessions':1, 'display_tps':25}), 'countdown')
+            self.assertIsNone(tray_app.usable_again_at(snapshot(provider, 10.01, 60, now+7200), now))
+
+    def test_gemini_icon_never_switches_to_tps(self):
+        value = snapshot('gemini', 40, None)
+        with patch.object(tray_app, 'make_provider_icon', return_value='quota'):
+            self.assertEqual(tray_app.make_display_icon(value, 'G', {'active_sessions':1, 'display_tps':25}), 'quota')
+
     def test_stale_countdown_and_live_tps_priority(self):
         now = time.time()
         value = snapshot('claude', remaining=1, reset=now+3601)
