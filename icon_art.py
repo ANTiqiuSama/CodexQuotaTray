@@ -311,6 +311,6 @@ def waiting_icon(amount: int, letter: str, reset_hint: bool = False, stale: bool
     if reset_hint:
         _reset_badge(canvas)
     unit = unit if unit in ("d", "h", "m") else "h"
-    unit_face = _fit(unit, number_font, 54, 56, 74, draw)
-    _centered_text(draw, unit, unit_face, (178, 26, 242, 88), IVORY)
+    unit_face = _fit(unit, number_font, 96, 96, 132, draw)
+    _centered_text(draw, unit, unit_face, (166, 0, 256, 100), IVORY)
     return _finish(canvas)
