@@ -784,6 +784,23 @@ class AgentPanelTests(unittest.TestCase):
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
 
+    def test_codex_at_zero_shows_its_purchased_credits_instead_of_zero_percent(self):
+        now = time.time()
+        codex = tray_app.QuotaSnapshot("codex", "Codex", 300, 100.0, 0.0, int(now + 3600), now, False, None,
+                                       10080, 40.0, 60.0, int(now + 86400), credits_balance=59773.36)
+        self.tray.snapshots["codex"] = codex
+        model = self.tray.panel("codex")
+        self.assertEqual(model.figure_of(0), ("59.8", "K"))
+        self.assertEqual((model.quota[0][2], model.tone_of(0)), ("购买额度", "paid"))
+        self.assertIsNone(model.figure_of(1))                      # the weekly window keeps its %
+        scene = agent_panel.Scene()
+        scene.set_model(model, 0)
+        self.assertIsNotNone(scene.render(1.25))
+        codex.credits_balance = float("inf")
+        self.assertEqual(self.tray.panel("codex").figure_of(0), ("∞", ""))
+        codex.credits_balance = 0                                  # nothing to spend: waiting shows 0 %
+        self.assertIsNone(self.tray.panel("codex").figure_of(0))
+
     def test_quota_columns_are_titled_by_the_time_left_until_reset(self):
         distance = tray_app.reset_distance
         self.assertEqual(distance(1000 + 4 * 3600 + 32 * 60, 1000), "4小时32分钟")

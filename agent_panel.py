@@ -121,7 +121,11 @@ class PanelModel:
     intel_note: str = ""                        # shown there instead when there are no scores (e.g. "未设置")
     chart_padding: float = 0.0                   # static-background copy of wrapped legend space
     quota_tones: tuple[str, ...] = ()            # per column: "" | "active" (pool in use) | "paid" | "blocked"
+    quota_figures: tuple = ()                    # per column: (number, unit) shown instead of the %, e.g. Codex credits
     column_iq: tuple = ()                       # spare header slot, Grok only: (label, figure, caption, unit)
+
+    def figure_of(self, slot: int) -> tuple[str, str] | None:
+        return self.quota_figures[slot] if slot < len(self.quota_figures) else None
 
     def tone_of(self, slot: int) -> str:
         return self.quota_tones[slot] if slot < len(self.quota_tones) else ""
@@ -717,8 +721,12 @@ class Scene:
             paid = model.tone_of(slot) == "paid"     # used up but covered by purchased credits: a full gold bar
             shade = PAID if paid else TEXT if value is None or value >= 50 or model.letter in UNIFORM_LETTERS else ring_color(value, model.letter)
             shown = None if value is None else spring.value
-            blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
-                                  shade, shade, scale), at(x), at(meter_top + 38))
+            override = model.figure_of(slot)
+            if override:     # e.g. Codex at 0 %: the purchased credits left instead of "0 %"
+                blit_at(frame, figure(override[0], override[1], shade, shade, scale), at(x), at(meter_top + 38))
+            else:
+                blit_at(frame, figure("—" if shown is None else f"{max(0.0, shown):.0f}", "" if shown is None else "%",
+                                      shade, shade, scale), at(x), at(meter_top + 38))
             if paid:
                 draw.rounded_rectangle((round(at(x)), round(at(meter_top + 45)), round(at(end)), round(at(meter_top + 49))),
                                        radius=max(1, round(2 * scale)), fill=PAID)

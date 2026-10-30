@@ -722,6 +722,7 @@ class QuotaTray:
                               or window_label(snapshot.secondary_window_minutes) or "第二窗口",
                               snapshot.secondary_remaining_percent, ""))
         state, empty = self.exhausted_state(provider)
+        figures: list = [None] * len(quota)
         if state:
             balance = snapshot.credits_balance
             paid = "购买额度" if balance is None else "购买额度 无限" if balance == float("inf") else f"购买额度 {compact_number(balance)}"
@@ -729,6 +730,10 @@ class QuotaTray:
             for slot in empty:
                 if slot < len(quota):
                     note = paid if state == "paid" else "可能额外额度" if state == "inferred" else "接近用尽" if state in ("near", "near_working") else "已用完"
+                    if state == "paid" and balance is not None:
+                        # The credits left replace the "0 %" figure itself.
+                        figures[slot] = ("∞", "") if balance == float("inf") else agent_panel.compact_usage(balance)
+                        note = "购买额度"
                     quota[slot] = quota[slot][:2] + (note,)
                     tones[slot] = "paid" if state in ("paid", "inferred") else "blocked"
         data = self.performance["providers"].get(provider, {})
@@ -770,7 +775,7 @@ class QuotaTray:
                                       status, tuple(quota), None if provider == "gemini" else data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used,
                                       self.burn_chart(provider, now), alert, intel, intel_note,
-                                      quota_tones=tuple(tones), column_iq=column_iq)
+                                      quota_tones=tuple(tones), quota_figures=tuple(figures), column_iq=column_iq)
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
