@@ -96,6 +96,119 @@ def session_ids(row: dict) -> set[str]:
     return {item for item in ids if item}
 
 
+def find_exe() -> str | None:
+    """herdr on PATH, or in the folders its installers use."""
+    found = os.environ.get("CODEX_QUOTA_HERDR_EXE") or shutil.which("herdr")
+    if not found and os.name == "nt":
+        local, home = os.environ.get("LOCALAPPDATA"), os.environ.get("USERPROFILE")
+        for candidate in ((Path(local) / "Programs" / "Herdr" / "bin" / "herdr.exe") if local else None,
+                          (Path(local) / "herdr" / "bin" / "herdr.exe") if local else None,
+                          (Path(home) / ".local" / "bin" / "herdr.exe") if home else None):
+            if candidate is not None and candidate.is_file():
+                found = str(candidate)
+                break
+    return _on_disk_name(found) if found and os.name == "nt" else found
+
+
+# ----- opening an agent (tray click) -------------------------------------------------
+
+AGENT_START_SECONDS = 45     # herdr waits up to 30 s for the agent to be ready
+SERVER_WAIT_SECONDS = 15     # a freshly opened Herdr window starts its server
+
+
+def _session_args() -> list[str]:
+    session = os.environ.get("CODEX_QUOTA_HERDR_SESSION", "").strip()
+    return ["--session", session] if session else []
+
+
+def client_open(processes=None) -> bool:
+    """A Herdr window (the TUI client, `herdr` with no command) is running."""
+    import psutil
+    wanted = _session_args()
+    for process in processes if processes is not None else psutil.process_iter(["name", "cmdline"]):
+        try:
+            info = process.info
+            if (info.get("name") or "").lower() != "herdr.exe":
+                continue
+            args = list(info.get("cmdline") or [])[1:]
+        except (KeyError, AttributeError, TypeError):
+            continue
+        if args == wanted or (not wanted and not args):
+            return True
+    return False
+
+
+def open_window(exe: str, popen=subprocess.Popen) -> None:
+    """A new terminal window showing Herdr (Windows Terminal when available)."""
+    command = [exe] + _session_args()
+    home = str(Path.home())
+    terminal = shutil.which("wt") if os.name == "nt" else None
+    if terminal:
+        popen([terminal, "-w", "new", "-d", home, "--title", "herdr", *command], cwd=home, close_fds=True)
+    else:
+        popen(command, cwd=home, close_fds=True, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+
+
+def _call(exe: str, args: list[str], runner, timeout: float) -> dict:
+    """One herdr CLI request. Errors arrive as JSON on stderr with status 1."""
+    result = runner([exe] + _session_args() + args, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    text = (result.stdout or "").strip() or (result.stderr or "").strip()
+    try:
+        payload = json.loads(text) if text else {}
+    except ValueError:
+        payload = {"error": {"code": "unreadable", "message": text[:200]}}
+    if result.returncode != 0 and "error" not in payload:
+        payload = {"error": {"code": f"exit_{result.returncode}", "message": text[:200]}}
+    return payload
+
+
+def _error(payload: dict) -> tuple[str, str] | None:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not error:
+        return None
+    return str(error.get("code") or ""), str(error.get("message") or error.get("code") or "未知错误")
+
+
+def start_agent(kind: str, *, exe: str | None = None, runner: Callable | None = None, popen=subprocess.Popen,
+                window_open: Callable[[], bool] | None = None, sleep=time.sleep, cwd: str | None = None) -> str:
+    """Open Herdr and start a `kind` agent in a new focused tab; returns its
+    name (kind, kind-2, ...). Raises OSError with a readable message."""
+    exe = exe or find_exe()
+    if not exe:
+        raise FileNotFoundError("未找到 herdr，可设置 CODEX_QUOTA_HERDR_EXE")
+    runner = runner or process_jail.run
+    if not (window_open or client_open)():
+        open_window(exe, popen)           # the window starts the server if it was stopped
+    for _ in range(int(SERVER_WAIT_SECONDS / 0.5)):
+        if _error(_call(exe, ["workspace", "list"], runner, 5)) is None:
+            break
+        sleep(0.5)
+    else:
+        raise OSError("herdr 服务未就绪")
+    home = cwd or str(Path.home())
+    created = _call(exe, ["tab", "create", "--label", kind, "--cwd", home, "--focus"], runner, 10)
+    if (_error(created) or ("",))[0] == "workspace_not_found":      # an empty session: no workspace yet
+        created = _call(exe, ["workspace", "create", "--label", kind, "--cwd", home, "--focus"], runner, 10)
+    failure = _error(created)
+    if failure:
+        raise OSError(f"herdr 无法新建标签页：{failure[1]}")
+    pane = ((created.get("result") or {}).get("root_pane") or {}).get("pane_id")
+    if not pane:
+        raise OSError("herdr 没有返回新窗格")
+    listed = (_call(exe, ["agent", "list"], runner, 5).get("result") or {}).get("agents") or []
+    taken = {str(row.get("name")) for row in listed if isinstance(row, dict) and row.get("name")}
+    names = [kind] + [f"{kind}-{index}" for index in range(2, 100)]
+    for name in (name for name in names if name not in taken):
+        started = _call(exe, ["agent", "start", name, "--kind", kind, "--pane", pane], runner, AGENT_START_SECONDS)
+        failure = _error(started)
+        if failure is None:
+            return name
+        if failure[0] != "agent_name_taken":        # another client took the name meanwhile: try the next
+            raise OSError(f"herdr 无法启动 {kind}：{failure[1]}")
+    raise OSError(f"herdr 中已有太多 {kind}")
+
+
 class Herdr:
     def __init__(self, exe: str | None = None, runner: Callable | None = None, enabled: bool | None = None):
         if enabled is None:
@@ -119,14 +232,7 @@ class Herdr:
         if now - self.looked_at < LOOKUP_SECONDS:
             return None
         self.looked_at = now
-        found = shutil.which("herdr")
-        if not found and os.name == "nt":
-            for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("USERPROFILE")):
-                for candidate in (Path(base or "") / "herdr" / "bin" / "herdr.exe", Path(base or "") / ".local" / "bin" / "herdr.exe"):
-                    if base and candidate.is_file():
-                        found = str(candidate)
-                        break
-        self.exe = _on_disk_name(found) if found and os.name == "nt" else found
+        self.exe = find_exe()
         return self.exe
 
     def poll(self, now: float | None = None) -> list[dict[str, Any]]:

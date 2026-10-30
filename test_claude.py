@@ -52,7 +52,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_everything_derives_from_registry(self):
         self.assertEqual(quota_sources.LABELS["claude"], ("Claude Code", 300))
-        self.assertEqual(IDLE["claude"], 300)
+        self.assertEqual(IDLE["claude"], providers.get("claude").idle_seconds)
         self.assertEqual(SETTLE["claude"], 5)
         self.assertEqual(accent("A"), providers.get("claude").accent)
         self.assertEqual(set(ACCENTS), {"C", "G", "M", "A", "X"})

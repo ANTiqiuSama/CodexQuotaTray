@@ -38,6 +38,7 @@ from quota_sources import (
     placeholder,
     save_cached_snapshots,
 )
+import herdr_source
 import hover_details
 import mimo_usage
 import providers as provider_registry
@@ -293,7 +294,8 @@ def quota_line(snapshot: QuotaSnapshot) -> str:
 
 # Tray order is fixed (providers.TRAY_POSITIONS): Claude Code, Codex (GPT),
 # Grok, Gemini, MiMo.  It never changes with remaining quota or exhaustion.
-REORDER_MIN_SECONDS = 60
+REORDER_MIN_SECONDS = 2          # after a drag, the order is right again within a few seconds
+ORDER_CHECK_SECONDS = 2          # five icon rectangles and one registry read: cheap
 PREFERENCES_PATH = DATA_DIR / "settings.json"
 
 
@@ -399,7 +401,8 @@ class QuotaTray:
             for provider, letter in PROVIDERS.items()
         }
         self.slots = list(self.icons.values())   # fixed tray icons; providers move between them
-        for icon in self.slots:
+        for index, icon in enumerate(self.slots):
+            icon.icon_id = index                  # one ID per slot, so Windows tracks each icon on its own
             icon.settings_action = self.open_settings
 
     # ----- text and card content -------------------------------------------------
@@ -910,16 +913,32 @@ class QuotaTray:
 
     def slots_by_position(self) -> list:
         """The tray icons ("slots") as Windows currently shows them, left to
-        right (top to bottom on a vertical taskbar); icons without a position
-        (overflow flyout, not yet shown) keep their creation order at the end."""
+        right (top to bottom on a vertical taskbar). Icons that are not on
+        the taskbar keep their creation order at the end, so the providers
+        that come last are the ones left in the overflow flyout."""
         slots = getattr(self, "slots", None) or list(self.icons.values())
+        shown = hover_details.tray_visibility()
         placed, unplaced = [], []
         for index, slot in enumerate(slots):
             try:
                 rect = hover_details.icon_rect(slot)
             except Exception:
                 rect = None
-            (placed if rect else unplaced).append((rect, index, slot))
+            # Windows' own record says hidden: the rectangle is the ^ button's.
+            hidden = shown.get(getattr(slot, "icon_id", index)) is False
+            (placed if rect and not hidden else unplaced).append((rect, index, slot))
+        # Overflow icons all report the ^ button's rectangle; two of ours on
+        # one spot are both hidden (the only check where Windows keeps no record).
+        spots = [rect for rect, _, _ in placed]
+        stacked = [item for item in placed if spots.count(item[0]) > 1]
+        if stacked:
+            placed = [item for item in placed if item not in stacked]
+            unplaced = sorted(unplaced + stacked, key=lambda item: item[1])
+        if len(unplaced) != getattr(self, "hidden_slots", 0):
+            self.hidden_slots = len(unplaced)
+            if unplaced:
+                log.warning("%d of %d tray icons are not on the taskbar; turn them on in Settings > Personalization > "
+                            "Taskbar > Other system tray icons (or drag them out of ^)", len(unplaced), len(slots))
         if placed:
             xs = [rect[0] for rect, _, _ in placed]
             ys = [rect[1] for rect, _, _ in placed]
@@ -988,8 +1007,12 @@ class QuotaTray:
         providers = list(providers)
         if not providers:
             return
+        # Read outside the lock: a slow source (a Grok CLI session) must not
+        # hold up the others. Only merging the results is serialised.
+        started = time.monotonic()
+        results = collect(providers, self.snapshots)
+        duration = time.monotonic() - started
         with self.refresh_lock:
-            results = collect(providers, self.snapshots)
             now = time.time()
             for provider, snapshot in results.items():
                 old = self.snapshots.get(provider)
@@ -1008,12 +1031,12 @@ class QuotaTray:
                     self.history.save()
             if self.scheduler is not None:
                 for provider, snapshot in results.items():
-                    self.scheduler.completed(provider, snapshot, now)
+                    self.scheduler.completed(provider, snapshot, now, duration)
             for provider, snapshot in results.items():
-                log.info("quota %s: left=%s second=%s reset=%s/%s stale=%s error=%s", provider,
+                log.info("quota %s: left=%s second=%s reset=%s/%s stale=%s error=%s (%.1fs)", provider,
                          snapshot.remaining_percent, snapshot.secondary_remaining_percent, snapshot.resets_at,
-                         snapshot.secondary_resets_at, snapshot.stale, snapshot.error)
-        self.update_ui()
+                         snapshot.secondary_resets_at, snapshot.stale, snapshot.error, duration)
+            self.update_ui()
 
     def refresh(self) -> None:
         """Synchronous refresh of every provider (used by checks and tests)."""
@@ -1027,21 +1050,35 @@ class QuotaTray:
         self.wake.set()
 
     def refresh_loop(self) -> None:
+        """Each due source is read on its own thread, so a hovered Codex is
+        not kept waiting behind a Grok CLI session."""
         while not self.stop_event.is_set():
             try:
-                due = self.scheduler.take_due(time.time())
-                if due:
-                    self.refresh_providers(due)
+                for provider in self.scheduler.take_due(time.time()):
+                    threading.Thread(target=self.refresh_one, args=(provider,), name=f"quota-{provider}", daemon=True).start()
             except Exception:
-                log.exception("quota refresh failed")
-                for provider in PROVIDERS:  # Never leave a provider stuck "running".
-                    if provider in self.scheduler.running:
-                        self.scheduler.completed(provider, placeholder(provider, "刷新异常"), time.time())
+                log.exception("quota refresh scheduling failed")
             self.wake.wait(self.scheduler.next_wake(time.time()))
             self.wake.clear()
 
+    def refresh_one(self, provider: str) -> None:
+        try:
+            self.refresh_providers([provider])
+        except Exception:
+            log.exception("quota refresh of %s failed", provider)
+        finally:
+            if provider in self.scheduler.running:    # never leave a provider stuck "running"
+                self.scheduler.completed(provider, placeholder(provider, "刷新异常"), time.time())
+            self.wake.set()                          # its next due time may be the earliest now
+
     def feed_scheduler(self, performance: dict, now: float) -> None:
+        """Live state for the refresh cadence: generating or a live agent of
+        the source (active), and the pointer on its icon or panel (hover)."""
         moved = False
+        for provider, icon in (getattr(self, "icons", None) or {}).items():
+            if provider in self.scheduler.providers:
+                pointed = bool(getattr(icon, "details_visible", False) or getattr(icon, "hover_open", False))
+                moved |= self.scheduler.hover(provider, pointed, now)
         for provider in self.scheduler.providers:
             data = performance["providers"].get(provider)
             if data is None:
@@ -1053,7 +1090,7 @@ class QuotaTray:
                 self.last_samples[provider] = sample
             elif provider not in self.last_samples:
                 self.last_samples[provider] = None
-            moved |= self.scheduler.activity(provider, data.get("active_sessions", 0) > 0, finished, now)
+            moved |= self.scheduler.activity(provider, self.source_working(provider), finished, now)
         if moved:
             self.wake.set()
 
@@ -1085,10 +1122,12 @@ class QuotaTray:
                     self.update_codex_locally(now)
                 if "claude" in PROVIDERS:
                     self.update_claude_locally(now)
-                if now - getattr(self, "order_checked_at", 0.0) >= 30:
-                    self.order_checked_at = now
+                if now - getattr(self, "registered_at", 0.0) >= 30:
+                    self.registered_at = now
                     self.ensure_icons_registered()
-                    self.maybe_reorder(now)   # resets pass between refreshes
+                if now - getattr(self, "order_checked_at", 0.0) >= ORDER_CHECK_SECONDS:
+                    self.order_checked_at = now
+                    self.maybe_reorder(now)   # a drag or Explorer reflow is undone within seconds
                 for provider, letter in PROVIDERS.items():
                     if self.icons[provider].visible:
                         self.update_icon(provider, letter)
@@ -1103,6 +1142,11 @@ class QuotaTray:
     # ----- actions ---------------------------------------------------------------
 
     def open_provider(self, provider: str) -> None:
+        if provider == "grok" and herdr_source.find_exe():
+            # Grok opens in Herdr: a new focused tab with a grok agent. Starting
+            # waits for the agent to be ready, so keep it off the tray thread.
+            threading.Thread(target=self.open_in_herdr, args=(provider,), name="herdr-open", daemon=True).start()
+            return
         kind, resolve = LAUNCHERS[provider]
         label = provider_registry.get(provider).label
         try:
@@ -1126,6 +1170,15 @@ class QuotaTray:
             subprocess.Popen(command, cwd=str(cwd), creationflags=flags, close_fds=True)
         except OSError as error:
             ctypes.windll.user32.MessageBoxW(None, str(error), f"{label} · 无法打开", 0x10)
+
+    def open_in_herdr(self, provider: str) -> None:
+        label = provider_registry.get(provider).label
+        try:
+            name = herdr_source.start_agent(provider)
+            log.info("opened %s in herdr as %s", provider, name)
+        except (OSError, subprocess.SubprocessError) as error:
+            log.warning("could not open %s in herdr: %s", provider, error)
+            ctypes.windll.user32.MessageBoxW(None, str(error), f"{label} · 无法在 herdr 中打开", 0x10)
 
     def mimo_login(self, _icon=None, _item=None) -> None:
         if getattr(self, "mimo_login_running", False):

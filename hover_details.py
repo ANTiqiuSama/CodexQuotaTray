@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import itertools
 import logging
 import os
+import sys
 import time
 
 import pystray
@@ -33,7 +35,9 @@ ULW_ALPHA = 2
 class HoverIcon(pystray.Icon):
     """Keep an explicit icon ID and opt into application-owned hover UI."""
 
-    # Retain the old installation's ID so Windows preserves its visible pins.
+    # Each tray slot gets its own ID (set by the tray, 0..4): Windows keys an
+    # icon's visibility and place on (program, ID), so shared IDs let it hide
+    # or move one of them at random. Slot 0 keeps the old installation's 0.
     icon_id = 0
     details_visible = False
 
@@ -80,6 +84,43 @@ class HoverIcon(pystray.Icon):
             super()._on_notify(0, win32.WM_RBUTTONUP)
         elif event in (WM_USER + 6, WM_USER + 7):  # POPUPOPEN / POPUPCLOSE
             self.hover_open = event == WM_USER + 6
+
+
+def tray_visibility(executable: str | None = None) -> dict[int, bool]:
+    """{icon ID: shown on the taskbar} as Windows 11 remembers it for this
+    program (IsPromoted=1 on the taskbar, otherwise in the overflow flyout).
+    Read only. Empty where unknown: Windows 10, or a source run, whose
+    python.exe entries may belong to other programs."""
+    if executable is None:
+        if not getattr(sys, "frozen", False):
+            return {}
+        executable = sys.executable
+    wanted = os.path.normcase(os.path.abspath(executable))
+    result: dict[int, bool] = {}
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\NotifyIconSettings") as root:
+            for index in itertools.count():
+                try:
+                    name = winreg.EnumKey(root, index)
+                except OSError:
+                    break
+                try:
+                    with winreg.OpenKey(root, name) as key:
+                        path = str(winreg.QueryValueEx(key, "ExecutablePath")[0])
+                        if os.path.normcase(os.path.abspath(path)) != wanted:
+                            continue
+                        uid = int(winreg.QueryValueEx(key, "UID")[0])
+                        try:
+                            promoted = int(winreg.QueryValueEx(key, "IsPromoted")[0]) == 1
+                        except OSError:
+                            promoted = False          # never promoted: Windows keeps it in the overflow
+                        result[uid] = promoted
+                except (OSError, TypeError, ValueError):
+                    continue
+    except (ImportError, OSError):
+        return {}
+    return result
 
 
 class NotifyIconIdentifier(ctypes.Structure):

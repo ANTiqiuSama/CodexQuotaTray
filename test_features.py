@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import quota_sources
 from forecast import QuotaHistory, Sample, current_window, duration_text, forecast
-from refresh_scheduler import ACTIVE, IDLE, RETRY, SETTLE, RefreshScheduler
+from refresh_scheduler import DURATION_GAP, HOVER, ACTIVE, IDLE, RETRY, SETTLE, RefreshScheduler
 
 HOUR = 3600
 
@@ -123,12 +123,68 @@ class SchedulerTests(unittest.TestCase):
     def test_continuous_use_refreshes_at_active_interval(self):
         scheduler = RefreshScheduler(("codex",), 0)
         scheduler.take_due(0)
-        scheduler.completed("codex", self.snapshot(), 800)
+        scheduler.completed("codex", self.snapshot(), 990)
         scheduler.activity("codex", True, False, 1000)
-        self.assertEqual(scheduler.due["codex"], 1060)  # One minute into use, not instantly.
-        scheduler.take_due(1060)
-        scheduler.completed("codex", self.snapshot(), 1060)
-        self.assertEqual(scheduler.due["codex"], 1060 + ACTIVE["codex"])
+        first = 1000 + ACTIVE["codex"]
+        self.assertEqual(scheduler.due["codex"], first)  # One active interval into use, not instantly.
+        scheduler.take_due(first)
+        scheduler.completed("codex", self.snapshot(), first)
+        self.assertEqual(scheduler.due["codex"], first + ACTIVE["codex"])
+
+    def test_hover_is_fastest_then_active_then_idle_for_every_source(self):
+        for provider in IDLE:
+            with self.subTest(provider=provider):
+                self.assertLess(HOVER[provider], ACTIVE[provider])
+                self.assertLess(ACTIVE[provider], IDLE[provider])
+        self.assertEqual(max(IDLE, key=IDLE.get), "grok")        # its reader opens a whole CLI session
+
+    def test_hover_reads_now_then_at_the_hover_interval(self):
+        scheduler = RefreshScheduler(("codex",), 0)
+        scheduler.take_due(0)
+        scheduler.completed("codex", self.snapshot(), 100)
+        self.assertEqual(scheduler.due["codex"], 100 + IDLE["codex"])
+        self.assertTrue(scheduler.hover("codex", True, 100 + HOVER["codex"] / 2))    # just read: not again at once,
+        self.assertEqual(scheduler.due["codex"], 100 + HOVER["codex"])                # but one hover interval later
+        scheduler.take_due(110)
+        scheduler.hover("codex", False, 111)
+        scheduler.completed("codex", self.snapshot(), 112)          # pointer gone: back to the idle cadence
+        self.assertEqual(scheduler.due["codex"], 112 + IDLE["codex"])
+        back = 112 + IDLE["codex"] // 2
+        self.assertTrue(scheduler.hover("codex", True, back))       # older than the hover interval: now
+        self.assertEqual((scheduler.due["codex"], scheduler.reason["codex"]), (back, "悬停"))
+        scheduler.take_due(back)
+        scheduler.completed("codex", self.snapshot(), back + 2)
+        self.assertEqual(scheduler.due["codex"], back + 2 + HOVER["codex"])
+        scheduler.hover("codex", False, 503)
+        scheduler.activity("codex", True, False, 503)
+        scheduler.take_due(scheduler.due["codex"])
+        scheduler.completed("codex", self.snapshot(), 600)
+        self.assertEqual((scheduler.due["codex"], scheduler.reason["codex"]), (600 + ACTIVE["codex"], "使用中"))
+
+    def test_a_slow_read_is_not_repeated_back_to_back(self):
+        scheduler = RefreshScheduler(("grok",), 0)
+        scheduler.hover("grok", True, 0)
+        scheduler.take_due(0)
+        scheduler.completed("grok", self.snapshot(), 40, duration=35)      # a whole Grok CLI session
+        self.assertEqual(scheduler.due["grok"], 40 + max(HOVER["grok"], DURATION_GAP * 35))
+
+    def test_hover_speeds_up_a_used_up_quota_but_not_an_account_without_one(self):
+        scheduler = RefreshScheduler(("grok",), 0)
+        scheduler.take_due(0)
+        used_up = SimpleNamespace(error=None, remaining_percent=0, resets_at=3 * 86400, secondary_remaining_percent=None,
+                                  secondary_resets_at=None, window_minutes=10080, secondary_window_minutes=None)
+        scheduler.completed("grok", used_up, 0)
+        self.assertGreater(scheduler.due["grok"], IDLE["grok"])        # far from the reset: parked
+        later = HOVER["grok"] + 10
+        scheduler.hover("grok", True, later)
+        self.assertEqual(scheduler.due["grok"], later)
+        scheduler.take_due(later)
+        scheduler.completed("grok", used_up, later + 20)
+        self.assertEqual(scheduler.due["grok"], later + 20 + HOVER["grok"])
+        dormant = RefreshScheduler(("claude",), 0)
+        dormant.take_due(0)
+        dormant.completed("claude", self.snapshot(error="未找到订阅额度"), 0)
+        self.assertFalse(dormant.hover("claude", True, 100))
 
     def test_reset_time_pulls_refresh_forward(self):
         scheduler = RefreshScheduler(("codex",), 0)
@@ -146,8 +202,9 @@ class SchedulerTests(unittest.TestCase):
             scheduler.completed("codex", self.snapshot(error="x"), now)
             delays.append(scheduler.due["codex"] - now)
             now = scheduler.due["codex"]
-        self.assertEqual(delays[:4], list(RETRY))
-        self.assertEqual(delays[-1], RETRY[-1])
+        # Retries back off, but never wait longer than the idle interval.
+        self.assertEqual(delays[:4], [min(delay, IDLE["codex"]) for delay in RETRY])
+        self.assertEqual(delays[-1], min(RETRY[-1], IDLE["codex"]))
 
     def test_exhausted_grok_waits_then_polls_near_reset(self):
         from refresh_scheduler import EXHAUSTED, NEAR_RESET
