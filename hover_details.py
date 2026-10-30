@@ -51,6 +51,15 @@ class HoverIcon(pystray.Icon):
         # Set this again after Explorer recreates the notification area.
         self._version4 = bool(self._message(4, 0, uVersion=4))
 
+    def ensure_registered(self) -> bool:
+        """Re-add an icon the Shell does not hold. pystray ignores a failed
+        NIM_ADD (e.g. while Explorer is busy) and only retries on
+        TaskbarCreated, so such an icon would stay missing until restart."""
+        if not self.visible or not self._hwnd or self._message(win32.NIM_MODIFY, 0):
+            return False
+        self._show()
+        return True
+
     def _on_notify(self, wparam, lparam):
         event = lparam & 0xFFFF if getattr(self, "_version4", False) else lparam
         action = getattr(self, "settings_action", None)
