@@ -514,9 +514,9 @@ class AgentPanelTests(unittest.TestCase):
         self.assertTrue(self.tray.codex_quota_mode())
         chart = self.tray.burn_chart('claude', now)
         self.assertEqual([(s.label,s.slot,s.points[-1][1]) for s in chart.series],
-                         [('Codex · 每周（额度模式工作）',1,61)])
+                         [('Codex · 每周（5 小时已用完）',1,61)])
         self.assertEqual(self.tray.panel('codex').status, '额度模式工作')
-        self.assertTrue(self.tray.headline_forecast('codex')[0].startswith('每周额度：'))
+        self.assertTrue(self.tray.headline_forecast('codex')[0].startswith('5 小时额度已用完，仍在工作'))
         snapshot.remaining_percent = 100
         self.assertFalse(self.tray.codex_quota_mode())
         self.assertEqual(self.tray.burn_chart('codex',now).series[0].label, 'Codex · 5 小时')
@@ -542,6 +542,19 @@ class AgentPanelTests(unittest.TestCase):
                                                      10080,2,98,int(now+86400))
         chart = self.tray.burn_chart('codex',now)
         self.assertEqual([s.label for s in chart.series], ['Claude Code · 5 小时'])
+
+    def test_only_live_gemini_models_highlight_their_own_pool(self):
+        from tps_sources import Observation
+        now = time.time()
+        reset = int(now+3600)
+        pools = [{'key':'argon','label':'Argon','remaining_percent':60,'resets_at':reset,'window_minutes':300},
+                 {'key':'claude_gpt','label':'Claude/GPT','remaining_percent':40,'resets_at':reset,'window_minutes':300},
+                 {'key':'gemini','label':'Gemini','remaining_percent':70,'resets_at':reset,'window_minutes':300}]
+        self.tray.snapshots['gemini'] = QuotaSnapshot('gemini','Gemini',300,40,60,reset,now,False,None,pools=pools)
+        agent = dict(self.tray.agents[0],provider='gemini',live=True,model='gemini-3.8-flash')
+        self.tray.agents = [agent]
+        self.tray.tps_monitor.events = [Observation('past','Antigravity','old','gemini','claude-opus-5',now-20,50)]
+        self.assertEqual(self.tray.panel('gemini').quota_tones, ('','','active'))
 
     def test_chart_starts_at_the_first_measured_reading(self):
         from pathlib import Path

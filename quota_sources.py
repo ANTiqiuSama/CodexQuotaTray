@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -43,9 +44,15 @@ class QuotaSnapshot:
     pools: list[dict[str, Any]] | None = None
     today_used: float | None = None          # MiMo Credits, not a daily quota
     today_date: str | None = None            # local date; do not reuse yesterday's total
+    credits_balance: float | None = None     # Codex purchased credits left; None when not reported
+    reset_credits: int | None = None         # Codex free full resets (5 h + weekly) available
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if isinstance(self.credits_balance, (int, float)) and math.isinf(self.credits_balance):
+            result['credits_balance'] = None
+            result['credits_unlimited'] = True
+        return result
 
     @property
     def display_remaining(self) -> float | None:
@@ -163,7 +170,24 @@ def _percent(value: Any) -> float | None:
     return max(0.0, min(100.0, float(value)))
 
 
-def parse_codex_rate_limits(bucket: dict[str, Any]) -> QuotaSnapshot:
+def _codex_credits(data: Any, has: str, balance: str) -> float | None:
+    """Purchased credits left: 0 without credits, inf when unlimited, None if not reported."""
+    if not isinstance(data, dict) or not isinstance(data.get(has), bool):
+        return None
+    if data.get("unlimited") is True:
+        return float("inf")
+    if not data.get(has):
+        return 0.0
+    try:
+        if data.get(balance) is None:
+            return None
+        value = float(data[balance])
+        return max(0.0, value) if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_codex_rate_limits(bucket: dict[str, Any], reset_credits: Any = None) -> QuotaSnapshot:
     window = bucket.get("primary") or {}
     used_value = _percent(window.get("usedPercent"))
     if used_value is None:
@@ -184,6 +208,8 @@ def parse_codex_rate_limits(bucket: dict[str, Any]) -> QuotaSnapshot:
         secondary_used_percent=secondary_used,
         secondary_remaining_percent=None if secondary_used is None else 100.0 - secondary_used,
         secondary_resets_at=secondary.get("resetsAt") if secondary_used is not None else None,
+        credits_balance=_codex_credits(bucket.get("credits"), "hasCredits", "balance"),
+        reset_credits=reset_credits if isinstance(reset_credits, int) and not isinstance(reset_credits, bool) and reset_credits >= 0 else None,
     )
 
 
@@ -205,7 +231,8 @@ def parse_codex_session_limits(limits: dict[str, Any], moment: float) -> QuotaSn
         return None
     return QuotaSnapshot("codex", "Codex", primary[1], primary[0], 100.0 - primary[0], primary[2], moment, False, None,
                          secondary[1] if secondary else None, secondary[0] if secondary else None,
-                         None if secondary is None else 100.0 - secondary[0], secondary[2] if secondary else None)
+                         None if secondary is None else 100.0 - secondary[0], secondary[2] if secondary else None,
+                         credits_balance=_codex_credits(limits.get("credits"), "has_credits", "balance"))
 
 
 def get_codex_quota(raw: dict | None = None) -> QuotaSnapshot:
@@ -227,7 +254,7 @@ def get_codex_quota(raw: dict | None = None) -> QuotaSnapshot:
             raw["response"] = result
         buckets = result.get("rateLimitsByLimitId") or {"codex": result.get("rateLimits", {})}
         bucket = buckets.get("codex") or result.get("rateLimits") or {}
-        return parse_codex_rate_limits(bucket)
+        return parse_codex_rate_limits(bucket, (result.get("rateLimitResetCredits") or {}).get("availableCount"))
     except Exception as exc:
         return _unknown("codex", "Codex", None, f"读取失败：{type(exc).__name__}: {exc}")
     finally:
@@ -403,6 +430,8 @@ def load_cached_snapshots() -> dict[str, QuotaSnapshot]:
                 pools=item.get("pools") if isinstance(item.get("pools"), list) else None,
                 today_used=item.get("today_used"),
                 today_date=item.get("today_date"),
+                credits_balance=float("inf") if item.get("credits_unlimited") is True else item.get("credits_balance"),
+                reset_credits=item.get("reset_credits"),
             )
             result[snapshot.provider] = snapshot
         return result

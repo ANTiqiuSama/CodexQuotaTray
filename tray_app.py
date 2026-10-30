@@ -10,7 +10,6 @@ import subprocess
 import sys
 import threading
 import time
-from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +22,7 @@ import agent_tasks
 import forecast as forecast_module
 from forecast import Forecast, QuotaHistory, duration_text
 from hover_details import HoverDetails, HoverIcon
-from icon_art import live_icon, quota_icon
+from icon_art import live_icon, ring_icon, waiting_icon
 from quota_sources import (
     mimo_snapshot,
     mimo_tracker,
@@ -73,31 +72,62 @@ def pace_marker(snapshot: QuotaSnapshot, now: float | None = None) -> float | No
     return max(0.0, min(100.0, 100.0 * (ends - now) / (minutes * 60)))
 
 
-# The TPS loop asks for all five icons every second, almost always with the
-# same figures; drawing each one took ~3 ms. Cached images are shared, so they
-# must never be drawn on afterwards (pystray only serialises them).
-@lru_cache(maxsize=64)
-def _quota_icon(remaining, letter, stale, marker, reset_hint) -> Image.Image:
-    return quota_icon(remaining, letter, stale=stale, marker=marker, reset_hint=reset_hint)
-
-
-@lru_cache(maxsize=64)
-def _live_icon(tps, letter, reset_hint) -> Image.Image:
-    return live_icon(tps, letter, reset_hint=reset_hint)
-
-
 def _rounded(value, digits=1):
     return None if value is None else round(float(value), digits)
 
 
-def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = False) -> Image.Image:
-    # The ring follows the binding window (e.g. Codex weekly when it is lower).
-    return _quota_icon(_rounded(snapshot.display_remaining), letter, bool(snapshot.stale),
-                       _rounded(pace_marker(snapshot)), bool(reset_hint))
+def icon_windows(snapshot: QuotaSnapshot, letter: str) -> tuple[tuple, tuple | None]:
+    """(values, colours) of the ring: left half the short window, right half
+    the long one. Model pools show their two tightest pools in panel order,
+    each in the colour of its panel column."""
+    if snapshot.provider == "mimo":
+        return (snapshot.display_remaining,), None
+    pools = snapshot.pools or []
+    if len(pools) > 1:
+        known = [(index, pool) for index, pool in enumerate(pools[:3]) if pool.get("remaining_percent") is not None]
+        tight = sorted(sorted(known, key=lambda item: item[1]["remaining_percent"])[:2], key=lambda item: item[0])
+        if not tight:
+            return (None,), None
+        values = tuple(pool["remaining_percent"] for _, pool in tight)
+        if len(tight) == 1:
+            return values, None
+        return values, tuple(agent_panel.quota_shade(letter, index, pool["remaining_percent"], True) for index, pool in tight)
+    if snapshot.secondary_remaining_percent is not None:
+        return (snapshot.remaining_percent, snapshot.secondary_remaining_percent), None
+    return (snapshot.remaining_percent,), None
+
+
+def usable_again_at(snapshot: QuotaSnapshot, now: float) -> float | None:
+    """When a used-up source can run again: the last reset among its empty
+    windows (all must recover), or the first pool to come back for model
+    pools. None while it still has quota or the time is unknown."""
+    if snapshot.pools and len(snapshot.pools) > 1:
+        known = [(p.get("remaining_percent"), p.get("resets_at")) for p in snapshot.pools if p.get("remaining_percent") is not None]
+        if not known or any(value >= 0.5 for value, _ in known):
+            return None
+        stamps = [stamp for _, stamp in known if stamp and stamp > now]
+        return float(min(stamps)) if stamps else None
+    empty = [(value, stamp) for value, stamp in ((snapshot.remaining_percent, snapshot.resets_at),
+                                                  (snapshot.secondary_remaining_percent, snapshot.secondary_resets_at))
+             if value is not None and value < 0.5]
+    if not empty or any(not stamp or stamp <= now for _, stamp in empty):
+        return None
+    return float(max(stamp for _, stamp in empty))
+
+
+def make_provider_icon(snapshot: QuotaSnapshot, letter: str, reset_hint: bool = False, now: float | None = None) -> Image.Image:
+    # Icons are cached in icon_art and shared: never draw on them afterwards.
+    now = now or time.time()
+    until = None if snapshot.stale else usable_again_at(snapshot, now)
+    if until is not None:
+        return waiting_icon(int(-(-(until - now) // 3600)), letter, bool(reset_hint))
+    values, colors = icon_windows(snapshot, letter)
+    return ring_icon(tuple(_rounded(value) for value in values), letter, bool(snapshot.stale),
+                     _rounded(pace_marker(snapshot)), bool(reset_hint), colors)
 
 
 def make_tps_icon(performance: dict, letter: str, reset_hint: bool = False) -> Image.Image:
-    return _live_icon(_rounded(performance.get("display_tps", 0) or 0), letter, bool(reset_hint))
+    return live_icon(_rounded(performance.get("display_tps", 0) or 0), letter, bool(reset_hint))
 
 
 def make_display_icon(snapshot: QuotaSnapshot, letter: str, performance: dict, reset_hint: bool = False) -> Image.Image:
@@ -150,6 +180,14 @@ def window_label(minutes: int | None) -> str:
     if minutes % 60 == 0:
         return f"{minutes // 60} 小时"
     return f"{minutes} 分钟"
+
+
+def compact_number(value: float) -> str:
+    """59773 -> "59.8k", 1250000 -> "1.3M", 840 -> "840"."""
+    for limit, suffix in ((1e6, "M"), (1e3, "k")):
+        if value >= limit:
+            return f"{value / limit:.1f}".rstrip("0").rstrip(".") + suffix
+    return f"{value:.0f}"
 
 
 def reset_distance(timestamp: float | None, now: float) -> str | None:
@@ -367,6 +405,22 @@ class QuotaTray:
         snapshot = self.snapshots.get(provider)
         if snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
             return self.pool_forecast(provider)
+        state, empty = self.exhausted_state(provider)
+        if state:
+            now = time.time()
+            minutes = (snapshot.window_minutes, snapshot.secondary_window_minutes)
+            names = "、".join(window_label(minutes[slot]) or "当前" for slot in empty)
+            until = usable_again_at(snapshot, now)
+            back = f"{reset_distance(until, now)}后恢复" if until else "恢复时间未知"
+            if state == "paid":
+                using = "正在用购买的额度" if self.source_working(provider) else "可用购买的额度继续"
+                return f"{names}额度已用完，{using}；{back}", "warn"
+            if state == "inferred":
+                return f"{names}额度已用完，仍有输出，可能使用额外额度；{back}", "warn"
+            if state == "working":
+                return f"{names}额度已用完，仍在工作；{back}", "warn"
+            spare = f"；可用免费重置 {snapshot.reset_credits} 次" if snapshot.reset_credits else ""
+            return f"{names}额度已用完，{back}{spare}", "danger"
         items = self.forecasts(provider)
         if not items:
             return "", "unknown"
@@ -432,6 +486,27 @@ class QuotaTray:
         return bool(data.get("active_sessions", 0) or any(
             agent.get("live") and agent.get("provider") == provider for agent in getattr(self, "agents", [])))
 
+    def exhausted_state(self, provider: str) -> tuple[str | None, tuple[int, ...]]:
+        """Known credits, inferred Claude extra usage, working, or blocked."""
+        snapshot = self.snapshots.get(provider)
+        if snapshot is None or snapshot.stale or provider == "mimo" or (snapshot.pools and len(snapshot.pools) > 1):
+            return None, ()
+        empty = tuple(slot for slot, value in enumerate((snapshot.remaining_percent, snapshot.secondary_remaining_percent))
+                      if value is not None and value < 0.5)
+        if not empty:
+            return None, ()
+        if provider == "codex" and snapshot.credits_balance is not None and snapshot.credits_balance > 0:
+            return "paid", empty
+        if self.source_working(provider):
+            now = time.time()
+            events = getattr(getattr(self, "tps_monitor", None), "events", ())
+            if provider == "claude" and snapshot.updated_at and any(
+                    event.provider == "claude" and event.output_tokens > 0 and
+                    max(now-120, snapshot.updated_at-5) <= event.ended_at <= now+5 for event in events):
+                return "inferred", empty
+            return "working", empty
+        return "blocked", empty
+
     def codex_quota_mode(self) -> bool:
         if "codex" not in self.snapshots or not self.source_working("codex"):
             return False
@@ -440,10 +515,9 @@ class QuotaTray:
         week = next((w for w in windows if w[3] == 10080 and w[1] is not None), None)
         return bool(five and five[1] <= 0 and week)
 
-    def burn_chart(self, provider: str, now: float) -> "agent_panel.BurnChart | None":
-        """Global trends of live or recently used sources, identical on every icon."""
-        if self.history is None:
-            return None
+    def active_sources(self, now: float) -> dict[str, set[str]]:
+        """Sources working now or with real output in the last half hour, and
+        the (lower-cased) models they ran."""
         active: dict[str, set[str]] = {}
         for agent in getattr(self, "agents", []):
             if agent.get("live") and agent.get("provider") in self.snapshots:
@@ -459,19 +533,38 @@ class QuotaTray:
         desktop_use = getattr(monitor, "claude_desktop_last_use", 0.0)
         if "claude" in self.snapshots and desktop_use > 0 and now - self.CHART_RECENT_SECONDS <= desktop_use <= now + 5:
             active.setdefault("claude", set())
+        return active
+
+    def live_models(self, provider: str) -> set[str]:
+        """Only models tied to current work; recent completed sessions do not mark a pool active."""
+        return {str(agent.get("model") or "").lower() for agent in getattr(self, "agents", [])
+                if agent.get("live") and agent.get("provider") == provider and agent.get("model")}
+
+    @staticmethod
+    def pool_keys(models) -> set[str]:
+        """Gemini pools the given models draw from."""
+        keys = set()
+        for model in models:
+            if "argon" in model:
+                keys.add("argon")
+            elif any(name in model for name in ("claude", "opus", "sonnet", "gpt")):
+                keys.add("claude_gpt")
+            elif "gemini" in model:
+                keys.add("gemini")
+        return keys
+
+    def burn_chart(self, provider: str, now: float) -> "agent_panel.BurnChart | None":
+        """Global trends of live or recently used sources, identical on every icon."""
+        if self.history is None:
+            return None
+        active = self.active_sources(now)
         candidates = []
         for key, snapshot in self.snapshots.items():
             if key not in active:
                 continue
             allowed = set()
             if key == "gemini" and snapshot.pools and len(snapshot.pools) > 1:
-                for model in active[key]:
-                    if "argon" in model:
-                        allowed.add("argon")
-                    elif any(name in model for name in ("claude", "opus", "sonnet", "gpt")):
-                        allowed.add("claude_gpt")
-                    elif "gemini" in model:
-                        allowed.add("gemini")
+                allowed = self.pool_keys(active[key])
             windows = self.quota_windows(key)
             selected = None
             quota_mode = key == "codex" and self.codex_quota_mode()
@@ -505,7 +598,7 @@ class QuotaTray:
                 name = "Gemini" if key == "gemini" else provider_registry.get(key).label
                 chart_label = name if label == name else f"{name} · {label}"
                 if quota_mode:
-                    chart_label += "（额度模式工作）"
+                    chart_label += "（5 小时已用完）"
                 series = agent_panel.BurnSeries(chart_label, slot,
                     tuple((round(t, 1), round(r, 2)) for t, r in points),
                     None if rate is None else round(rate, 3), float(resets_at) if resets_at else None,
@@ -587,16 +680,19 @@ class QuotaTray:
         # Same order for every icon so the panel keeps its size and layout when switching.
         snapshot = self.snapshots.get(provider)
         quota: list[tuple] = []
+        tones: list[str] = []
         # Window columns are titled by the time left until their reset; the
         # window name stays as a fallback when no reset is scheduled. Model
         # pools follow suit and name the model under the bar.
         if snapshot is not None and provider == "mimo":
             quota.append((reset_distance(snapshot.resets_at, now) or "套餐额度", snapshot.display_remaining, ""))
         elif snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
+            in_use = self.pool_keys(self.live_models(provider)) if self.source_working(provider) else set()
             for pool in snapshot.pools[:3]:
                 name = pool.get("label") or pool.get("key") or "额度"
                 countdown = reset_distance(pool.get("resets_at"), now)
                 quota.append((countdown or name, pool.get("remaining_percent"), name if countdown else ""))
+                tones.append("active" if countdown and pool.get("key") in in_use else "")
         elif snapshot is not None:
             quota.append((reset_distance(snapshot.resets_at, now) or window_label(snapshot.window_minutes) or "当前",
                           snapshot.remaining_percent, ""))
@@ -604,9 +700,25 @@ class QuotaTray:
                 quota.append((reset_distance(snapshot.secondary_resets_at, now)
                               or window_label(snapshot.secondary_window_minutes) or "第二窗口",
                               snapshot.secondary_remaining_percent, ""))
+        state, empty = self.exhausted_state(provider)
+        if state:
+            balance = snapshot.credits_balance
+            paid = "购买额度" if balance is None else "购买额度 无限" if balance == float("inf") else f"购买额度 {compact_number(balance)}"
+            tones = [""] * len(quota)
+            for slot in empty:
+                if slot < len(quota):
+                    note = paid if state == "paid" else "可能额外额度" if state == "inferred" else "已用完"
+                    quota[slot] = quota[slot][:2] + (note,)
+                    tones[slot] = "paid" if state in ("paid", "inferred") else "blocked"
         data = self.performance["providers"].get(provider, {})
-        if provider == "codex" and self.codex_quota_mode():
+        if state == "paid":
+            status, tone = ("购买额度运行" if working or self.source_working(provider) else "可用购买额度"), "paid"
+        elif state == "inferred":
+            status, tone = "可能使用额外额度", "paid"
+        elif state == "working":
             status, tone = "额度模式工作", "live"
+        elif state == "blocked":
+            status, tone = "等待重置", "blocked"
         elif working:
             status, tone = f"{working} 个在工作", "live"
         elif snapshot is not None and snapshot.stale:
@@ -633,7 +745,8 @@ class QuotaTray:
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
                                       tone, banner, forecast, forecast_tone, today_used,
-                                      self.burn_chart(provider, now), alert, intel, intel_note)
+                                      self.burn_chart(provider, now), alert, intel, intel_note,
+                                      quota_tones=tuple(tones))
 
     def merge(self, first: str, second: str) -> str | None:
         a, b = self.clusters.get(first), self.clusters.get(second)
@@ -1173,6 +1286,11 @@ class QuotaTray:
         if record and current is not None and record[0] > (current.updated_at or 0) and record[0] > now - 6 * 3600:
             fresh = parse_codex_session_limits(record[1], record[0])
             if fresh is not None:
+                # Session records carry no free-reset count (and older ones no balance).
+                if not current.stale:
+                    fresh.reset_credits = current.reset_credits
+                    if fresh.credits_balance is None:
+                        fresh.credits_balance = current.credits_balance
                 self.announce_resets("codex", current, fresh, now)
                 self.snapshots["codex"] = fresh
                 if self.history is not None and self.history.record(fresh):
