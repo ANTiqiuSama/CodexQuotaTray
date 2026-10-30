@@ -31,16 +31,53 @@ class ClaudeStatusTests(unittest.TestCase):
             path.write_text(json.dumps({'samples':rows}))
             self.assertEqual(claude_status.recent_desktop_usage(1200, roots=[root]), 0)
 
-    def test_newest_native_report_skips_corrupt_and_expired_windows(self):
+    def test_expired_window_rolls_over_to_an_unused_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'a.json').write_text(json.dumps({'updated_at': 1000, 'rate_limits': {
                 'five_hour': {'used_percentage': 20, 'resets_at': 2000},
                 'seven_day': {'used_percentage': 40, 'resets_at': 9000}}}))
             (root / 'bad.json').write_text('{broken')
-            result = claude_status.latest(2100, root)
-            self.assertEqual(set(result['rate_limits']), {'seven_day'})
-            self.assertIsNone(claude_status.latest(100000, root))
+            result = claude_status.latest(2100, root)['rate_limits']
+            self.assertEqual(result['five_hour'], {'used_percentage': 0.0, 'resets_at': None, 'idle': True})
+            self.assertEqual(result['seven_day'], {'used_percentage': 40, 'resets_at': 9000})
+            self.assertIsNone(claude_status.latest(1000 + 8 * 86400, root))
+
+    def test_window_left_out_by_claude_code_is_idle_not_unknown(self):
+        # Claude Code drops five_hour from its status line once that reading passes its reset.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'a.json').write_text(json.dumps({'updated_at': 1000, 'rate_limits': {
+                'seven_day': {'used_percentage': 10, 'resets_at': 9000}}}))
+            (root / 'empty.json').write_text(json.dumps({'updated_at': 1500, 'rate_limits': {}}))
+            result = claude_status.latest(1600, root)
+            self.assertEqual(result['updated_at'], 1000)  # a report without readings says nothing
+            self.assertEqual(result['rate_limits']['five_hour']['used_percentage'], 0.0)
+            self.assertTrue(result['rate_limits']['five_hour']['idle'])
+
+    def test_each_window_takes_its_newest_reading_from_any_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'old.json').write_text(json.dumps({'updated_at': 1000, 'rate_limits': {
+                'five_hour': {'used_percentage': 30, 'resets_at': 5000},
+                'seven_day': {'used_percentage': 5, 'resets_at': 9000}}}))
+            (root / 'new.json').write_text(json.dumps({'updated_at': 1200, 'rate_limits': {
+                'seven_day': {'used_percentage': 7, 'resets_at': 9000},
+                # carried over by the receiver: its own observation time wins over the file's
+                'five_hour': {'used_percentage': 12, 'resets_at': 5000, 'observed_at': 900}}}))
+            result = claude_status.latest(1300, root)
+            self.assertEqual(result['updated_at'], 1200)
+            self.assertEqual(result['rate_limits']['five_hour'], {'used_percentage': 30, 'resets_at': 5000})
+            self.assertEqual(result['rate_limits']['seven_day']['used_percentage'], 7)
+
+    def test_rolled_over_window_reads_as_full_quota(self):
+        now = time.time()
+        report = {'updated_at': now, 'rate_limits': {
+            'five_hour': {'used_percentage': 0.0, 'resets_at': None, 'idle': True},
+            'seven_day': {'used_percentage': 10, 'resets_at': int(now + 10000)}}}
+        with patch.object(claude_status, 'latest', return_value=report):
+            value = quota_sources.get_claude_quota()
+        self.assertEqual((value.remaining_percent, value.resets_at, value.secondary_remaining_percent), (100.0, None, 90))
 
     def test_native_quota_avoids_cli_and_uses_real_update_time(self):
         now = time.time()
@@ -75,6 +112,17 @@ class ClaudeStatusTests(unittest.TestCase):
             output = (Path(tmp) / 'claude-status/test-session.json').read_text()
             self.assertNotIn('NEVER-SAVE', output)
             self.assertEqual(json.loads(output)['rate_limits']['five_hour']['used_percentage'], 15)
+            self.assertIn('5h left 85%', result.stdout)
+            # A later status line without five_hour keeps the last reading for the tray, not for display.
+            payload['rate_limits'] = {'seven_day': {'used_percentage': 4, 'resets_at': 1900000000}}
+            result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-File', str(receiver)],
+                                    input=json.dumps(payload), capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn('5h', result.stdout)
+            saved = json.loads((Path(tmp) / 'claude-status/test-session.json').read_text())
+            self.assertEqual(saved['rate_limits']['five_hour']['used_percentage'], 15)
+            self.assertLess(saved['rate_limits']['five_hour']['observed_at'], saved['rate_limits']['seven_day']['observed_at'] + 0.001)
+            self.assertEqual(saved['rate_limits']['seven_day']['used_percentage'], 4)
 
     def test_processes_distinguish_desktop_from_code(self):
         rows = [SimpleNamespace(info={'name':'claude.exe', 'exe': path}) for path in (

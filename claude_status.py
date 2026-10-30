@@ -24,6 +24,26 @@ def bridge_installed() -> bool:
         return False
 
 
+def _bundled_receiver() -> Path:
+    return Path(__file__).resolve().parent / "claude_status.ps1"
+
+
+def refresh_receiver() -> bool:
+    """Keep an installed receiver in step with this build; never installs one."""
+    try:
+        if not bridge_installed():
+            return False
+        receiver, bundled = data_dir() / "codexquotatray-statusline.ps1", _bundled_receiver().read_bytes()
+        if receiver.read_bytes() == bundled:
+            return False
+        temporary = receiver.with_suffix(".tmp")
+        temporary.write_bytes(bundled)
+        os.replace(temporary, receiver)
+        return True
+    except OSError:
+        return False
+
+
 def install() -> None:
     """Explicit installation. Preserve unrelated settings and custom status lines."""
     if os.name != "nt":
@@ -37,7 +57,7 @@ def install() -> None:
     folder = data_dir()
     folder.mkdir(parents=True, exist_ok=True)
     receiver = folder / "codexquotatray-statusline.ps1"
-    receiver.write_bytes((Path(__file__).resolve().parent / "claude_status.ps1").read_bytes())
+    receiver.write_bytes(_bundled_receiver().read_bytes())
     settings["statusLine"] = {"type": "command", "command":
         f'powershell.exe -NoLogo -NoProfile -NonInteractive -File "{receiver.as_posix()}"'}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,10 +66,21 @@ def install() -> None:
     os.replace(temporary, path)
 
 
+WINDOWS = ("five_hour", "seven_day")
+MAX_AGE_SECONDS = 7 * 86400  # a weekly reading stays meaningful until its own reset
+
+
 def latest(now: float | None = None, folder: Path | None = None) -> dict | None:
-    """Newest numeric-only native account report, at most a day old."""
+    """Native account quota merged across sessions, one value per window.
+
+    Each window comes from its newest observation in any session, so a
+    session that left a window out does not hide another session's reading.
+    Claude Code drops a window from its status line once the reading it holds
+    has passed its reset; a window that is missing or past its reset is a new
+    window that has not started yet: nothing used, reset unknown ("idle").
+    """
     now = now or time.time()
-    candidates = []
+    reports, observed = [], {}
     try:
         paths = sorted((folder or data_dir() / "claude-status").glob("*.json"),
                        key=lambda path: path.stat().st_mtime, reverse=True)[:128]
@@ -61,24 +92,37 @@ def latest(now: float | None = None, folder: Path | None = None) -> dict | None:
                 continue
             row = json.loads(path.read_text(encoding="utf-8-sig"))
             at = float(row["updated_at"])
-            if not math.isfinite(at) or not now - 86400 <= at <= now + 30:
+            limits = row.get("rate_limits")
+            if not math.isfinite(at) or not now - MAX_AGE_SECONDS <= at <= now + 30 or not isinstance(limits, dict):
                 continue
-            windows = {}
-            for name in ("five_hour", "seven_day"):
-                value = row.get("rate_limits", {}).get(name)
+            found = False
+            for name in WINDOWS:
+                value = limits.get(name)
                 if not isinstance(value, dict) or isinstance(value.get("used_percentage"), bool):
                     continue
                 used = float(value["used_percentage"])
+                seen = float(value.get("observed_at", at))
                 reset = value.get("resets_at")
                 reset = int(reset) if reset is not None else None
-                if not math.isfinite(used) or not 0 <= used <= 100 or (reset is not None and reset <= now):
+                if not math.isfinite(used) or not 0 <= used <= 100 or not math.isfinite(seen) or seen > at + 1:
                     continue
-                windows[name] = {"used_percentage": used, "resets_at": reset}
-            if windows:
-                candidates.append({"updated_at": at, "rate_limits": windows})
+                found = True
+                if name not in observed or seen > observed[name][0]:
+                    observed[name] = (seen, used, reset)
+            if found:
+                reports.append(at)
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             continue
-    return max(candidates, key=lambda item: item["updated_at"], default=None)
+    if not reports:
+        return None
+    windows = {}
+    for name in WINDOWS:
+        _, used, reset = observed.get(name, (None, None, None))
+        if used is None or (reset is not None and reset <= now):
+            windows[name] = {"used_percentage": 0.0, "resets_at": None, "idle": True}
+        else:
+            windows[name] = {"used_percentage": used, "resets_at": reset}
+    return {"updated_at": max(reports), "rate_limits": windows}
 
 
 def desktop_roots() -> list[Path]:

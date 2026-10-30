@@ -694,6 +694,17 @@ class AgentPanelTests(unittest.TestCase):
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
 
+    def test_quota_line_keeps_the_known_window_and_names_an_idle_one(self):
+        snapshot = tray_app.QuotaSnapshot("claude", "Claude Code", 300, None, None, None, time.time(), False, None,
+                                          10080, 10.0, 90.0, int(time.time()) + 86400)
+        self.assertNotIn("未知/获取失败", tray_app.quota_line(snapshot))
+        self.assertIn("90%", tray_app.quota_line(snapshot))
+        snapshot.used_percent, snapshot.remaining_percent = 0.0, 100.0
+        self.tray.snapshots["claude"] = snapshot
+        self.assertIn("剩余 100%", tray_app.quota_line(snapshot))
+        self.assertIn("未开始", self.tray.menu_reset("claude"))
+        self.assertIn("未开始", self.tray.menu_countdown("claude"))
+
     def test_argon_and_opus_can_occupy_two_columns_in_global_time_order(self):
         now = 1_000_000
         codex = self.tray.snapshots["codex"]
