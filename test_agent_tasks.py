@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import math
 import sqlite3
 from contextlib import closing
@@ -831,6 +832,65 @@ class SteadyBubbleTests(unittest.TestCase):
 
 
 class HerdrAndHelperTests(unittest.TestCase):
+    def test_grok_opens_herdr_and_starts_in_a_new_tab(self):
+        import herdr_source
+        from types import SimpleNamespace
+
+        def done(code, out="", err=""):
+            return SimpleNamespace(returncode=code, stdout=out, stderr=err)
+
+        calls, opened = [], []
+
+        def run(args, **_kwargs):
+            request = args[1:]
+            calls.append(request)
+            if request[:2] == ["workspace", "list"]:
+                return done(0, '{"result":{"workspaces":[]}}')
+            if request[:2] == ["tab", "create"]:          # an empty session has no workspace yet
+                return done(1, err='{"error":{"code":"workspace_not_found","message":"no active workspace"}}')
+            if request[:2] == ["workspace", "create"]:
+                return done(0, json.dumps({"result": {"root_pane": {"pane_id": "w1:p1"}}}))
+            if request[:2] == ["agent", "list"]:
+                return done(0, json.dumps({"result": {"agents": [{"name": "grok"}]}}))
+            if request[:2] == ["agent", "start"] and request[2] == "grok-2":   # taken by another client meanwhile
+                return done(1, err='{"error":{"code":"agent_name_taken","message":"taken"}}')
+            return done(0, '{"result":{"type":"agent_started"}}')
+
+        with patch.dict(os.environ, {"CODEX_QUOTA_HERDR_SESSION": ""}), \
+                patch.object(herdr_source.shutil, "which", return_value=r"C:\WindowsApps\wt.exe"):
+            name = herdr_source.start_agent("grok", exe="herdr.exe", runner=run, popen=lambda *a, **k: opened.append(a[0]),
+                                            window_open=lambda: False, sleep=lambda _s: None, cwd=r"C:\home")
+        self.assertEqual(name, "grok-3")
+        self.assertEqual(opened, [[r"C:\WindowsApps\wt.exe", "-w", "new", "-d", str(Path.home()), "--title", "herdr", "herdr.exe"]])
+        self.assertIn(["tab", "create", "--label", "grok", "--cwd", r"C:\home", "--focus"], calls)
+        self.assertIn(["workspace", "create", "--label", "grok", "--cwd", r"C:\home", "--focus"], calls)
+        starts = [request for request in calls if request[:2] == ["agent", "start"]]
+        self.assertEqual(starts[-1], ["agent", "start", "grok-3", "--kind", "grok", "--pane", "w1:p1"])
+        # An open Herdr window is reused, and any other failure is reported, not retried.
+        opened.clear()
+
+        def broken(args, **_kwargs):
+            request = args[1:]
+            if request[:2] == ["tab", "create"]:
+                return done(0, json.dumps({"result": {"root_pane": {"pane_id": "w1:p9"}}}))
+            if request[:2] == ["agent", "start"]:
+                return done(1, err='{"error":{"code":"agent_not_ready","message":"grok is not ready"}}')
+            return done(0, '{"result":{"agents":[]}}')
+
+        with self.assertRaisesRegex(OSError, "grok is not ready"):
+            herdr_source.start_agent("grok", exe="herdr.exe", runner=broken, popen=lambda *a, **k: opened.append(a[0]),
+                                     window_open=lambda: True, sleep=lambda _s: None)
+        self.assertEqual(opened, [])
+
+    def test_herdr_window_is_the_client_without_a_command(self):
+        import herdr_source
+        from types import SimpleNamespace
+        row = lambda *args: SimpleNamespace(info={"name": "herdr.exe", "cmdline": [r"C:\h\herdr.exe", *args]})
+        with patch.dict(os.environ, {"CODEX_QUOTA_HERDR_SESSION": ""}):
+            self.assertTrue(herdr_source.client_open([row("server"), row()]))
+            self.assertFalse(herdr_source.client_open([row("server"), row("agent", "list")]))
+            self.assertFalse(herdr_source.client_open([SimpleNamespace(info={"name": "python.exe", "cmdline": []})]))
+
     @staticmethod
     def agent(key, **extra):
         base = {"key": key, "provider": "codex", "source": "Codex", "model": "", "title": "", "thread_title": "",

@@ -406,6 +406,51 @@ class TrayOrderTests(unittest.TestCase):
             tray.snapshots = {**snapshots, "claude": self.snap("claude", 90, 50), "grok": self.snap("grok", 90, 10)}
             self.assertEqual(tray.wanted_order(), ["claude", "codex", "gemini", "grok", "mimo"])
 
+    def test_icons_hidden_in_the_overflow_take_the_last_providers(self):
+        tray = QuotaTray.__new__(QuotaTray)
+
+        class FakeIcon:
+            details_visible = hover_open = False
+            def __init__(self, uid, left, top=1024):
+                self.icon_id, self.left, self.top, self.menu = uid, left, top, None
+        # As measured: slot 0 sits in the overflow (its rectangle is the ^ button,
+        # left of the others); slot 4 is on the taskbar but past three other
+        # programs' icons. Windows' record says which one is hidden.
+        slots = [FakeIcon(0, 1593), FakeIcon(1, 1617), FakeIcon(2, 1641), FakeIcon(3, 1665), FakeIcon(4, 1761)]
+        tray.slots = slots
+        tray.icons = dict(zip(["claude", "codex", "gemini", "grok", "mimo"], slots))
+        tray.shown_order, tray.reordered_at = [], 0.0
+        tray.build_menu = lambda provider: provider
+        tray.update_icon = Mock()
+        rect = lambda icon: (icon.left, icon.top, icon.left + 24, icon.top + 56)
+        visibility = {0: False, 1: True, 2: True, 3: True, 4: True}
+        with patch.object(tray_app, "PROVIDERS", dict.fromkeys(tray.icons, "?")), \
+                patch.object(tray_app.hover_details, "icon_rect", rect), \
+                patch.object(tray_app.hover_details, "tray_visibility", return_value=visibility):
+            self.assertEqual([s.icon_id for s in tray.slots_by_position()], [1, 2, 3, 4, 0])
+            self.assertTrue(tray.maybe_reorder(1000.0))
+            # Claude, Codex, Gemini and X stay on the taskbar in order; MiMo takes the hidden icon.
+            self.assertEqual({p: i.icon_id for p, i in tray.icons.items()},
+                             {"claude": 1, "codex": 2, "gemini": 3, "grok": 4, "mimo": 0})
+            self.assertEqual(tray.hidden_slots, 1)
+        # Without Windows' record: two of ours on the same spot are both in the overflow,
+        # and an overflow rectangle above the taskbar does not turn the row vertical.
+        slots[0].left, slots[0].top = 1621, 908
+        slots[2].left, slots[2].top = 1621, 908
+        with patch.object(tray_app.hover_details, "icon_rect", rect), \
+                patch.object(tray_app.hover_details, "tray_visibility", return_value={}):
+            self.assertEqual([s.icon_id for s in tray.slots_by_position()], [1, 3, 4, 0, 2])
+
+    def test_each_tray_slot_registers_under_its_own_id(self):
+        icon = HoverIcon("own-id-test", Image.new("RGBA", (16, 16)))
+        icon._hwnd, icon.icon_id = 123, 3
+        with patch("hover_details.win32.Shell_NotifyIcon", return_value=True) as send:
+            icon._message(4, 0, uVersion=4)
+        self.assertEqual(send.call_args.args[1].uID, 3)
+        self.assertEqual(HoverIcon.icon_id, 0)                     # the class default is untouched
+        icon._hwnd = None
+        self.assertEqual(tray_app.hover_details.tray_visibility(), {})   # a source run reads no record
+
     def test_reorder_assigns_providers_to_icons_by_screen_position(self):
         tray = QuotaTray.__new__(QuotaTray)
 
@@ -436,7 +481,8 @@ class TrayOrderTests(unittest.TestCase):
             self.assertEqual(tray.icons["codex"].name, "slot1")
             slots[0].left, slots[1].left = 100, 200               # user dragged the icons
             tray.reordered_at = 3000.0
-            self.assertFalse(tray.maybe_reorder(3010.0))          # too soon after the last change
+            self.assertFalse(tray.maybe_reorder(3001.0))          # too soon after the last change
+            self.assertLessEqual(tray_app.REORDER_MIN_SECONDS, 5)   # a drag is undone within seconds
             slots[0].hover_open = True
             self.assertFalse(tray.maybe_reorder(4000.0))          # pointer is on an icon
             slots[0].hover_open = False
