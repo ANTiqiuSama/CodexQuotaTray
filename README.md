@@ -9,7 +9,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 ## 功能概览
 
 - **独立来源图标**：默认显示 Codex、Grok、Gemini，Claude Code 为可选来源。
-- **额度圆环**：沿用深色圆盘、来源字母和完整圆环。多个额度窗口使用剩余最少的窗口绘制圆环，悬停面板分别显示各窗口；Gemini 多池同样取剩余最少的池。
+- **额度圆环**：沿用深色圆盘和来源字母。有两个窗口时外圈分为左右两段，左侧为短窗口、右侧为长窗口；Gemini 显示剩余最少的两个模型池，按面板顺序排列。单窗口仍为完整圆环；生成时显示 TPS 数字。
 - **生成速率显示**：取得可核验样本且来源处于活动状态时，圆盘点亮并显示最近样本；缺少样本时继续显示额度。
 - **Agent 任务气泡**：悬停任一额度图标都会打开任务面板（没有任务时也显示）：顶部保留各额度窗口与 TPS，每列标题直接写距下次重置的时间（如 4小时32分钟、3天7小时、323天；尚未开始计时的窗口仍写窗口名），下方每个气泡是一项任务及其当前动作；把气泡拖到一起即告诉程序它们是同一任务的并行部分，合并为大气泡并重新识别。
 - **按需刷新**：根据空闲、活动、生成结束、读取失败和重置时间调度额度查询。
@@ -33,7 +33,7 @@ A Windows system-tray monitor for local AI quota and token-usage signals, with g
 | --- | --- | --- | --- | --- |
 | C | GPT / Codex | 本机 Codex App Server 的 `account/rateLimits/read` | 本地会话的真实输出 token 计数，以及关联的客户端流式时间 | 按账号响应展示一个或两个额度窗口；统计依赖本地日志格式 |
 | X | Grok CLI | 临时 CLI 会话执行 `/usage`，解析 `Weekly limit` 与重置时间 | 直接读取客户端原生 `tokens_per_sec` 和输出计数 | 需要对应 CLI 已安装、已登录；终端输出格式变化会影响解析 |
-| G | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），圆环显示剩余最少的池 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
+| G | Gemini / Antigravity | `agy --print /usage --output-format json`，读取全部额度池（Argon、Claude/GPT、Gemini），外圈显示剩余最少的两个池 | 读取 Antigravity 桌面端或 CLI 本地记录中的输出计数，按模型回复步骤的创建至完成时间计算 TPS（含首字延迟） | 客户端不提供原生 TPS；`agy` 不能直接替换成任意名为 Gemini 的 CLI |
 | A | Claude Code | 原生 status line 同步 5 小时与每周额度 | 本地 `api-request` 与 `requestRef` 关联真实输出计数，计算每次 API 请求的端到端 TPS | Pro/Max 账号；未记录请求开始时间的旧会话只统计输出计数 |
 | M | Xiaomi MiMo Token Plan，可选 | 控制台 `/api/v1/tokenPlan/usage`、`/detail`（需登录一次）；或手动 `mimo.json` | 读取 Codex / Claude Code / MiMo Code 本地记录中 `mimo-*` 模型的输入、缓存与输出 token，按价格表换算 Credits | 控制台接口非公开，返回格式依据前端推断，尚缺真实账号验收 |
 
@@ -225,7 +225,7 @@ Gemini TPS = 输出 token 数 / 回复步骤创建至完成的时间（含首字
 
 数据库被 Antigravity 锁定时读取其临时副本。
 
-Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。G 图标圆环显示剩余最少的池；任务面板顶部并列显示各池剩余：与其他来源一样，列标题是距重置的时间，模型池名称写在额度条下方，正在使用的池会高亮。
+Antigravity 有多个独立额度池。程序把 `/usage` 中的桶按模型家族归类（名称含 argon → Argon；claude / gpt → Claude/GPT；gemini → Gemini），每个池取剩余最少的窗口。G 图标外圈显示剩余最少的两个池，左右顺序与面板一致；任务面板顶部并列显示各池剩余：与其他来源一样，列标题是距重置的时间，模型池名称写在额度条下方，正在使用的池会高亮。
 
 切换账号后，在设置中点“立即刷新”或等待下一次定期读取。额度池完整替换为新返回的数据：无 Argon 时不保留该项，改由实际存在的 Opus／Gemini 参与倒计时；池或周期变化时重新积累 Gemini 消耗预测。Gemini 读取失败时显示未知，避免把旧账号额度误当成新账号。
 
