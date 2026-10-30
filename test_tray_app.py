@@ -543,6 +543,52 @@ class AgentPanelTests(unittest.TestCase):
         chart = self.tray.burn_chart('codex',now)
         self.assertEqual([s.label for s in chart.series], ['Claude Code · 5 小时'])
 
+    def test_chart_starts_at_the_first_measured_reading(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = time.time()
+        reset = int(now + 3 * 3600)
+        history = QuotaHistory(Path(self.folder.name) / 'first-reading.json')
+        for age, used in ((1200, 10), (600, 12), (0, 14)):      # recorded for 20 minutes only
+            history.add('codex', now - age, used, reset)
+        self.tray.history = history
+        self.tray.snapshots['codex'] = QuotaSnapshot('codex', 'Codex', 300, 14, 86, reset, now, False, None)
+        chart = self.tray.burn_chart('codex', now)
+        self.assertAlmostEqual(chart.start, chart.series[0].points[0][0], delta=0.1)   # no blank stretch before it
+
+    def test_gemini_forecast_names_only_pools_running_out(self):
+        from pathlib import Path
+        from forecast import QuotaHistory
+        now = 1_800_000_000.0
+        reset = int(now + 3 * 86400)
+
+        def record(argon_left, gemini_rate):
+            history = QuotaHistory(Path(self.folder.name) / f"pool-forecast-{argon_left}-{gemini_rate}.json")
+            for index in range(13):
+                at = now - 7200 + index * 600
+                argon = argon_left + 2 * (12 - index)
+                pools = [{"key": "argon", "label": "Argon", "used_percent": 100 - argon, "remaining_percent": argon,
+                          "resets_at": reset, "window_minutes": 10080},
+                         {"key": "claude_gpt", "label": "Claude/GPT", "used_percent": 20.0, "remaining_percent": 80.0,
+                          "resets_at": reset, "window_minutes": 10080},
+                         {"key": "gemini", "label": "Gemini", "used_percent": 10 + gemini_rate * index,
+                          "remaining_percent": 90 - gemini_rate * index, "resets_at": reset, "window_minutes": 10080}]
+                snapshot = QuotaSnapshot("gemini", "Gemini", 10080, 100 - argon, argon, reset, at, False, None, pools=pools)
+                history.record(snapshot)
+            self.tray.snapshots["gemini"], self.tray.history = snapshot, history
+            return self.tray.pool_forecast("gemini", now)
+
+        text, tone = record(26, 1)        # Argon 12 %/h with 26 % left; Gemini 6 %/h with 78 % left
+        self.assertEqual(text, "Argon 预计 2 小时后用完；Gemini 预计 13 小时后用完")
+        self.assertEqual(tone, "warn")
+        self.assertEqual(self.tray.headline_forecast("gemini"), self.tray.pool_forecast("gemini"))
+        text, _ = record(5, 1)            # under 10 % left: its run-out time is not announced
+        self.assertNotIn("Argon", text)
+        self.assertIn("Gemini 预计", text)
+        self.assertEqual(record(5, 0), ("额度够用", "ok"))
+        self.tray.history = None
+        self.assertEqual(self.tray.pool_forecast("gemini", now), ("", "unknown"))
+
     def test_gemini_pools_in_use_share_the_chart_and_an_idle_one_stays_out(self):
         from pathlib import Path
         from forecast import QuotaHistory
@@ -706,12 +752,28 @@ class AgentPanelTests(unittest.TestCase):
         self.tray.snapshots["gemini"] = snapshot
         model = self.tray.panel("gemini")
         self.assertEqual([item[:2] for item in model.quota], [("Argon", 25.0), ("Claude/GPT", 40.0), ("Gemini", 90.0)])
-        self.assertTrue(all(not item[2] for item in model.quota))
-        upcoming = next(item for item in model.upcoming_resets if item.provider == "gemini")
-        self.assertIn("Argon", upcoming.window)
-        self.assertIn(":", upcoming.when)
+        self.assertIn("小时", model.quota[0][2])     # pools keep their names; the countdown sits under the bar
+        self.assertEqual(model.quota[1][2], "")       # no reset known
+        self.assertIn("天", model.quota[2][2])
         self.assertIn("Claude/GPT 40%", tray_app.quota_line(snapshot))
         self.assertEqual(len(tray_app.pool_lines(snapshot)), 3)
+
+    def test_quota_columns_are_titled_by_the_time_left_until_reset(self):
+        distance = tray_app.reset_distance
+        self.assertEqual(distance(1000 + 4 * 3600 + 32 * 60, 1000), "4小时32分钟")
+        self.assertEqual(distance(1000 + 3 * 86400 + 7 * 3600 + 50, 1000), "3天7小时")
+        self.assertEqual(distance(1000 + 323 * 86400 + 5 * 3600, 1000), "323天")
+        self.assertEqual(distance(1000 + 2 * 3600, 1000), "2小时")
+        self.assertEqual(distance(1000 + 10, 1000), "1分钟")
+        self.assertIsNone(distance(None, 1000))
+        self.assertIsNone(distance(900, 1000))
+        now = time.time()
+        snapshot = tray_app.QuotaSnapshot("claude", "Claude Code", 300, 20.0, 80.0, int(now + 4 * 3600 + 32 * 60 + 30), now,
+                                          False, None, 10080, 10.0, 90.0, int(now + 3 * 86400 + 7 * 3600 + 30))
+        self.tray.snapshots["claude"] = snapshot
+        self.assertEqual([item[0] for item in self.tray.panel("claude").quota], ["4小时33分钟", "3天7小时"])
+        snapshot.resets_at = None      # window not started: keep its name
+        self.assertEqual(self.tray.panel("claude").quota[0][0], "5 小时")
 
     def test_quota_line_keeps_the_known_window_and_names_an_idle_one(self):
         snapshot = tray_app.QuotaSnapshot("claude", "Claude Code", 300, None, None, None, time.time(), False, None,
@@ -724,81 +786,6 @@ class AgentPanelTests(unittest.TestCase):
         self.assertIn("未开始", self.tray.menu_reset("claude"))
         self.assertIn("未开始", self.tray.menu_countdown("claude"))
 
-    def test_argon_and_opus_can_occupy_two_columns_in_global_time_order(self):
-        now = 1_000_000
-        codex = self.tray.snapshots["codex"]
-        codex.resets_at, codex.window_minutes = now + 7200, 300
-        codex.secondary_resets_at, codex.secondary_window_minutes = now + 3600, 10080
-        grok = self.tray.snapshots["grok"]
-        grok.resets_at, grok.window_minutes = now + 86400, 10080
-        gemini = self.tray.snapshots["gemini"]
-        gemini.pools = [{"key": "argon", "label": "Argon", "window_minutes": 10080, "resets_at": now + 1800},
-                        {"key": "gemini", "label": "Gemini", "window_minutes": 300, "resets_at": now + 60},
-                        {"key": "claude_gpt", "label": "Claude/GPT", "window_minutes": 300, "resets_at": now + 7200}]
-        self.tray.snapshots["mimo"] = tray_app.placeholder("mimo")
-        self.tray.snapshots["mimo"].resets_at = now + 1
-        resets = self.tray.upcoming_resets(now)
-        self.assertEqual([r.provider for r in resets], ["gemini", "codex", "gemini"])
-        self.assertEqual(resets[1].window, "每周")
-        self.assertEqual([r.name for r in resets], ["Argon", "Codex", "Gemini · Opus"])
-        self.assertEqual([r.letter for r in resets], ["G", "C", "G"])
-        gemini.pools[0]["resets_at"] = now - 1
-        later = self.tray.upcoming_resets(now)
-        self.assertEqual([r.name for r in later], ["Codex", "Gemini · Opus", "Grok"])
-        self.assertIn("后", resets[0].countdown)
-
-    def test_upcoming_resets_unknown_or_past_times_do_not_invent_dates(self):
-        now = time.time()
-        for snapshot in self.tray.snapshots.values():
-            snapshot.resets_at = now - 1
-            snapshot.secondary_resets_at = None
-        self.assertEqual(self.tray.upcoming_resets(now), ())
-        model = self.tray.panel("codex")
-        self.assertTrue(all(not item[2] for item in model.quota))
-        from dataclasses import replace
-        one = agent_panel.ResetColumn("codex", "C", "Codex", "5 小时", "10-21 01:00", "3 小时后")
-        sizes = []
-        for reset_items in ((), (one,), (one,) * 3):
-            scene = agent_panel.Scene()
-            scene.set_model(replace(model, upcoming_resets=reset_items), 0)
-            sizes.append(scene.render(1.25).size)
-        self.assertEqual(sizes, [sizes[0]] * 3)
-
-    def test_codex_weekly_exhausted_hides_ineffective_five_hour_reset(self):
-        now = time.time()
-        snapshot = self.tray.snapshots["codex"]
-        snapshot.window_minutes, snapshot.secondary_window_minutes = 300, 10080
-        snapshot.resets_at, snapshot.secondary_resets_at = now + 3600, now + 3 * 86400
-        snapshot.remaining_percent, snapshot.secondary_remaining_percent = 80, 0
-        item = next(item for item in self.tray.upcoming_resets(now) if item.provider == "codex")
-        self.assertEqual(item.window, "每周")
-        self.assertEqual(item.countdown, tray_app.duration_text(3 * 86400) + "后")
-        snapshot.remaining_percent = 0  # both windows must recover
-        item = next(item for item in self.tray.upcoming_resets(now) if item.provider == "codex")
-        self.assertEqual(item.window, "每周")
-        snapshot.secondary_resets_at = None
-        self.assertNotIn("codex", [item.provider for item in self.tray.upcoming_resets(now)])
-
-    def test_nonempty_shared_windows_show_the_binding_limit_not_earliest_time(self):
-        now = time.time()
-        snapshot = self.tray.snapshots["codex"]
-        snapshot.window_minutes, snapshot.secondary_window_minutes = 300, 10080
-        snapshot.resets_at, snapshot.secondary_resets_at = now + 3600, now + 3 * 86400
-        snapshot.remaining_percent, snapshot.secondary_remaining_percent = 80, 5
-        self.assertEqual(self.tray.upcoming_resets(now)[0].window, "每周")
-        snapshot.remaining_percent, snapshot.secondary_remaining_percent = 5, 80
-        self.assertEqual(self.tray.upcoming_resets(now)[0].window, "5 小时")
-
-    def test_account_without_argon_has_opus_and_native_gemini_columns(self):
-        now = time.time()
-        snapshot = self.tray.snapshots["gemini"]
-        snapshot.pools = [{"label": "Gemini", "remaining_percent": 99, "window_minutes": 300, "resets_at": now + 60},
-                          {"label": "Claude/GPT", "remaining_percent": 0, "window_minutes": 300, "resets_at": now + 3600}]
-        items = [item for item in self.tray.upcoming_resets(now) if item.provider == "gemini"]
-        self.assertEqual([item.name for item in items], ["Flash", "Gemini · Opus"])
-        self.assertEqual(items[1].window, "Claude/GPT · 5 小时")
-        self.assertFalse(any("Argon" in item.name for item in items))
-
     def test_account_pool_change_rebuilds_header_and_countdowns(self):
         now = time.time()
         snapshot = self.tray.snapshots["gemini"]
@@ -810,8 +797,6 @@ class AgentPanelTests(unittest.TestCase):
         snapshot.pools = [third, native]
         model = self.tray.panel("gemini")
         self.assertNotIn("Argon", [q[0] for q in model.quota])
-        self.assertFalse(any("Argon" in item.name for item in model.upcoming_resets))
-        self.assertIn("Flash", [item.name for item in model.upcoming_resets])
         scene.set_model(model, 1)
         for scale in (1, 1.25, 1.5):
             self.assertIsNotNone(scene.render(scale))

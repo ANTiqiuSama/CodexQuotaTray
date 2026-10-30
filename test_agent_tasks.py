@@ -350,8 +350,8 @@ class SceneTests(unittest.TestCase):
         self.assertGreater(agent_panel.chart_top(model, field), agent_panel.field_top(model) + field)
         # Field plate ends 4 below the field, the chart plate starts 4 above the chart: keep them apart.
         self.assertGreaterEqual((agent_panel.chart_top(model, field) - 4) - (agent_panel.field_top(model) + field + 4), 8)
-        self.assertLess(agent_panel.chart_top(model, field) + agent_panel.CHART_H, agent_panel.resets_middle(model, field) - 5)
-        self.assertGreater(agent_panel.footer_middle(model, field) - 8, agent_panel.resets_middle(model, field) + 5)
+        self.assertGreater(agent_panel.footer_middle(model, field) - 8,
+                           agent_panel.chart_top(model, field) + agent_panel.CHART_H + agent_panel.chart_extra_for(model) + 4)
         self.assertLess(agent_panel.footer_middle(model, field) + 10, agent_panel.panel_height(model, field))
         for scale in (1, 1.25, 1.5):
             self.assertIsNotNone(scene.render(scale))

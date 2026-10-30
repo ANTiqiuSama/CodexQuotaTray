@@ -152,6 +152,23 @@ def window_label(minutes: int | None) -> str:
     return f"{minutes} 分钟"
 
 
+def reset_distance(timestamp: float | None, now: float) -> str | None:
+    """Time left until a reset as a column label: "4小时32分钟", "3天7小时",
+    "323天". None when the reset is unknown or already due."""
+    if not timestamp or timestamp <= now:
+        return None
+    minutes = max(1, int((timestamp - now + 59) // 60))   # round up: never "0分钟" before a reset
+    days, rest = divmod(minutes, 1440)
+    hours, minutes = divmod(rest, 60)
+    if days >= 30:
+        return f"{days}天"
+    if days:
+        return f"{days}天{hours}小时" if hours else f"{days}天"
+    if hours:
+        return f"{hours}小时{minutes}分钟" if minutes else f"{hours}小时"
+    return f"{minutes}分钟"
+
+
 def reset_text(timestamp: int | None) -> str:
     if not timestamp:
         return "重置时间未知"
@@ -347,6 +364,9 @@ class QuotaTray:
         """The most urgent forecast, prefixed with its window when there are two."""
         if provider == "mimo":
             return self.mimo_forecast()
+        snapshot = self.snapshots.get(provider)
+        if snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
+            return self.pool_forecast(provider)
         items = self.forecasts(provider)
         if not items:
             return "", "unknown"
@@ -359,6 +379,28 @@ class QuotaTray:
         prefix = f"{label}额度：" if len(items) > 1 and label else ""
         return prefix + chosen.text, chosen.tone
 
+    POOL_FORECAST_FLOOR = 10.0   # % left: below this a pool's own run-out time is not announced
+
+    def pool_forecast(self, provider: str, now: float | None = None) -> tuple[str, str]:
+        """Independent model pools (Gemini): name only the pools on course to
+        run out before their reset; otherwise one plain "enough" line."""
+        if self.history is None:
+            return "", "unknown"
+        now = now or time.time()
+        running_out = []
+        for label, remaining, resets_at, _minutes, names in self.quota_windows(provider):
+            if remaining is None or remaining < self.POOL_FORECAST_FLOOR:
+                continue
+            samples = max((forecast_module.current_window(self.history.samples(name), resets_at) for name in names), key=len)
+            outlook = forecast_module.forecast(samples, now, remaining, resets_at)
+            if outlook.exhausts_at is not None and outlook.before_reset is not False and outlook.tone in ("warn", "danger"):
+                running_out.append((outlook.exhausts_at, label, outlook.tone))
+        if not running_out:
+            return "额度够用", "ok"
+        running_out.sort()
+        text = "；".join(f"{label} 预计 {duration_text(at - now)}后用完" for at, label, _ in running_out)
+        return text, "danger" if any(tone == "danger" for *_, tone in running_out) else "warn"
+
     def forecast_line(self, provider: str) -> str:
         text, _ = self.headline_forecast(provider)
         return f"预测：{text}" if text else ""
@@ -366,6 +408,7 @@ class QuotaTray:
     CHART_VIEW_MAX = 2 * 3600        # Focus on recent work; long quota windows must not squeeze it to the edge.
     CHART_POINTS = 160
     CHART_RECENT_SECONDS = 30 * 60  # keep completed work visible long enough to inspect its trend
+    CHART_MIN_SPAN = 120.0          # only a lone fresh reading leaves the axis this narrow
 
     def quota_windows(self, provider: str) -> list[tuple]:
         """(label, remaining, resets_at, window minutes, history names) in the
@@ -471,9 +514,10 @@ class QuotaTray:
         if not candidates:
             return None
         series = tuple(item[0] for item in candidates)
-        # Keep recent history and a short projection readable. A far-away
-        # exhaustion remains in the forecast text instead of expanding this axis.
-        back = max(3600.0, now - min(s.points[0][0] for s in series))
+        # Start at the first measured reading: no blank stretch for time before
+        # anything was recorded. A far-away exhaustion remains in the forecast
+        # text instead of expanding this axis.
+        back = max(self.CHART_MIN_SPAN, now - min(s.points[0][0] for s in series))
         start, end = now - back, now + 0.6 * back
         near = [s.reset_at for s in series if s.reset_at and (s.reset_at <= end or s.reset_at - now <= 1.2 * back)]
         if near:
@@ -518,68 +562,6 @@ class QuotaTray:
 
     # ----- agent panel (hover thread) ---------------------------------------------
 
-    def upcoming_resets(self, now: float) -> tuple[agent_panel.ResetColumn, ...]:
-        """Reset of the limiting window; all exhausted shared windows must recover."""
-        candidates = []
-        for provider, snapshot in self.snapshots.items():
-            if provider == "mimo" or provider not in PROVIDERS:
-                continue
-            if provider == "gemini" and snapshot.pools:
-                # Argon and the third-party (Opus/Claude/GPT) pool are
-                # independent limits; each may occupy a countdown column.
-                named = []
-                has_argon = any(str(p.get("key") or p.get("label") or "").lower() == "argon" for p in snapshot.pools)
-                for pool in snapshot.pools:
-                    key = str(pool.get("key") or pool.get("label") or "").lower()
-                    label = {"argon": "Argon", "claude_gpt": "Gemini · Opus", "claude/gpt": "Gemini · Opus",
-                             "opus": "Gemini · Opus"}.get(key)
-                    if key == "gemini" and not has_argon:
-                        label = "Flash"
-                    if label:
-                        named.append((pool, label))
-                if named:
-                    for pool, label in named:
-                        stamp = pool.get("resets_at")
-                        if stamp is None or stamp <= now:
-                            continue
-                        window = (pool.get("label") or label.removeprefix("Gemini · ")) + " · " + (window_label(pool.get("window_minutes")) or "周期")
-                        candidates.append((float(stamp), agent_panel.ResetColumn(provider, provider_letter(provider),
-                            label,      # Argon / Flash; Opus keeps the Gemini prefix (not Claude)
-                            window, datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"),
-                            duration_text(stamp - now) + "后")))
-                    continue
-            windows = []
-            if snapshot.pools:
-                windows = [(p.get("resets_at"), p.get("remaining_percent"), (p.get("label") or p.get("key") or "额度") + " · "
-                            + (window_label(p.get("window_minutes")) or "周期")) for p in snapshot.pools]
-            else:
-                windows = [(snapshot.resets_at, snapshot.remaining_percent, window_label(snapshot.window_minutes) or "当前窗口"),
-                           (snapshot.secondary_resets_at, snapshot.secondary_remaining_percent, window_label(snapshot.secondary_window_minutes) or "第二窗口")]
-            known = [item for item in windows if item[1] is not None]
-            exhausted = [item for item in known if item[1] < 0.5]
-            if exhausted and not snapshot.pools:
-                # Codex/Claude require both windows to be available. An earlier
-                # reset cannot restore use while another exhausted window remains.
-                if any(stamp is None or stamp <= now for stamp, _, _ in exhausted):
-                    continue
-                relevant = exhausted
-                choose = max
-            else:
-                # Independent model pools can recover separately. Prefer the
-                # exhausted/lowest-remaining pool instead of a plentiful one.
-                least = min((item[1] for item in known), default=None)
-                relevant = [item for item in known if item[1] == least] if known else windows
-                choose = min
-            future = [(float(stamp), label) for stamp, _, label in relevant if stamp is not None and stamp > now]
-            if not future:
-                continue
-            stamp, label = choose(future, key=lambda item: item[0])
-            name = {"codex": "Codex", "gemini": "Gemini", "grok": "Grok", "claude": "Claude"}.get(provider, provider)
-            candidates.append((stamp, agent_panel.ResetColumn(provider, provider_letter(provider), name, label,
-                                datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M"), duration_text(stamp - now) + "后")))
-        candidates.sort(key=lambda item: (item[0], item[1].provider))
-        return tuple(item[1] for item in candidates[:3])
-
     def panel(self, provider: str) -> agent_panel.PanelModel | None:
         """The hover panel: quota header, task bubbles, forecast and settings.
         None for a source without a quota to show (Claude without a
@@ -605,16 +587,22 @@ class QuotaTray:
         # Same order for every icon so the panel keeps its size and layout when switching.
         snapshot = self.snapshots.get(provider)
         quota: list[tuple] = []
+        # Window columns are titled by the time left until their reset; the
+        # window name stays as a fallback when no reset is scheduled. Model
+        # pools keep their names and show the countdown under the bar.
         if snapshot is not None and provider == "mimo":
-            quota.append(("套餐额度", snapshot.display_remaining, ""))
+            quota.append((reset_distance(snapshot.resets_at, now) or "套餐额度", snapshot.display_remaining, ""))
         elif snapshot is not None and snapshot.pools and len(snapshot.pools) > 1:
             for pool in snapshot.pools[:3]:
-                quota.append((pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"), ""))
+                quota.append((pool.get("label") or pool.get("key") or "额度", pool.get("remaining_percent"),
+                              reset_distance(pool.get("resets_at"), now) or ""))
         elif snapshot is not None:
-            quota.append((window_label(snapshot.window_minutes) or "当前", snapshot.remaining_percent, ""))
+            quota.append((reset_distance(snapshot.resets_at, now) or window_label(snapshot.window_minutes) or "当前",
+                          snapshot.remaining_percent, ""))
             if snapshot.secondary_window_minutes or snapshot.secondary_remaining_percent is not None:
-                quota.append((window_label(snapshot.secondary_window_minutes) or "第二窗口", snapshot.secondary_remaining_percent,
-                              ""))
+                quota.append((reset_distance(snapshot.secondary_resets_at, now)
+                              or window_label(snapshot.secondary_window_minutes) or "第二窗口",
+                              snapshot.secondary_remaining_percent, ""))
         data = self.performance["providers"].get(provider, {})
         if provider == "codex" and self.codex_quota_mode():
             status, tone = "额度模式工作", "live"
@@ -643,7 +631,7 @@ class QuotaTray:
                           else mimo_tracker().view(now).today_used)
         return agent_panel.PanelModel(provider, PROVIDERS.get(provider, provider_letter(provider)), data.get("label", provider),
                                       status, tuple(quota), data.get("display_tps") or 0.0, tuple(bubbles[:agent_panel.MAX_BUBBLES]),
-                                      tone, banner, forecast, forecast_tone, today_used, self.upcoming_resets(now),
+                                      tone, banner, forecast, forecast_tone, today_used,
                                       self.burn_chart(provider, now), alert, intel, intel_note)
 
     def merge(self, first: str, second: str) -> str | None:

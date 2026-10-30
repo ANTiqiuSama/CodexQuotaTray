@@ -59,16 +59,6 @@ class BubbleModel:
 
 
 @dataclass(frozen=True)
-class ResetColumn:
-    provider: str
-    letter: str
-    name: str
-    window: str
-    when: str
-    countdown: str
-
-
-@dataclass(frozen=True)
 class BurnSeries:
     """Remaining quota of one window over time. `slot` is the header column
     showing the same window, so both use one colour. `rate` is the pace in %
@@ -130,7 +120,6 @@ class PanelModel:
     forecast: str = ""                          # pace forecast: will the quota last at the current rate
     forecast_tone: str = "unknown"              # danger | warn | ok | idle | unknown
     today_used: float | None = None              # MiMo Credits used today
-    upcoming_resets: tuple[ResetColumn, ...] = ()
     burn: BurnChart | None = None
     banner_alert: str = ""                      # e.g. "官方预告": the banner turns solid with this badge
     intel: tuple = ()                           # coding IQ on the banner's right: (name, score, tone, running)
@@ -142,13 +131,14 @@ class PanelModel:
         """Static part of the panel (cached background). Quota figures, bars,
         TPS and the burn chart are drawn per frame; the reset line is cached here."""
         return (self.letter, self.title, self.status, self.status_tone,
-                tuple((item[0], "") for item in self.quota[:3]), (self.banner, self.banner_alert, self.intel, self.intel_note),
-                (self.forecast, self.forecast_tone), self.provider == "mimo", self.upcoming_resets[:3], chart_extra_for(self))
+                tuple((item[0], item[2] if len(item) > 2 else "") for item in self.quota[:3]),
+                (self.banner, self.banner_alert, self.intel, self.intel_note),
+                (self.forecast, self.forecast_tone), self.provider == "mimo", chart_extra_for(self))
 
 
 METER_TOP = PAD + 32        # Top of the quota / TPS row.
 FOOTER = 54                 # Two forecast lines plus a separate settings button.
-CHART = 94                  # Burn chart under the task field, plus the upcoming-resets line.
+CHART = 80                  # Burn chart under the task field.
 CHART_TOP = 16              # Field bottom to chart sprite; the two plates keep an 8 px gap.
 CHART_H = 64                # Chart sprite: label row and plot.
 CHART_LABEL = 15            # Label row inside the sprite.
@@ -169,10 +159,6 @@ def chart_top(model, field_h: float) -> float:
 
 def chart_extra_for(model: PanelModel) -> float:
     return max(model.chart_padding, chart_extra(model.burn))
-
-
-def resets_middle(model, field_h: float) -> float:
-    return chart_top(model, field_h) + CHART_H + chart_extra_for(model) + 10
 
 
 def footer_middle(model, field_h: float) -> float:
@@ -1329,9 +1315,9 @@ def background(header: tuple, field_px: int, scale: float) -> Image.Image:
 
 
 def _header_model(header: tuple) -> PanelModel:
-    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, resets, chart_padding = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), forecast, daily, chart_padding = header
     return PanelModel("mimo" if daily else "", letter, title, status, tuple((label, None, reset) for label, reset in meters), None, (),
-                      tone, banner, forecast[0], forecast[1], upcoming_resets=resets, banner_alert=alert,
+                      tone, banner, forecast[0], forecast[1], banner_alert=alert,
                       intel=intel, intel_note=note, chart_padding=chart_padding)
 
 
@@ -1419,7 +1405,7 @@ def _banner(draw, px, s, banner: str, alert: str, intel: tuple, note: str, lette
 @lru_cache(maxsize=12)
 def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     model = _header_model(header)
-    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, resets, _padding = header
+    letter, title, status, tone, meters, (banner, alert, intel, note), _, daily, _padding = header
     top = field_top(model)
     height = panel_height(model, field_h)
     s = scale
@@ -1457,25 +1443,6 @@ def _background(header: tuple, field_h: int, scale: float) -> Image.Image:
     chart_y = chart_top(model, field_h)
     draw.rounded_rectangle((px(PAD - 6), px(chart_y - 4), px(right + 6), px(chart_y + CHART_H + chart_extra_for(model) + 2)), radius=px(10),
                            fill=(240, 238, 230, 6), outline=(240, 238, 230, 12), width=max(1, round(s)))
-    # Upcoming resets of every source on one line: coloured dot, name, countdown.
-    line_y, x = resets_middle(model, field_h), PAD
-    small, bold = ui_font(px(10)), ui_font(px(10), "bold")
-    if not resets:
-        draw.text((px(x), px(line_y)), "暂无已知重置", font=small, fill=MUTED_TEXT, anchor="lm")
-    for index, item in enumerate(resets):
-        room = right - x
-        if room < 40:
-            break
-        name, when = item.name, " " + item.countdown
-        need = (draw.textlength(name, font=bold) + draw.textlength(when, font=small)) / s + 10
-        if need > room:
-            name = forecast_text(name, px(room - 10) - draw.textlength(when, font=small), bold, draw)
-        draw.ellipse((px(x), px(line_y - 2.5), px(x + 5), px(line_y + 2.5)), fill=accent(item.letter))
-        x += 8
-        draw.text((px(x), px(line_y)), name, font=bold, fill=accent(item.letter), anchor="lm")
-        x += draw.textlength(name, font=bold) / s
-        draw.text((px(x), px(line_y)), when, font=small, fill=SECONDARY_TEXT, anchor="lm")
-        x += draw.textlength(when, font=small) / s + 14
     middle = footer_middle(model, field_h)
     tint = FORECAST_TONES.get(model.forecast_tone, MUTED_TEXT)
     _trend(draw, px(PAD), px(middle), s, tint, max(1, round(s)))
