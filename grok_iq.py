@@ -41,7 +41,9 @@ class GrokIq:
 
 
 def due(state: GrokIq | None, now: float) -> bool:
-    if state is None:
+    """Every 3 h, and at once while the leader is unknown (a cache from
+    before the comparison) so the column does not wait hours for its base."""
+    if state is None or not state.top_score:
         return True
     return now - state.attempted_at >= READ_SECONDS
 

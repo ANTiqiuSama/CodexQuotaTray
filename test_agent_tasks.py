@@ -1003,7 +1003,9 @@ class GrokIqColumnTests(unittest.TestCase):
         self.assertEqual(state.release, "20261025")
         self.assertEqual(state.error, "")
         # A cache from before the comparison is read again to learn the leader.
-        stale = grok_iq.GrokIq(score=state.score, release=state.release, script=state.script)
+        stale = grok_iq.GrokIq(score=state.score, release=state.release, script=state.script, attempted_at=1490.0)
+        self.assertTrue(grok_iq.due(stale, 1500.0))
+        self.assertFalse(grok_iq.due(state, 1500.0))
         self.assertEqual(grok_iq.read(stale, 1500.0, self.fetch(pages)).top_model, "claude-fable-5.1")
         # The same bundle is not downloaded again; a failed refresh keeps 70.1.
         state = grok_iq.read(state, 2000.0, self.fetch({"https://livebench.ai/": self.HTML}))
