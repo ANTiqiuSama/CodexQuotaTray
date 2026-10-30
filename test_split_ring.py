@@ -2,6 +2,7 @@
 import ctypes
 import io
 import json
+import math
 import os
 import tempfile
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import agent_panel
 import icon_art
 import quota_sources
@@ -32,13 +33,51 @@ class SplitRingTests(unittest.TestCase):
         unknown = tray_app.icon_windows(snapshot(remaining=None, second=73), 'C')[0]
         self.assertEqual(unknown, (None,73))
 
-    def test_gemini_uses_two_tightest_pools_but_preserves_panel_order(self):
+    def test_gemini_shows_all_three_pools_in_panel_order(self):
         pools = [{'key':'argon','remaining_percent':23}, {'key':'claude_gpt','remaining_percent':61},
                  {'key':'gemini','remaining_percent':8}]
         values, colors = tray_app.icon_windows(snapshot('gemini', remaining=23, second=None, pools=pools), 'G')
-        self.assertEqual(values,(23,8))
-        self.assertEqual(colors, (agent_panel.quota_shade('G',0,23,True), agent_panel.quota_shade('G',2,8,True)))
+        self.assertEqual(values,(23,61,8))
+        self.assertEqual(colors, tuple(agent_panel.quota_shade('G',i,v,True) for i, v in enumerate((23,61,8))))
+        pools[1]['remaining_percent'] = None     # unknown pool keeps its third
+        self.assertEqual(tray_app.icon_windows(snapshot('gemini', remaining=23, second=None, pools=pools), 'G')[0], (23,None,8))
+        two = [{'key':'claude_gpt','remaining_percent':61}, {'key':'gemini','remaining_percent':8}]   # no Argon access
+        self.assertEqual(tray_app.icon_windows(snapshot('gemini', remaining=8, second=None, pools=two), 'G')[0], (61,8))
         self.assertEqual(tray_app.icon_windows(snapshot('gemini', remaining=None, second=None, pools=[]),'G')[0], (None,))
+
+    def test_three_pools_draw_equal_independent_thirds(self):
+        full = icon_art.ring_icon((100,100,100),'G')
+        self.assertNotEqual(full.tobytes(), icon_art.ring_icon((100,100),'G').tobytes())
+        for index in range(3):
+            values = tuple(0 if i == index else 100 for i in range(3))
+            self.assertNotEqual(full.tobytes(), icon_art.ring_icon(values,'G').tobytes())
+        # Each full third covers the same amount of ring.
+        def lit(values):
+            data = icon_art.ring_icon(values, 'G', colors=((255,0,0,255),)*3).convert('RGB').tobytes()
+            return sum(1 for i in range(0, len(data), 3) if data[i] > 200 and data[i+1] < 80)
+        counts = [lit(tuple(100 if i == index else 0 for i in range(3))) for index in range(3)]
+        self.assertTrue(max(counts) - min(counts) <= max(counts) * 0.1, counts)
+
+    def test_gemini_thirds_sit_top_left_bottom_and_top_right(self):
+        image = icon_art.ring_icon((100, 100, 100), 'G', colors=((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)))
+
+        def channel(angle):
+            rad = math.radians(angle)
+            x = round(31.5 + 26 * math.cos(rad))
+            y = round(31.5 + 26 * math.sin(rad))
+            return image.getpixel((x, y))[:3]
+
+        top_left, bottom, top_right = channel(210), channel(90), channel(330)
+        self.assertGreater(top_left[0], 180, top_left)       # Argon
+        self.assertLess(top_left[1], 80, top_left)
+        self.assertGreater(bottom[1], 180, bottom)           # Claude/GPT
+        self.assertLess(bottom[0], 80, bottom)
+        self.assertGreater(top_right[2], 180, top_right)     # Gemini
+        self.assertLess(top_right[0], 80, top_right)
+        short = icon_art.ring_icon((15, 0, 0), 'G', colors=((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)))
+        rad = math.radians(210)
+        pixel = short.getpixel((round(31.5 + 26 * math.cos(rad)), round(31.5 + 26 * math.sin(rad))))
+        self.assertGreater(pixel[0], 180, pixel)
 
     def test_reset_countdown_uses_all_exhausted_windows_and_ceil_hours(self):
         now = 1000000
@@ -142,6 +181,77 @@ class SplitRingTests(unittest.TestCase):
             b = live.resize((size,size),Image.Resampling.LANCZOS)
             self.assertNotEqual(a.tobytes(),b.tobytes())
             self.assertEqual((a.size,b.size),((size,size),(size,size)))
+
+    def test_countdown_digits_use_the_tps_face_in_red(self):
+        draw = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+        for text in ("4", "12", "120"):
+            wide = len(text) >= 3
+            same = icon_art._fit(text, icon_art.number_font, 230 if wide else 212,
+                                  132 if wide else 176, 220, draw)
+            self.assertEqual(icon_art._numeral_face(text, draw).size, same.size)
+        waiting = icon_art.waiting_icon(4, "C", unit="h")
+        live = icon_art.live_icon(4, "C")
+
+        def span(image, pred):
+            rows = [y for y in range(image.height) if pred(image.getpixel((32, y)))]
+            return (min(rows), max(rows)) if rows else None
+
+        red = lambda pixel: pixel[0] > 160 and pixel[0] > pixel[1] + 40 and pixel[0] > pixel[2] + 40
+        dark = lambda pixel: pixel[0] < 70 and pixel[1] < 70 and pixel[2] < 70 and pixel[3] > 180
+        red_span, dark_span = span(waiting, red), span(live, dark)
+        self.assertIsNotNone(red_span)
+        self.assertAlmostEqual(red_span[1] - red_span[0], dark_span[1] - dark_span[0], delta=2)
+        self.assertEqual(waiting.getpixel((32, 2)), icon_art.TRACK)
+
+    def test_reset_units_share_the_hour_size(self):
+        draw = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+        hour = icon_art._unit_face(draw)
+        self.assertEqual(hour.size, icon_art._fit("h", icon_art.number_font, 96, 96, 132, draw).size)
+        self.assertGreater(hour.size, icon_art._fit("m", icon_art.number_font, 96, 96, 132, draw).size)
+
+        def ivory_cols(unit, amount=1):
+            image = icon_art.waiting_icon(amount, "C", unit=unit)
+            return [x for y in range(image.height) for x in range(image.width)
+                    if image.getpixel((x, y))[0] > 210 and image.getpixel((x, y))[1] > 200]
+
+        hour_cols = ivory_cols("h")
+        minute_cols = ivory_cols("m")
+        day_cols = ivory_cols("d", 12)
+        self.assertGreaterEqual(max(minute_cols) - min(minute_cols), max(hour_cols) - min(hour_cols) + 4)
+        self.assertGreater(min(day_cols), min(ivory_cols("h", 12)))
+        self.assertGreater(min(ivory_cols("m", 12)), min(ivory_cols("h", 12)) - 6)
+        self.assertNotEqual(icon_art.waiting_icon(2, "C", unit="m").tobytes(),
+                            icon_art.waiting_icon(2, "C", unit="d").tobytes())
+
+        def red_count(amount, unit):
+            image = icon_art.waiting_icon(amount, "C", unit=unit)
+            return sum(1 for y in range(image.height) for x in range(image.width)
+                       if (pixel := image.getpixel((x, y)))[0] > 160
+                       and pixel[0] > pixel[1] + 40 and pixel[0] > pixel[2] + 40)
+
+        for amount in (4, 12, 120):
+            hour_red = red_count(amount, "h")
+            for unit in ("d", "m"):
+                self.assertGreaterEqual(red_count(amount, unit), hour_red - 4)
+
+    def test_mimo_ring_letter_is_as_tall_as_the_others(self):
+        draw = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+        mimo = icon_art._glyph_face("M", draw)
+        shared = icon_art._fit("M", icon_art.letter_font, 176, 168, 212, draw)
+        previous = icon_art._fit("M", icon_art.letter_font, 220, 168, 248, draw)
+        self.assertEqual(mimo.size, icon_art._fit("M", icon_art.letter_font, 212, 168, 244, draw).size)
+        self.assertGreater(mimo.size, shared.size)
+        self.assertLess(mimo.size, previous.size)
+
+        def height(letter, face):
+            left, top, right, bottom = draw.textbbox((0, 0), letter, font=face)
+            return bottom - top
+
+        mimo_height = height("M", mimo)
+        for letter in "CXGA":
+            face = icon_art._glyph_face(letter, draw)
+            self.assertEqual(face.size, icon_art._fit(letter, icon_art.letter_font, 176, 168, 212, draw).size)
+            self.assertLess(abs(mimo_height - height(letter, face)), 16)
 
 
 class CreditStateTests(unittest.TestCase):

@@ -1,19 +1,22 @@
 """Tray icon artwork.
 
-Two calm states, one visual language:
+One charcoal disc per source, the provider letter in the middle:
 
-* Idle  - a warm charcoal disc with a thin quota ring and the provider letter.
-          The ring sweeps clockwise from 12 o'clock; its length is the
-          remaining quota, its colour shifts only when attention is needed.
-* Live  - while a model is generating, the same full-size disc lights up in
-          the provider's accent colour and carries the current TPS number.
-          Dark disc -> lit disc is readable even at 16 px.
+* Quota   - the ring around the letter shows what is left. One window sweeps
+            clockwise from 12 o'clock. Two windows split the ring: the left
+            half is the short window (5 h), the right half the long one
+            (weekly), both filling from the top down. Gemini's three model
+            pools take a third each (Argon top-left, Claude/GPT bottom, Gemini
+            top-right), every arc growing from the middle of its third. Colours
+            match the panel's columns; a low window turns amber / rose.
+* Waiting - a quota is used up: an empty ring with the time until it can run
+            again in red, its unit (d / h / m) in the top-right corner.
+* Live    - while a model is generating, the disc lights up in the provider's
+            accent colour and carries the current TPS number.
 
-Both states fill the whole tray slot and share one serif family (Sitka Small,
-falling back to Cambria / Palatino / Georgia) for letters and numerals.
-
-Everything is drawn at 4x on a 256 px canvas and reduced once with Lanczos so
-strokes stay crisp at the 16/20/24/32 px sizes Windows actually displays.
+Letters and numerals share one serif family (Sitka Small, falling back to
+Cambria / Palatino / Georgia). Everything is drawn at 4x on a 256 px canvas and
+reduced once with Lanczos.
 """
 from __future__ import annotations
 
@@ -226,8 +229,7 @@ def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker
         _pace_tick(draw, marker)
 
     label, fill = (letter, IVORY) if remaining is not None else ("?", MUTED)
-    face = _fit(label, letter_font, 176, 168, 212, draw)
-    _centered_text(draw, label, face, (0, 0, CANVAS, CANVAS), fill)
+    _centered_text(draw, label, _glyph_face(label, draw), (0, 0, CANVAS, CANVAS), fill)
     if stale:
         _stale_badge(canvas)
     if reset_hint:
@@ -249,13 +251,31 @@ def live_icon(tps: float, letter: str, reset_hint: bool = False) -> Image.Image:
     color = accent(letter)
     draw.ellipse(DISC, fill=color)
     text = tps_text(tps)
-    # Widest chord available inside the hairline at numeral height.
-    wide = len(text) >= 3
-    face = _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
-    _centered_text(draw, text, face, (0, 0, CANVAS, CANVAS), TILE_TEXT)
+    _centered_text(draw, text, _numeral_face(text, draw), (0, 0, CANVAS, CANVAS), TILE_TEXT)
     if reset_hint:
         _reset_badge(canvas)
     return _finish(canvas)
+
+
+# Gemini's three pools share the ring with no gap: 120 degrees each.
+# PIL angles are clockwise from 3 o'clock.  Panel order is Argon, Claude/GPT
+# (the 5-hour GPT pool), Gemini.  Each coloured arc grows from the middle of
+# its third, so a short remainder stays in that corner:
+# Argon top-left (8 o'clock to 12), GPT bottom (4 o'clock to 8),
+# Gemini top-right (12 o'clock to 4).
+THIRD_SPAN = 120.0
+THIRD_CENTERS = (210.0, 90.0, 330.0)
+
+
+def _third_segments(draw: ImageDraw.ImageDraw, outer, values: tuple, shades: tuple, letter: str, pooled: bool) -> None:
+    for index, (center, value) in enumerate(zip(THIRD_CENTERS, values)):
+        start = center - THIRD_SPAN / 2
+        draw.arc(outer, start, start + THIRD_SPAN, fill=TRACK, width=RING_W)
+        if value is None or value <= 0:
+            continue
+        sweep = THIRD_SPAN * min(100.0, float(value)) / 100
+        color = shades[index % len(shades)] if pooled or value >= 50 or letter in UNIFORM_LETTERS else ring_color(value, letter)
+        draw.arc(outer, center - sweep / 2, center + sweep / 2, fill=color, width=RING_W)
 
 
 @lru_cache(maxsize=128)
@@ -265,8 +285,10 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
 
     The left and right halves both fill from the top towards the bottom.  A
     short gap at each pole separates the two windows even at tray size.
+    Three values (Gemini pools) split the ring into equal 120-degree thirds:
+    Argon at the top-left, Claude/GPT along the bottom, Gemini at the top-right.
     """
-    values = values[:2] or (None,)
+    values = values[:3] or (None,)
     if len(values) == 1:
         return quota_icon(values[0], letter, stale, marker, reset_hint)
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
@@ -274,19 +296,21 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
     draw.ellipse(DISC, fill=INK)
     outer = (0, 0, CANVAS - 1, CANVAS - 1)
     shades = colors or WINDOW_SHADES.get(letter, (accent(letter), accent(letter)))
-    for index, value in enumerate(values):
-        # PIL angles increase clockwise.  The left half is drawn backwards.
-        lo, hi = ((96, 264) if index == 0 else (-84, 84))
-        draw.arc(outer, lo, hi, fill=TRACK, width=RING_W)
-        if value is None or value <= 0:
-            continue
-        sweep = 168 * min(100.0, float(value)) / 100
-        color = shades[index] if colors or value >= 50 or letter in UNIFORM_LETTERS else ring_color(value, letter)
-        start, end = (hi - sweep, hi) if index == 0 else (lo, lo + sweep)
-        draw.arc(outer, start, end, fill=color, width=RING_W)
+    if len(values) == 3:
+        _third_segments(draw, outer, values, shades, letter, bool(colors))
+    else:
+        for index, value in enumerate(values):
+            # PIL angles increase clockwise.  The left half is drawn backwards.
+            lo, hi = ((96, 264) if index == 0 else (-84, 84))
+            draw.arc(outer, lo, hi, fill=TRACK, width=RING_W)
+            if value is None or value <= 0:
+                continue
+            sweep = 168 * min(100.0, float(value)) / 100
+            color = shades[index] if colors or value >= 50 or letter in UNIFORM_LETTERS else ring_color(value, letter)
+            start, end = (hi - sweep, hi) if index == 0 else (lo, lo + sweep)
+            draw.arc(outer, start, end, fill=color, width=RING_W)
     label, fill = (letter, IVORY) if any(value is not None for value in values) else ("?", MUTED)
-    face = _fit(label, letter_font, 176, 168, 212, draw)
-    _centered_text(draw, label, face, (0, 0, CANVAS, CANVAS), fill)
+    _centered_text(draw, label, _glyph_face(label, draw), (0, 0, CANVAS, CANVAS), fill)
     if stale:
         _stale_badge(canvas)
     if reset_hint:
@@ -294,9 +318,57 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
     return _finish(canvas)
 
 
+def _glyph_face(label: str, draw):
+    """Letter inside the quota ring. M is wider than C, X, G and A, so the
+    shared box shrinks it. Keep M near their cap height, a step inside the ring."""
+    if label == "M":
+        return _fit(label, letter_font, 212, 168, 244, draw)
+    return _fit(label, letter_font, 176, 168, 212, draw)
+
+
+def _numeral_face(text: str, draw):
+    """TPS numeral fit. The exhausted-quota countdown uses this same face."""
+    wide = len(text) >= 3
+    return _fit(text, number_font, 230 if wide else 212, 132 if wide else 176, 220, draw)
+
+
+def _unit_face(draw):
+    """Corner unit at the hour letter's size, so m and d are not width-shrunk."""
+    return _fit("h", number_font, 96, 96, 132, draw)
+
+
+def _on_digit(pixel) -> bool:
+    return pixel[3] > 80 and pixel[0] > 150 and pixel[0] > pixel[1] + 30 and pixel[0] > pixel[2] + 30
+
+
+def _draw_unit(canvas: Image.Image, unit: str) -> None:
+    """Top-right unit. h is the reference corner.
+
+    m is wider and d's bowl sits lower, so both shift further right and m
+    sits a little higher. Pixels that would paint over a red digit stay red.
+    """
+    draw = ImageDraw.Draw(canvas)
+    face = _unit_face(draw)
+    _left, top, right, bottom = draw.textbbox((0, 0), unit, font=face)
+    nudge_x, nudge_y = {"d": (24, 0), "m": (24, -12)}.get(unit, (0, 0))
+    origin = ((CANVAS - 6) - right + nudge_x, 50 - (top + bottom) / 2 + nudge_y)
+    if unit == "h":
+        draw.text(origin, unit, font=face, fill=IVORY)
+        return
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text(origin, unit, font=face, fill=IVORY)
+    src = layer.load()
+    base = canvas.load()
+    for y in range(canvas.height):
+        for x in range(canvas.width):
+            if src[x, y][3] and _on_digit(base[x, y]):
+                src[x, y] = (0, 0, 0, 0)
+    canvas.alpha_composite(layer)
+
+
 @lru_cache(maxsize=64)
 def waiting_icon(amount: int, letter: str, reset_hint: bool = False, stale: bool = False, unit: str = "h") -> Image.Image:
-    """Old-style empty ring with a red countdown and its unit."""
+    """Empty ring with the TPS numeral in red, plus a corner unit."""
     canvas = Image.new("RGBA", (CANVAS, CANVAS), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
@@ -305,12 +377,8 @@ def waiting_icon(amount: int, letter: str, reset_hint: bool = False, stale: bool
     # original empty-ring track rather than a full provider-coloured arc.
     draw.ellipse(DISC, outline=TRACK, width=38)
     text = str(max(1, int(amount)))
-    wide = len(text) >= 3
-    face = _fit(text, number_font, 190 if wide else 180, 132 if wide else 158, 200, draw)
-    _centered_text(draw, text, face, (0, 10, 228, CANVAS), CLAY)
+    _centered_text(draw, text, _numeral_face(text, draw), (0, 0, CANVAS, CANVAS), CLAY)
     if reset_hint:
         _reset_badge(canvas)
-    unit = unit if unit in ("d", "h", "m") else "h"
-    unit_face = _fit(unit, number_font, 96, 96, 132, draw)
-    _centered_text(draw, unit, unit_face, (166, 0, 256, 100), IVORY)
+    _draw_unit(canvas, unit if unit in ("d", "h", "m") else "h")
     return _finish(canvas)

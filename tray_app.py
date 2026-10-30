@@ -79,11 +79,19 @@ def _rounded(value, digits=1):
 
 def icon_windows(snapshot: QuotaSnapshot, letter: str) -> tuple[tuple, tuple | None]:
     """(values, colours) of the ring: left half the short window, right half
-    the long one. Model pools show their two tightest pools in panel order,
-    each in the colour of its panel column."""
+    the long one. Model pools (Gemini) show every pool in panel order, each in
+    the colour of its panel column: three pools split the ring into equal
+    120-degree thirds (Argon top-left, Claude/GPT bottom, Gemini top-right),
+    two pools into halves."""
     if snapshot.provider == "mimo":
         return (snapshot.display_remaining,), None
     pools = snapshot.pools or []
+    if len(pools) >= 3:
+        shown = list(enumerate(pools[:3]))
+        if all(pool.get("remaining_percent") is None for _, pool in shown):
+            return (None,), None
+        values = tuple(pool.get("remaining_percent") for _, pool in shown)
+        return values, tuple(agent_panel.quota_shade(letter, index, value, True) for index, value in enumerate(values))
     if len(pools) > 1:
         known = [(index, pool) for index, pool in enumerate(pools[:3]) if pool.get("remaining_percent") is not None]
         tight = sorted(sorted(known, key=lambda item: item[1]["remaining_percent"])[:2], key=lambda item: item[0])

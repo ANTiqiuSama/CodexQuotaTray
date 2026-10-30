@@ -11,6 +11,7 @@ from pathlib import Path
 
 import agent_panel
 import agent_tasks
+import icon_art
 from agent_tasks import AgentGroups, AgentNotes, Cluster, Summarizer, clean, describe, tool_action
 from tps_sources import TpsMonitor
 
@@ -669,6 +670,14 @@ class SteadyBubbleTests(unittest.TestCase):
         lightness = [colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))[1] for color in pools]
         self.assertGreater(lightness[0] - lightness[1], 0.2)               # Argon vs Claude/GPT: light vs dark
         self.assertEqual(shade("G", 0, 40.0, True), agent_panel.accent("G"))
+        # The sources' signature colours: Claude clay + light peach, GPT sage +
+        # deep teal, Gemini's Claude/GPT pool cobalt. Do not trade them away.
+        self.assertEqual(shade("A", 0, 60.0, True), agent_panel.accent("A"))
+        self.assertEqual(shade("A", 1, 60.0, True), (240, 196, 150, 255))
+        self.assertEqual(shade("C", 0, 60.0, True), agent_panel.accent("C"))
+        self.assertEqual(shade("C", 1, 60.0, True), (38, 140, 168, 255))
+        self.assertEqual(shade("G", 1, 40.0, True), (35, 90, 230, 255))
+        self.assertEqual(icon_art.WINDOW_SHADES["A"][0], icon_art.accent("A"))
         self.assertEqual(shade("C", 1, 11.0, False), agent_panel.ring_color(11.0, "C"))   # low Codex window: red, like its bar
         model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),
                                        0.0, (), "live")
