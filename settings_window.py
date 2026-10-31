@@ -179,6 +179,11 @@ def interval_text(seconds: float) -> str:
     return f"{seconds} 秒" if seconds < 60 else (f"{seconds // 60} 分钟" if seconds % 60 == 0 else f"{seconds / 60:.1f} 分钟")
 
 
+def overview_columns(width: int, card_width: int, gap: int, count: int) -> int:
+    """Fit as many fixed-width source cards as the current window permits."""
+    return max(1, min(max(1, count), (width + gap) // (card_width + gap)))
+
+
 class SettingsController:
     """Keep Tk on one UI thread; tray callbacks only enqueue commands."""
     def __init__(self, app):
@@ -553,17 +558,18 @@ class SettingsWindow:
         elif self.tray_notice.winfo_manager():
             self.tray_notice.pack_forget()
         width = self.body.winfo_width() or S(780)
-        columns = max(1, min(3, (width + S(14)) // (S(view.CARD_W) + S(14))))
         cards = build_cards(self.app)
+        columns = overview_columns(width, S(view.CARD_W), S(14), len(cards))
         keys = [card.provider for card, _ in cards]
         if self.images.get("overview:keys") != (keys, columns):
+            old_columns = self.images.get("overview:keys", ((), 0))[1]
             for child in self.card_grid.winfo_children():
                 child.destroy()
             for key in list(self.images):
                 if key.startswith("card:"):
                     self.images.pop(key)
             self.images["overview:keys"] = (keys, columns)
-            for column in range(3):
+            for column in range(max(old_columns, columns)):
                 self.card_grid.grid_columnconfigure(column, weight=1 if column < columns else 0,
                                                     uniform="sourcecards" if column < columns else "")
         slots = {}

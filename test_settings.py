@@ -19,6 +19,13 @@ def snapshot(**extra):
 
 
 class SettingsViewTests(unittest.TestCase):
+    def test_overview_adds_columns_as_space_becomes_available(self):
+        from settings_window import overview_columns
+        self.assertEqual(overview_columns(650, 200, 10, 5), 3)
+        self.assertEqual(overview_columns(830, 200, 10, 5), 4)
+        self.assertEqual(overview_columns(1040, 200, 10, 5), 5)
+        self.assertEqual(overview_columns(2000, 200, 10, 5), 5)
+        self.assertEqual(overview_columns(200, 200, 10, 0), 1)
     def test_resize_reflows_once_after_resize_and_ignores_child_events(self):
         import settings_window
         from unittest.mock import Mock
