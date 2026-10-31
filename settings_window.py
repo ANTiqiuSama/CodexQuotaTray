@@ -233,6 +233,8 @@ class SettingsWindow:
         self._resize_after = None
         self._resize_size = None
         self._hover_after = None
+        self._painted_hover = None
+        self._card_models = {}
         self._layout()
         root.bind("<Configure>", self._on_resize, add="+")
         root.bind("<Map>", self._on_map, add="+")
@@ -276,6 +278,9 @@ class SettingsWindow:
 
         def apply_wrap(width):
             widget.wrap_after = None
+            if self._resize_after is not None:
+                widget.wrap_after = widget.after(120, lambda: apply_wrap(width))
+                return
             if widget.wrapped_at != (width, widget.raw):
                 widget.wrapped_at = (width, widget.raw)
                 widget.configure(text=wrap_text(widget.raw, widget.measure, width))
@@ -494,8 +499,6 @@ class SettingsWindow:
         self.body = tk.Frame(main, bg=view.BG)
         self.body.pack(fill="both", expand=True, padx=S(28), pady=(S(22), S(6)))
         self.pages = {key: tk.Frame(self.body, bg=view.BG) for key, _ in PAGES}
-        for frame in self.pages.values():
-            frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.bodies = {key: self.scrollable(frame) for key, frame in self.pages.items()}
         self._overview(self.bodies["overview"])
         self._sources(self.bodies["sources"])
@@ -509,6 +512,10 @@ class SettingsWindow:
         if key not in self.pages:
             return
         self.page = key
+        for name, frame in self.pages.items():
+            if name != key and frame.winfo_manager():
+                frame.place_forget()
+        self.pages[key].place(relx=0, rely=0, relwidth=1, relheight=1)
         for name, (item, bar, text) in self.nav.items():
             on = name == key
             item.configure(bg=view.SURFACE if on else view.SIDEBAR)
@@ -556,26 +563,32 @@ class SettingsWindow:
                 if key.startswith("card:"):
                     self.images.pop(key)
             self.images["overview:keys"] = (keys, columns)
+            for column in range(3):
+                self.card_grid.grid_columnconfigure(column, weight=1 if column < columns else 0,
+                                                    uniform="sourcecards" if column < columns else "")
         slots = {}
         for index, (card, _icon) in enumerate(cards):
             row = index // columns
             slots[row] = max(slots.get(row, 1), len(card.rows) or 1)
         for index, (card, icon) in enumerate(cards):
             key = "card:" + card.provider
-            image = view.source_card(card, icon, self.scale, hover=self.hover_card == card.provider, slots=slots[index // columns])
+            card_slots = slots[index // columns]
+            self._card_models[card.provider] = (card, icon, card_slots)
+            image = view.source_card(card, icon, self.scale, hover=self.hover_card == card.provider, slots=card_slots)
             widget = self.picture(self.card_grid, key, image, cursor="hand2")
             if not widget.grid_info():
                 widget.grid(row=index // columns, column=index % columns, padx=(0, S(14)), pady=(0, S(14)), sticky="nw")
                 widget.bind("<Button-1>", lambda _, p=card.provider: self.app.open_details(p))
                 widget.bind("<Enter>", lambda _, p=card.provider: self._hover(p))
                 widget.bind("<Leave>", lambda _: self._hover(None))
+        self._painted_hover = self.hover_card
         events = []
         try:
             events = list(self.app.tps_monitor.events)
         except (AttributeError, RuntimeError):
             pass
         letters = {provider: letter_of(provider) for provider in in_tray_order(self.app.snapshots)}
-        chart_width = columns * view.CARD_W + (columns - 1) * 14
+        chart_width = max(view.CARD_W, round(width / self.scale) - 2)
         chart = view.activity_chart(events, time.time(), letters, self.scale, width=max(view.CARD_W, chart_width), height=136)
         widget = self.picture(self.chart_holder, "chart", chart)
         if not widget.winfo_manager():
@@ -590,7 +603,14 @@ class SettingsWindow:
     def _finish_hover(self):
         self._hover_after = None
         if self.page == "overview" and self._resize_after is None:
-            self._fill_overview()
+            for provider in {self._painted_hover, self.hover_card} - {None}:
+                cached = self._card_models.get(provider)
+                if cached is None:
+                    continue
+                card, icon, slots = cached
+                image = view.source_card(card, icon, self.scale, hover=self.hover_card == provider, slots=slots)
+                self.picture(self.card_grid, "card:" + provider, image, cursor="hand2")
+            self._painted_hover = self.hover_card
 
     def open_taskbar_settings(self):
         if hasattr(os, "startfile"):

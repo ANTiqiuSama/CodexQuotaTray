@@ -44,6 +44,22 @@ class SettingsViewTests(unittest.TestCase):
         with patch.object(settings_window.os, 'name', 'posix'):
             self.assertFalse(settings_window.apply_dark_titlebar(object()))
 
+    def test_switch_page_unmaps_hidden_pages_to_avoid_resize_relayout(self):
+        import settings_window
+        from unittest.mock import Mock
+        window = settings_window.SettingsWindow.__new__(settings_window.SettingsWindow)
+        first, second = Mock(), Mock()
+        first.winfo_manager.return_value = 'place'
+        second.winfo_manager.return_value = ''
+        window.pages = {'overview': first, 'tasks': second}
+        window.nav = {}
+        window.bodies = {'tasks': SimpleNamespace(canvas=Mock())}
+        window.refresh_live = Mock()
+        window.show_page('tasks')
+        first.place_forget.assert_called_once()
+        second.place.assert_called_once_with(relx=0, rely=0, relwidth=1, relheight=1)
+        window.refresh_live.assert_called_once()
+
     def test_gemini_panel_uses_full_width_for_quota_without_tps(self):
         import agent_panel
         model = agent_panel.PanelModel('gemini', 'G', 'Gemini', '空闲',
