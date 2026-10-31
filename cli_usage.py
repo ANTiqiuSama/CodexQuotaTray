@@ -24,6 +24,10 @@ except ImportError:  # psutil is a hard requirement of the app; stay importable.
 
 ANSI_RE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])")
 GROK_WEEKLY_RE = re.compile(r"weekly\s+limit\s*[:：-]?\s*(\d+(?:\.\d+)?)\s*%", re.I)
+# Grok's own billing service failing ("Couldn't load usage: Internal error:
+# Billing service error ..."). Partial redraws can drop letters, so match
+# the parts that survive.
+GROK_FAILED_RE = re.compile(r"load\s*usage\s*:\s*internal\s+error|billing\s+service\s+error", re.I)
 GROK_READY_RE = re.compile(r"minimal\s*·\s*/help|\d+(?:\.\d+)?[km]?\s*/\s*\d+(?:\.\d+)?[km]?\s*\(\d+%\)", re.I)
 RESET_PATTERNS = (
     re.compile(r"next\s+reset\s*[:：]\s*(.+)", re.I),
@@ -134,6 +138,8 @@ class UsageProbe:
     settle: float = 1.2                         # max wait for `complete` after `found`
     answers: tuple[tuple[re.Pattern, str], ...] = ()   # one-shot prompt replies
     cwd: Callable[[], str | None] = lambda: None
+    failed: re.Pattern | None = None            # the CLI says it cannot load usage
+    failure: str = ""                           # what that failure tells the user
 
 
 GROK_PROBE = UsageProbe(
@@ -142,6 +148,8 @@ GROK_PROBE = UsageProbe(
     found=GROK_WEEKLY_RE,
     complete=lambda text: parse_reset(text) is not None,
     missing="Weekly limit",
+    failed=GROK_FAILED_RE,
+    failure="Grok 官方额度服务出错，暂时读不到额度",
 )
 
 
@@ -188,6 +196,8 @@ def run_temporary_usage(executable: str, args: list[str], timeout: float = 25.0,
                     first_quota_at = now
                 if probe.complete(current) or now - first_quota_at >= probe.settle:
                     return current
+            elif probe.failed and probe.failed.search(current):
+                raise RuntimeError(probe.failure)
             elif (probe.ready.search(current) or now - started_at >= probe.ready_after) and (
                 last_request_at is None or now - last_request_at >= probe.retry_every
             ):
@@ -255,6 +265,8 @@ def _run_posix_usage(executable: str, args: list[str], timeout: float, probe: Us
                     first_quota_at = now
                 if probe.complete(current) or now - first_quota_at >= probe.settle:
                     return current
+            elif probe.failed and probe.failed.search(current):
+                raise RuntimeError(probe.failure)
             elif (probe.ready.search(current) or now - started >= probe.ready_after) and (
                     last_request_at is None or now - last_request_at >= probe.retry_every):
                 child.send(probe.command + "\r")

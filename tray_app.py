@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -126,6 +127,25 @@ def countdown_value(seconds: float) -> tuple[int, str]:
     if seconds >= 3600:
         return math.ceil(seconds / 3600), "h"
     return max(1, math.ceil(seconds / 60)), "m"
+
+
+ERROR_PREFIX_RE = re.compile(r"^(?:读取 /usage 失败：)?(?:\w+(?:Error|Exception): )*")
+
+
+def stale_note(snapshot: QuotaSnapshot, now: float) -> str:
+    """Why a source shows old figures (its amber corner dot), for the panel."""
+    error = ERROR_PREFIX_RE.sub("", snapshot.error or "").strip()
+    if not error:
+        reason = "未能读取最新额度"
+    elif "Timeout" in (snapshot.error or "") or "秒内未" in error:
+        reason = "读取超时"
+    else:
+        reason = error if len(error) <= 24 else error[:23] + "…"
+    if not snapshot.updated_at:
+        return reason
+    moment = datetime.fromtimestamp(snapshot.updated_at)
+    when = moment.strftime("%H:%M" if moment.date() == datetime.fromtimestamp(now).date() else "%m-%d %H:%M")
+    return f"显示 {when} 的读数；{reason}"
 
 
 def usable_again_at(snapshot: QuotaSnapshot, now: float) -> float | None:
@@ -426,6 +446,8 @@ class QuotaTray:
                 return f"{names}额度已用完，仍在工作；{back}", "warn"
             spare = f"；可用免费重置 {snapshot.reset_credits} 次" if snapshot.reset_credits else ""
             return f"{names}额度已用完，{back}{spare}", "danger"
+        if snapshot is not None and snapshot.stale:
+            return stale_note(snapshot, time.time()), "warn"
         items = self.forecasts(provider)
         if not items:
             return "", "unknown"

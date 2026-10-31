@@ -189,7 +189,7 @@ class ReaderIsolationTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows pywinpty behavior")
 class ProbeTests(unittest.TestCase):
-    def run_probe(self, screens, executable="claude.exe"):
+    def run_probe(self, screens, executable="claude.exe", probe=CLAUDE_PROBE):
         clock, writes = [0.0], []
         terminal = Mock(pid=321)
         terminal.spawn.return_value = True
@@ -202,7 +202,7 @@ class ProbeTests(unittest.TestCase):
                 patch.object(cli_usage.time, "monotonic", side_effect=lambda: clock[0]), \
                 patch.object(cli_usage.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
                 patch.object(cli_usage.os, "kill"):
-            text = run_temporary_usage(executable, ["--strict-mcp-config"], timeout=20, probe=CLAUDE_PROBE)
+            text = run_temporary_usage(executable, ["--strict-mcp-config"], timeout=20, probe=probe)
             return text, writes, terminal
 
     def test_trust_prompt_is_answered_then_usage_read_in_probe_folder(self):
@@ -239,6 +239,20 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(claude_usage_complete(text))
         self.assertEqual(writes[:2], ["\x1b[B", "\r"])   # never Enter on "No, exit"
         self.assertEqual(writes.count("/usage"), 1)
+
+    def test_grok_billing_outage_fails_at_once_with_its_reason(self):
+        # Grok's own service failing; a partial redraw drops the "o" of "Couldn't".
+        outage = ("Session usage: no model calls yet in this session.\r\n"
+                  "\x1b[9;34HC\x1b[9;36Huld\x1b[9;40H't load usage: Internal error: "
+                  "\"Billing service error: cursor billing: meter\x1b[10;34Hunavailable\"")
+        started = []
+
+        def screens(writes, now):
+            started.append(now)
+            return outage if "/usage" in writes else "minimal · /help"
+        with self.assertRaisesRegex(RuntimeError, "Grok 官方额度服务出错"):
+            self.run_probe(screens, "grok.exe", cli_usage.GROK_PROBE)
+        self.assertLess(started[-1], 5)          # not the 20-second timeout
 
     def test_cursor_placed_words_keep_their_spaces(self):
         self.assertEqual(cli_usage.clean_terminal_text("\x1b[2GCurrent\x1b[10Gsession\x1b[1C4%"), " Current session 4%")

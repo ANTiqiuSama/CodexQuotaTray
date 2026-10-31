@@ -599,6 +599,24 @@ class AgentPanelTests(unittest.TestCase):
         self.assertLessEqual(chart.end, now + 0.6 * 30 * 60 + 1)           # projection stays scaled to that span
         self.assertEqual(chart.series[0].points[-1][1],88)
 
+    def test_stale_source_names_when_and_why_in_the_panel(self):
+        now = time.time()
+        seen = now - 1800
+        self.tray.snapshots['grok'] = QuotaSnapshot(
+            'grok', 'Grok', 10080, 35, 65, int(now + 86400), seen, True,
+            '读取 /usage 失败：RuntimeError: RuntimeError: Grok 官方额度服务出错，暂时读不到额度')
+        text, tone = self.tray.headline_forecast('grok')
+        clock = tray_app.datetime.fromtimestamp(seen).strftime('%H:%M')
+        self.assertEqual((text, tone), (f'显示 {clock} 的读数；Grok 官方额度服务出错，暂时读不到额度', 'warn'))
+
+    def test_stale_note_reasons(self):
+        now = time.time()
+        timeout = QuotaSnapshot('grok', 'Grok', 10080, 35, 65, None, None, True,
+                                '读取 /usage 失败：RuntimeError: TimeoutError: Grok 会话在 25 秒内未返回 Weekly limit')
+        self.assertEqual(tray_app.stale_note(timeout, now), '读取超时')
+        quiet = QuotaSnapshot('claude', 'Claude Code', 300, 55, 45, None, now - 2 * 86400, True, None)
+        self.assertRegex(tray_app.stale_note(quiet, now), r'^显示 \d\d-\d\d \d\d:\d\d 的读数；未能读取最新额度$')
+
     def test_exhausted_codex_switches_to_weekly_only_while_working(self):
         from pathlib import Path
         from forecast import QuotaHistory
