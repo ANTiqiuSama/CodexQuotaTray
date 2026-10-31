@@ -1351,7 +1351,7 @@ class QuotaTray:
         import claude_status
         record = claude_status.latest(now)
         old = self.snapshots.get("claude")
-        if record and old is not None and record["updated_at"] > (old.updated_at or 0):
+        if record and old is not None and record.get("observed_at", record["updated_at"]) > (old.updated_at or 0):
             fresh = get_claude_quota()
             self.announce_resets("claude", old, fresh, now)
             self.snapshots["claude"] = fresh

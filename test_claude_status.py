@@ -14,6 +14,10 @@ import tps_sources
 
 
 class ClaudeStatusTests(unittest.TestCase):
+    def setUp(self):
+        quota_sources._CLAUDE_PROBE.clear()
+        self.addCleanup(quota_sources._CLAUDE_PROBE.clear)
+
     def test_desktop_usage_requires_a_real_increase_and_same_account_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -91,13 +95,42 @@ class ClaudeStatusTests(unittest.TestCase):
         self.assertEqual((value.remaining_percent, value.secondary_remaining_percent), (77, 92))
         self.assertEqual(value.updated_at, now)
 
-    def test_installed_bridge_waits_for_native_data_without_starting_workers(self):
-        with patch.object(claude_status, 'latest', return_value=None), \
-                patch.object(claude_status, 'bridge_installed', return_value=True), \
-                patch.object(quota_sources.cli_quota, 'read_usage') as cli:
+    def stale_report(self, now):
+        # Desktop sessions run no status line: the last CLI reading ages out.
+        seen = now - quota_sources.CLAUDE_NATIVE_FRESH_SECONDS - 60
+        return {'updated_at': now, 'observed_at': seen, 'rate_limits': {
+            'five_hour': {'used_percentage': 45, 'resets_at': int(now + 1000)},
+            'seven_day': {'used_percentage': 39, 'resets_at': int(now + 10000)}}}
+
+    def test_stale_native_quota_falls_back_to_usage_once_per_gap(self):
+        now = time.time()
+        usage = {'window_minutes': 300, 'used_percent': 4, 'remaining_percent': 96, 'resets_at': int(now + 900),
+                 'secondary_window_minutes': 10080, 'secondary_used_percent': 42,
+                 'secondary_remaining_percent': 58, 'secondary_resets_at': int(now + 9000)}
+        with patch.object(claude_status, 'latest', return_value=self.stale_report(now)),                 patch.object(quota_sources.providers, 'find_claude', return_value=Path('claude.exe')),                 patch.object(quota_sources.cli_quota, 'read_usage', return_value=usage) as cli:
+            first = quota_sources.get_claude_quota()
+            second = quota_sources.get_claude_quota()
+        self.assertEqual(cli.call_count, 1)
+        self.assertEqual((first.remaining_percent, first.secondary_remaining_percent, first.stale), (96, 58, False))
+        self.assertIs(second, first)
+
+    def test_failed_usage_read_keeps_last_native_numbers_marked_stale(self):
+        now = time.time()
+        with patch.object(claude_status, 'latest', return_value=self.stale_report(now)),                 patch.object(quota_sources.providers, 'find_claude', return_value=Path('claude.exe')),                 patch.object(quota_sources.cli_quota, 'read_usage', side_effect=RuntimeError('exited')):
             value = quota_sources.get_claude_quota()
-        cli.assert_not_called()
-        self.assertIn('等待 Claude Code', value.error)
+        self.assertEqual((value.remaining_percent, value.secondary_remaining_percent), (55, 61))
+        self.assertTrue(value.stale)
+        self.assertLess(value.updated_at, now - quota_sources.CLAUDE_NATIVE_FRESH_SECONDS)
+
+    def test_held_readings_age_by_observation_not_by_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            (Path(tmp) / 'a.json').write_text(json.dumps({'updated_at': now, 'rate_limits': {
+                'seven_day': {'used_percentage': 39, 'resets_at': int(now + 9000), 'observed_at': now - 7 * 3600}}}),
+                encoding='utf-8')
+            report = claude_status.latest(now, Path(tmp))
+        self.assertEqual(report['updated_at'], now)
+        self.assertEqual(report['observed_at'], now - 7 * 3600)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows status-line receiver')
     def test_receiver_saves_only_numeric_quota_and_session(self):

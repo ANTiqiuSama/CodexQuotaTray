@@ -122,7 +122,10 @@ def latest(now: float | None = None, folder: Path | None = None) -> dict | None:
             windows[name] = {"used_percentage": 0.0, "resets_at": None, "idle": True}
         else:
             windows[name] = {"used_percentage": used, "resets_at": reset}
-    return {"updated_at": max(reports), "rate_limits": windows}
+    # Sessions re-save held readings with a new updated_at; observed_at is
+    # when Claude Code last actually reported a number.
+    seen = max((value[0] for value in observed.values()), default=max(reports))
+    return {"updated_at": max(reports), "observed_at": seen, "rate_limits": windows}
 
 
 def desktop_roots() -> list[Path]:

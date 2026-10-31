@@ -288,30 +288,63 @@ def get_gemini_quota() -> QuotaSnapshot:
         return _unknown("gemini", "Gemini", None, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
 
 
-def get_claude_quota() -> QuotaSnapshot:
-    import claude_status
-    report = claude_status.latest()
-    if report:
-        windows = report["rate_limits"]
-        primary, secondary = windows.get("five_hour", {}), windows.get("seven_day", {})
-        used, second = primary.get("used_percentage"), secondary.get("used_percentage")
-        return QuotaSnapshot("claude", "Claude Code", 300, used, None if used is None else 100.0 - used,
-                             primary.get("resets_at"), report["updated_at"], time.time() - report["updated_at"] > 1800, None,
-                             10080 if secondary else None, second, None if second is None else 100.0 - second,
-                             secondary.get("resets_at"))
-    if claude_status.bridge_installed():
-        return _unknown("claude", "Claude Code", 300, "等待 Claude Code 同步额度（完成一次回复后自动更新）")
+# The status line only runs in CLI sessions; Desktop sessions never feed it.
+# Past this age a native reading no longer stands for the account.
+CLAUDE_NATIVE_FRESH_SECONDS = 600
+# At most one hidden /usage session this often; reads in between reuse it.
+CLAUDE_PROBE_GAP_SECONDS = 120
+_CLAUDE_PROBE: dict[str, Any] = {}
+_CLAUDE_PROBE_LOCK = threading.Lock()
+
+
+def _claude_native(report: dict) -> QuotaSnapshot:
+    windows = report["rate_limits"]
+    primary, secondary = windows.get("five_hour", {}), windows.get("seven_day", {})
+    used, second = primary.get("used_percentage"), secondary.get("used_percentage")
+    seen = report.get("observed_at", report["updated_at"])
+    return QuotaSnapshot("claude", "Claude Code", 300, used, None if used is None else 100.0 - used,
+                         primary.get("resets_at"), seen, time.time() - seen > CLAUDE_NATIVE_FRESH_SECONDS, None,
+                         10080 if secondary else None, second, None if second is None else 100.0 - second,
+                         secondary.get("resets_at"))
+
+
+def _claude_probe() -> QuotaSnapshot:
     executable = providers.find_claude()
     if executable is None:
         return _unknown("claude", "Claude", 300, "未找到 Claude Code（claude.exe / claude.cmd），可设置 CODEX_QUOTA_CLAUDE_EXE")
     try:
         parsed = cli_quota.read_usage(str(executable))
-        return QuotaSnapshot("claude", "Claude", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
+        return QuotaSnapshot("claude", "Claude Code", parsed["window_minutes"], parsed["used_percent"], parsed["remaining_percent"],
                              parsed["resets_at"], time.time(), False, None,
                              parsed.get("secondary_window_minutes"), parsed.get("secondary_used_percent"),
                              parsed.get("secondary_remaining_percent"), parsed.get("secondary_resets_at"))
     except Exception as exc:
         return _unknown("claude", "Claude", 300, f"读取 /usage 失败：{type(exc).__name__}: {exc}")
+
+
+def _claude_probe_cached() -> QuotaSnapshot:
+    with _CLAUDE_PROBE_LOCK:
+        cached = _CLAUDE_PROBE.get("snapshot")
+        if cached is None or time.time() - _CLAUDE_PROBE["at"] >= CLAUDE_PROBE_GAP_SECONDS:
+            cached = _claude_probe()
+            _CLAUDE_PROBE.update(snapshot=cached, at=time.time())
+        return cached
+
+
+def get_claude_quota() -> QuotaSnapshot:
+    """The status line while a CLI session keeps it live, else `/usage`."""
+    import claude_status
+    report = claude_status.latest()
+    native = _claude_native(report) if report else None
+    if native is not None and not native.stale:
+        return native
+    probed = _claude_probe_cached()
+    if probed.error is None:
+        if native is None or (probed.updated_at or 0) >= (native.updated_at or 0):
+            return probed
+        return native
+    # A failed read keeps the last native numbers (marked stale) on screen.
+    return native or probed
 
 
 _MIMO_TRACKER = None
