@@ -658,35 +658,52 @@ class SteadyBubbleTests(unittest.TestCase):
             self.assertIsNotNone(scene.render(scale))
 
     def test_lines_use_the_colour_of_their_header_bar(self):
-        shade = agent_panel.quota_shade
-        pools = [shade("G", slot, 40.0, True) for slot in range(3)]
-        self.assertEqual(len(set(pools)), 3)                              # Gemini pools stay apart
         import colorsys
-        for color in pools:                                               # ... and all of them blue
-            hue, _, saturation = colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))
-            self.assertTrue(185 <= hue * 360 <= 240 and saturation > 0.6, color)
-        for index, a in enumerate(pools):
-            for b in pools[index + 1:]:
-                self.assertGreater(sum(abs(x - y) for x, y in zip(a[:3], b[:3])), 120, (a, b))
-        lightness = [colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))[1] for color in pools]
-        self.assertGreater(lightness[0] - lightness[1], 0.2)               # Argon vs Claude/GPT: light vs dark
-        self.assertEqual(shade("G", 0, 40.0, True), agent_panel.accent("G"))
-        # The sources' signature colours: Claude clay + light peach, GPT sage +
-        # deep teal, Gemini's Claude/GPT pool cobalt. Do not trade them away.
-        self.assertEqual(shade("A", 0, 60.0, True), agent_panel.accent("A"))
-        self.assertEqual(shade("A", 1, 60.0, True), (240, 196, 150, 255))
+        shade = agent_panel.quota_shade
+
+        def hls(color):
+            return colorsys.rgb_to_hls(*(v / 255 for v in color[:3]))
+
+        def apart(a, b):
+            return sum(abs(x - y) for x, y in zip(a[:3], b[:3]))
+
+        # One hue per source; its windows run light -> deep from the one that
+        # runs out first to the one that lasts longest.
+        orders = {"A": (0, 1), "C": (0, 1), "G": (1, 0, 2)}     # Gemini: Claude/GPT, Argon, Gemini
+        hues = {"A": (10, 40), "C": (100, 170), "G": (215, 240)}
+        for letter, order in orders.items():
+            colors = [shade(letter, slot, 60.0, True) for slot in order]
+            light = [hls(color)[1] for color in colors]
+            self.assertEqual(light, sorted(light, reverse=True), letter)
+            for color in colors:
+                self.assertTrue(hues[letter][0] <= hls(color)[0] * 360 <= hues[letter][1], (letter, color))
+            for a, b in zip(colors, colors[1:]):
+                if letter == "A":
+                    self.assertGreater(apart(a, b), 100, (letter, a, b))
+                else:   # Codex and Gemini: near shades, each step only slightly darker
+                    self.assertTrue(25 <= apart(a, b) <= 100, (letter, a, b))
+        # Signature colours stay: Claude clay for the week, GPT mint for 5 h,
+        # Gemini periwinkle for its first-to-run-out pool.
+        self.assertEqual(shade("A", 1, 60.0, True), agent_panel.accent("A"))
         self.assertEqual(shade("C", 0, 60.0, True), agent_panel.accent("C"))
-        self.assertEqual(shade("C", 1, 60.0, True), (38, 140, 168, 255))
-        self.assertEqual(shade("G", 1, 40.0, True), (35, 90, 230, 255))
-        self.assertEqual(icon_art.WINDOW_SHADES["A"][0], icon_art.accent("A"))
-        self.assertEqual(shade("C", 1, 11.0, False), agent_panel.ring_color(11.0, "C"))   # low Codex window: red, like its bar
+        self.assertEqual(shade("G", 1, 40.0, True), agent_panel.accent("G"))
+        # A window keeps its colour when low; only its number turns amber or rose.
+        self.assertEqual(shade("C", 1, 11.0, True), shade("C", 1, 90.0, True))
+        self.assertEqual(shade("X", 0, 11.0, False), agent_panel.accent("X"))
+        self.assertEqual(shade("C", 0, None, True), icon_art.MUTED)
         model = agent_panel.PanelModel("gemini", "G", "Gemini", "2 个在工作", (("Argon", 21.0), ("Claude/GPT", 50.0), ("Gemini", 79.0)),
                                        0.0, (), "live")
         self.assertTrue(agent_panel.pooled(model))
         self.assertTrue(agent_panel.pooled(panel()))                     # Codex 5 h + weekly: one shade each, like Gemini
-        codex = [shade("C", slot, 60.0, True) for slot in range(2)]
-        self.assertEqual(codex[0], agent_panel.accent("C"))
-        self.assertGreater(sum(abs(x - y) for x, y in zip(codex[0][:3], codex[1][:3])), 120, codex)
+
+    def test_split_ring_matches_its_panel_bars_at_any_level(self):
+        with patch.object(icon_art, "_finish", lambda canvas: canvas):   # full-size canvas, exact colours
+            big = icon_art.ring_icon.__wrapped__((15.0, 30.0), "A")
+        pixels = {color[:3] for _, color in big.getcolors(1 << 20) if color[3] == 255}
+        for slot in range(2):
+            self.assertIn(icon_art.WINDOW_SHADES["A"][slot][:3], pixels)
+        self.assertNotIn(icon_art.AMBER[:3], pixels)
+        self.assertNotIn(icon_art.ROSE[:3], pixels)
 
     def test_line_ends_are_the_source_glyph_in_the_line_colour(self):
         self.assertEqual([agent_panel.line_end_sides(letter) for letter in "ACXGM"], [0, 6, 5, 4, 3])
