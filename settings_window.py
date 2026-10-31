@@ -16,6 +16,7 @@ Switches and form fields are staged: the footer lists what is not saved yet and
 from __future__ import annotations
 
 import json
+import ctypes
 import logging
 import os
 import queue
@@ -58,6 +59,33 @@ PAGE_ALIASES = {"mimo": "sources", "agents": "tasks", "naming": "tasks"}
 PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude Code", "mimo": "Xiaomi MiMo"}
 NOTICE_SECONDS = 6
 _LATIN = re.compile(r"[A-Za-z0-9_./:@%+-]")
+
+
+def apply_dark_titlebar(root) -> bool:
+    """Use the native Windows caption and keep its minimize/maximize controls."""
+    if os.name != "nt":
+        return False
+    try:
+        user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        user32.GetParent.restype = ctypes.c_void_p
+        child = root.winfo_id()
+        hwnd = user32.GetParent(child) or child
+        dwm.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
+        enabled = ctypes.c_int(1)
+        # 20 is current Windows; 19 was used by earlier Windows 10 builds.
+        applied = any(dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(enabled), ctypes.sizeof(enabled)) == 0
+                      for attr in (20, 19))
+        if applied:
+            # Windows 11 supports explicit caption/text colours; Windows 10
+            # ignores these attributes while retaining immersive dark mode.
+            for attr, color in ((35, 0x00181A1B), (36, 0x00E6EEF0)):
+                value = ctypes.c_uint32(color)
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+        return applied
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def wrap_text(text: str, measure, width: int) -> str:
@@ -202,7 +230,32 @@ class SettingsWindow:
         self.origins = {}
         self.notice = ("", 0.0)
         self.iq_selected: list[str] = []
+        self._resize_after = None
+        self._resize_size = None
+        self._hover_after = None
         self._layout()
+        root.bind("<Configure>", self._on_resize, add="+")
+        root.bind("<Map>", self._on_map, add="+")
+
+    def _on_map(self, event):
+        if event.widget is self.root:
+            apply_dark_titlebar(self.root)
+
+    def _on_resize(self, event):
+        if event.widget is not self.root:
+            return
+        size = (event.width, event.height)
+        if size == self._resize_size:
+            return
+        self._resize_size = size
+        if self._resize_after is not None:
+            self.root.after_cancel(self._resize_after)
+        self._resize_after = self.root.after(120, self._finish_resize)
+
+    def _finish_resize(self):
+        self._resize_after = None
+        if self.root.state() not in ("withdrawn", "iconic"):
+            self.refresh_live()
 
     # ----- small widgets -------------------------------------------------------------
     def font(self, size=10, weight="normal"):
@@ -217,15 +270,21 @@ class SettingsWindow:
         Change its text with set_text so it is wrapped again."""
         import tkinter.font as tkfont
         widget = self.label(parent, text, size, color, **kw)
-        widget.raw, widget.wrapped_at = text, None
+        widget.raw, widget.wrapped_at, widget.wrap_after = text, None, None
         face = tkfont.Font(root=self.root, font=widget.cget("font"))
         widget.measure = face.measure
 
-        def wrap(event):
-            width = max(self.S(160), event.width - self.S(4))
+        def apply_wrap(width):
+            widget.wrap_after = None
             if widget.wrapped_at != (width, widget.raw):
                 widget.wrapped_at = (width, widget.raw)
                 widget.configure(text=wrap_text(widget.raw, widget.measure, width))
+
+        def wrap(event):
+            width = max(self.S(160), event.width - self.S(4))
+            if widget.wrap_after is not None:
+                widget.after_cancel(widget.wrap_after)
+            widget.wrap_after = widget.after(80, lambda: apply_wrap(width))
         widget.bind("<Configure>", wrap, add="+")
         return widget
 
@@ -524,7 +583,14 @@ class SettingsWindow:
 
     def _hover(self, provider):
         self.hover_card = provider
-        self._fill_overview()
+        if self._hover_after is not None:
+            self.root.after_cancel(self._hover_after)
+        self._hover_after = self.root.after(60, self._finish_hover)
+
+    def _finish_hover(self):
+        self._hover_after = None
+        if self.page == "overview" and self._resize_after is None:
+            self._fill_overview()
 
     def open_taskbar_settings(self):
         if hasattr(os, "startfile"):
@@ -951,7 +1017,7 @@ class SettingsWindow:
 
     # ----- live content --------------------------------------------------------------------
     def refresh_live(self):
-        if self.root.state() == "withdrawn":
+        if self.root.state() in ("withdrawn", "iconic") or self._resize_after is not None:
             return
         try:
             {"overview": self._fill_overview, "sources": self._fill_sources_all, "iq": self._fill_iq,
