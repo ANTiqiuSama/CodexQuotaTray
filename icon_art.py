@@ -8,11 +8,18 @@ One charcoal disc per source, the provider letter in the middle:
             (weekly), both filling from the top down. Gemini's three model
             pools take a third each (Argon top-left, Claude/GPT bottom, Gemini
             top-right), every arc growing from the middle of its third. Colours
-            match the panel's columns; a low window turns amber / rose.
+            match the panel's columns and stay the same at any level.
 * Waiting - a quota is used up: an empty ring with the time until it can run
             again in red, its unit (d / h / m) in the top-right corner.
 * Live    - while a model is generating, the disc lights up in the provider's
             accent colour and carries the current TPS number.
+
+Corner badges (only these three):
+* amber dot, top-right  - stale: the last read failed, the figures are older
+                          (the hover panel names the time and the reason).
+* sky-blue dot, top-left - a global Codex reset looks likely.
+* d / h / m, top-right   - the unit of a waiting countdown (takes the corner,
+                          so a waiting icon shows no stale dot).
 
 Letters and numerals share one serif family (Sitka Small, falling back to
 Cambria / Palatino / Georgia). Everything is drawn at 4x on a 256 px canvas and
