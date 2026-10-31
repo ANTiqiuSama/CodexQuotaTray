@@ -7,7 +7,7 @@ from contextlib import closing
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 import agent_panel
@@ -849,7 +849,7 @@ class SteadyBubbleTests(unittest.TestCase):
 
 
 class HerdrAndHelperTests(unittest.TestCase):
-    def test_grok_opens_herdr_and_starts_in_a_new_tab(self):
+    def test_grok_opens_herdr_and_starts_in_a_new_workspace(self):
         import herdr_source
         from types import SimpleNamespace
 
@@ -863,8 +863,6 @@ class HerdrAndHelperTests(unittest.TestCase):
             calls.append(request)
             if request[:2] == ["workspace", "list"]:
                 return done(0, '{"result":{"workspaces":[]}}')
-            if request[:2] == ["tab", "create"]:          # an empty session has no workspace yet
-                return done(1, err='{"error":{"code":"workspace_not_found","message":"no active workspace"}}')
             if request[:2] == ["workspace", "create"]:
                 return done(0, json.dumps({"result": {"root_pane": {"pane_id": "w1:p1"}}}))
             if request[:2] == ["agent", "list"]:
@@ -879,8 +877,8 @@ class HerdrAndHelperTests(unittest.TestCase):
                                             window_open=lambda: False, sleep=lambda _s: None, cwd=r"C:\home")
         self.assertEqual(name, "grok-3")
         self.assertEqual(opened, [[r"C:\WindowsApps\wt.exe", "-w", "new", "-d", str(Path.home()), "--title", "herdr", "herdr.exe"]])
-        self.assertIn(["tab", "create", "--label", "grok", "--cwd", r"C:\home", "--focus"], calls)
         self.assertIn(["workspace", "create", "--label", "grok", "--cwd", r"C:\home", "--focus"], calls)
+        self.assertFalse(any(request[:2] == ["tab", "create"] for request in calls))   # a workspace, never a tab
         starts = [request for request in calls if request[:2] == ["agent", "start"]]
         self.assertEqual(starts[-1], ["agent", "start", "grok-3", "--kind", "grok", "--pane", "w1:p1"])
         # An open Herdr window is reused, and any other failure is reported, not retried.
@@ -888,7 +886,7 @@ class HerdrAndHelperTests(unittest.TestCase):
 
         def broken(args, **_kwargs):
             request = args[1:]
-            if request[:2] == ["tab", "create"]:
+            if request[:2] == ["workspace", "create"]:
                 return done(0, json.dumps({"result": {"root_pane": {"pane_id": "w1:p9"}}}))
             if request[:2] == ["agent", "start"]:
                 return done(1, err='{"error":{"code":"agent_not_ready","message":"grok is not ready"}}')
@@ -899,6 +897,24 @@ class HerdrAndHelperTests(unittest.TestCase):
                                      window_open=lambda: True, sleep=lambda _s: None)
         self.assertEqual(opened, [])
 
+        # Launched but not seen ready in time: the workspace is up, so no error box.
+        def slow(args, **_kwargs):
+            request = args[1:]
+            if request[:2] == ["workspace", "create"]:
+                return done(0, json.dumps({"result": {"root_pane": {"pane_id": "w1:p9"}}}))
+            if request[:2] == ["agent", "start"]:
+                return done(1, err='{"error":{"code":"agent_start_failed","message":"timed out waiting for agent startup"}}')
+            return done(0, '{"result":{"agents":[]}}')
+
+        with self.assertRaises(herdr_source.AgentSlow):
+            herdr_source.start_agent("grok", exe="herdr.exe", runner=slow, popen=lambda *a, **k: None,
+                                     window_open=lambda: True, sleep=lambda _s: None)
+        import tray_app
+        tray = tray_app.QuotaTray.__new__(tray_app.QuotaTray)
+        with patch.object(herdr_source, "start_agent", side_effect=herdr_source.AgentSlow("slow")),                 patch.object(tray_app.ctypes.windll.user32, "MessageBoxW") as box:
+            tray.open_in_herdr("grok")
+        box.assert_not_called()
+
     def test_herdr_window_is_the_client_without_a_command(self):
         import herdr_source
         from types import SimpleNamespace
@@ -907,6 +923,36 @@ class HerdrAndHelperTests(unittest.TestCase):
             self.assertTrue(herdr_source.client_open([row("server"), row()]))
             self.assertFalse(herdr_source.client_open([row("server"), row("agent", "list")]))
             self.assertFalse(herdr_source.client_open([SimpleNamespace(info={"name": "python.exe", "cmdline": []})]))
+
+    def test_herdr_window_is_the_terminal_hosting_the_client(self):
+        import herdr_source
+        from types import SimpleNamespace
+
+        def proc(pid, args, parents):
+            return SimpleNamespace(pid=pid, info={"name": "herdr.exe", "cmdline": [r"C:\h\herdr.exe", *args]},
+                                   parents=lambda: [SimpleNamespace(pid=p) for p in parents])
+        processes = [proc(5, ["server"], [9]), proc(3, [], [2, 1])]      # client in shell 2, terminal 1
+        windows = [(70, 9, True, "server host"), (80, 1, False, ""), (81, 1, True, "BL4CK0UT: herdr"), (90, 4, True, "other")]
+        with patch.dict(os.environ, {"CODEX_QUOTA_HERDR_SESSION": ""}):
+            self.assertEqual(herdr_source.client_window(processes, windows), 81)
+            self.assertIsNone(herdr_source.client_window(processes[:1], windows))     # no client open
+
+    def test_claude_and_grok_clicks_open_herdr_once_until_started(self):
+        import herdr_source
+        import tray_app
+        tray = tray_app.QuotaTray.__new__(tray_app.QuotaTray)
+        threads = []
+        with patch.object(herdr_source, "find_exe", return_value="herdr.exe"), \
+                patch.object(herdr_source, "raise_client") as raise_client, \
+                patch.object(tray_app.threading, "Thread") as thread:
+            thread.side_effect = lambda **kwargs: threads.append(kwargs) or Mock()
+            for provider in ("claude", "claude", "grok"):
+                tray.open_provider(provider)
+        self.assertEqual([t["args"] for t in threads], [("claude",), ("grok",)])     # a second click waits
+        self.assertEqual(raise_client.call_count, 2)
+        with patch.object(herdr_source, "start_agent", return_value="claude"):
+            tray.open_in_herdr("claude")
+        self.assertNotIn("claude", tray.herdr_opening)                                # finished: clicks work again
 
     @staticmethod
     def agent(key, **extra):

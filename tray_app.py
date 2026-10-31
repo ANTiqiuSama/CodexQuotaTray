@@ -57,6 +57,8 @@ PERFORMANCE_SAVE_SECONDS = 60
 # Shown providers (key -> icon letter), in registry order; see providers.py.
 PROVIDERS = {key: provider_registry.get(key).letter for key in provider_registry.enabled_keys()}
 LAUNCHERS = {spec.key: spec.launch for spec in provider_registry.SPECS}
+# Sources whose click opens a new Herdr tab running that agent (herdr --kind).
+HERDR_AGENTS = {"claude", "grok"}
 PACED_PROVIDERS = {"mimo"}
 log = logging.getLogger(APP_NAME)
 
@@ -1147,9 +1149,17 @@ class QuotaTray:
     # ----- actions ---------------------------------------------------------------
 
     def open_provider(self, provider: str) -> None:
-        if provider == "grok" and herdr_source.find_exe():
-            # Grok opens in Herdr: a new focused tab with a grok agent. Starting
-            # waits for the agent to be ready, so keep it off the tray thread.
+        if provider in HERDR_AGENTS and herdr_source.find_exe():
+            # A new focused Herdr tab running the agent. Starting waits for the
+            # agent to be ready, so it runs off the tray thread; clicks that
+            # arrive meanwhile would only start more agents.
+            opening = self.__dict__.setdefault("herdr_opening", set())
+            if provider in opening:
+                return
+            opening.add(provider)
+            # Raise the (often minimised) Herdr window now, while the click
+            # still lets the tray take the foreground.
+            herdr_source.raise_client()
             threading.Thread(target=self.open_in_herdr, args=(provider,), name="herdr-open", daemon=True).start()
             return
         kind, resolve = LAUNCHERS[provider]
@@ -1181,9 +1191,13 @@ class QuotaTray:
         try:
             name = herdr_source.start_agent(provider)
             log.info("opened %s in herdr as %s", provider, name)
+        except herdr_source.AgentSlow as slow:
+            log.info("opened %s in herdr: %s", provider, slow)
         except (OSError, subprocess.SubprocessError) as error:
             log.warning("could not open %s in herdr: %s", provider, error)
             ctypes.windll.user32.MessageBoxW(None, str(error), f"{label} · 无法在 herdr 中打开", 0x10)
+        finally:
+            self.__dict__.setdefault("herdr_opening", set()).discard(provider)
 
     def mimo_login(self, _icon=None, _item=None) -> None:
         if getattr(self, "mimo_login_running", False):
