@@ -138,6 +138,82 @@ def client_open(processes=None) -> bool:
     return False
 
 
+def client_window(processes=None, windows=None) -> int | None:
+    """The terminal window hosting a Herdr client: a visible, titled top-level
+    window owned by the client or one of its ancestors (Windows Terminal)."""
+    import psutil
+    wanted = _session_args()
+    hosts: list[int] = []
+    for process in processes if processes is not None else psutil.process_iter(["name", "cmdline"]):
+        try:
+            info = process.info
+            if (info.get("name") or "").lower() != "herdr.exe":
+                continue
+            args = list(info.get("cmdline") or [])[1:]
+            if not (args == wanted or (not wanted and not args)):
+                continue
+            hosts += [process.pid] + [parent.pid for parent in process.parents()]
+        except (KeyError, AttributeError, TypeError, psutil.Error):
+            continue
+    if not hosts:
+        return None
+    rows = windows if windows is not None else _top_windows()
+    for pid in hosts:                       # the nearest host wins
+        for hwnd, owner, visible, title in rows:
+            if owner == pid and visible and title:
+                return hwnd
+    return None
+
+
+def _top_windows() -> list[tuple[int, int, bool, str]]:
+    """(hwnd, pid, visible, title) for every top-level window."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    rows = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _param):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        length = user32.GetWindowTextLengthW(hwnd)
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        rows.append((int(hwnd), pid.value, bool(user32.IsWindowVisible(hwnd)), title.value))
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return rows
+
+
+def raise_client() -> bool:
+    """Restore a minimised Herdr window and bring it to the front. Call it
+    from the tray click itself: Windows lets the clicked app take the
+    foreground only until the next input."""
+    hwnd = client_window()
+    if hwnd is None or os.name != "nt":
+        return False
+    import ctypes
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+    if user32.SetForegroundWindow(hwnd):
+        return True
+    # Refused (the click's foreground grant already lapsed): share input with
+    # the current foreground thread for a moment, which lets the switch through.
+    ours = kernel32.GetCurrentThreadId()
+    theirs = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    attached = theirs and theirs != ours and user32.AttachThreadInput(ours, theirs, True)
+    try:
+        user32.BringWindowToTop(hwnd)
+        return bool(user32.SetForegroundWindow(hwnd))
+    finally:
+        if attached:
+            user32.AttachThreadInput(ours, theirs, False)
+
+
 def open_window(exe: str, popen=subprocess.Popen) -> None:
     """A new terminal window showing Herdr (Windows Terminal when available)."""
     command = [exe] + _session_args()
@@ -170,10 +246,15 @@ def _error(payload: dict) -> tuple[str, str] | None:
     return str(error.get("code") or ""), str(error.get("message") or error.get("code") or "未知错误")
 
 
+class AgentSlow(OSError):
+    """Herdr launched the agent but did not see it get ready in time. The new
+    workspace is focused with the agent in it, so this is not a failure."""
+
+
 def start_agent(kind: str, *, exe: str | None = None, runner: Callable | None = None, popen=subprocess.Popen,
                 window_open: Callable[[], bool] | None = None, sleep=time.sleep, cwd: str | None = None) -> str:
-    """Open Herdr and start a `kind` agent in a new focused tab; returns its
-    name (kind, kind-2, ...). Raises OSError with a readable message."""
+    """Open Herdr and start a `kind` agent in a new focused workspace; returns
+    its name (kind, kind-2, ...). Raises OSError with a readable message."""
     exe = exe or find_exe()
     if not exe:
         raise FileNotFoundError("未找到 herdr，可设置 CODEX_QUOTA_HERDR_EXE")
@@ -187,12 +268,11 @@ def start_agent(kind: str, *, exe: str | None = None, runner: Callable | None = 
     else:
         raise OSError("herdr 服务未就绪")
     home = cwd or str(Path.home())
-    created = _call(exe, ["tab", "create", "--label", kind, "--cwd", home, "--focus"], runner, 10)
-    if (_error(created) or ("",))[0] == "workspace_not_found":      # an empty session: no workspace yet
-        created = _call(exe, ["workspace", "create", "--label", kind, "--cwd", home, "--focus"], runner, 10)
+    # Each click gets its own focused workspace, named after the agent.
+    created = _call(exe, ["workspace", "create", "--label", kind, "--cwd", home, "--focus"], runner, 10)
     failure = _error(created)
     if failure:
-        raise OSError(f"herdr 无法新建标签页：{failure[1]}")
+        raise OSError(f"herdr 无法新建工作区：{failure[1]}")
     pane = ((created.get("result") or {}).get("root_pane") or {}).get("pane_id")
     if not pane:
         raise OSError("herdr 没有返回新窗格")
@@ -204,6 +284,8 @@ def start_agent(kind: str, *, exe: str | None = None, runner: Callable | None = 
         failure = _error(started)
         if failure is None:
             return name
+        if "timed out" in failure[1].lower():
+            raise AgentSlow(f"{name} 已在 herdr 中启动，就绪检测超时：{failure[1]}")
         if failure[0] != "agent_name_taken":        # another client took the name meanwhile: try the next
             raise OSError(f"herdr 无法启动 {kind}：{failure[1]}")
     raise OSError(f"herdr 中已有太多 {kind}")
