@@ -50,9 +50,14 @@ CLAY = ROSE                        # legacy name for the danger colour
 # Accents live in the provider registry; letters map to them.
 ACCENTS = {spec.letter: spec.accent for spec in SPECS}
 TILE_TEXT = (31, 30, 28, 255)      # dark numerals on a lit tile
-POOL_BLUES = ((35, 90, 230, 255), (40, 212, 236, 255))
-WINDOW_SHADES = {"C": (ACCENTS["C"], (38, 140, 168, 255)),
-                 "A": (ACCENTS["A"], (240, 196, 150, 255))}
+# One hue per source. Its windows run light -> deep from the one that runs
+# out first to the one that lasts longest: the 5-hour window before the week.
+# Codex and Gemini step down only slightly, so their windows read as one source.
+WINDOW_SHADES = {"A": ((240, 196, 150, 255), ACCENTS["A"]),       # peach, Claude clay
+                 "C": (ACCENTS["C"], (100, 178, 142, 255))}        # mint, a shade darker
+# Gemini's pools in panel order (Argon, Claude/GPT, Gemini). Claude/GPT runs
+# out first (its periwinkle), then Argon, then Gemini, each a little darker.
+POOL_SHADES = ((148, 162, 240, 255), ACCENTS["G"], (130, 146, 234, 255))
 PAID = (247, 201, 72, 255)
 
 
@@ -111,13 +116,29 @@ def accent(letter: str) -> tuple[int, int, int, int]:
     return ACCENTS.get(letter, IVORY)
 
 
-# Sources drawn in their own TPS colour at every quota level, so the idle ring,
-# the panel bars and the lit TPS disc never disagree (Gemini's pools often sit
-# below 50 % and used to flip between lavender and amber).
+# Sources whose numbers stay in the panel's text colour at every level
+# (Gemini's pools often sit below 50 % and would read as a constant alarm).
 UNIFORM_LETTERS = {"G"}
 
 
+def window_shade(letter: str, slot: int, value: float | None, pooled: bool = True) -> tuple[int, int, int, int]:
+    """Colour of one quota window wherever it is drawn: its ring arc, its
+    panel bar, its chart line and its settings bar. A window keeps its colour
+    at every level; how low it is shows in its length and in the number."""
+    if value is None:
+        return MUTED
+    if pooled and letter in POOL_LETTERS:
+        return POOL_SHADES[slot % 3]
+    if pooled and letter in WINDOW_SHADES:
+        return WINDOW_SHADES[letter][slot % 2]
+    return accent(letter)
+
+
+POOL_LETTERS = {"G"}
+
+
 def ring_color(percent: float | None, letter: str) -> tuple[int, int, int, int]:
+    """Warning ink for a quota number: amber under 50 %, rose under 20 %."""
     if percent is None:
         return MUTED
     if letter in UNIFORM_LETTERS:
@@ -224,7 +245,7 @@ def quota_icon(remaining: float | None, letter: str, stale: bool = False, marker
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
     value = None if remaining is None else max(0.0, min(100.0, remaining))
-    _ring(draw, value, ring_color(value, letter), TRACK)
+    _ring(draw, value, window_shade(letter, 0, value, False), TRACK)
     if marker is not None and value is not None:
         _pace_tick(draw, marker)
 
@@ -267,14 +288,14 @@ THIRD_SPAN = 120.0
 THIRD_CENTERS = (210.0, 90.0, 330.0)
 
 
-def _third_segments(draw: ImageDraw.ImageDraw, outer, values: tuple, shades: tuple, letter: str, pooled: bool) -> None:
+def _third_segments(draw: ImageDraw.ImageDraw, outer, values: tuple, shades: tuple) -> None:
     for index, (center, value) in enumerate(zip(THIRD_CENTERS, values)):
         start = center - THIRD_SPAN / 2
         draw.arc(outer, start, start + THIRD_SPAN, fill=TRACK, width=RING_W)
         if value is None or value <= 0:
             continue
         sweep = THIRD_SPAN * min(100.0, float(value)) / 100
-        color = shades[index % len(shades)] if pooled or value >= 50 or letter in UNIFORM_LETTERS else ring_color(value, letter)
+        color = shades[index % len(shades)]
         draw.arc(outer, center - sweep / 2, center + sweep / 2, fill=color, width=RING_W)
 
 
@@ -295,9 +316,10 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
     draw = ImageDraw.Draw(canvas)
     draw.ellipse(DISC, fill=INK)
     outer = (0, 0, CANVAS - 1, CANVAS - 1)
-    shades = colors or WINDOW_SHADES.get(letter, (accent(letter), accent(letter)))
+    shades = colors or (POOL_SHADES if len(values) == 3 and letter in POOL_LETTERS
+                        else WINDOW_SHADES.get(letter, (accent(letter), accent(letter))))
     if len(values) == 3:
-        _third_segments(draw, outer, values, shades, letter, bool(colors))
+        _third_segments(draw, outer, values, shades)
     else:
         for index, value in enumerate(values):
             # PIL angles increase clockwise.  The left half is drawn backwards.
@@ -306,7 +328,7 @@ def ring_icon(values: tuple, letter: str, stale: bool = False, marker: float | N
             if value is None or value <= 0:
                 continue
             sweep = 168 * min(100.0, float(value)) / 100
-            color = shades[index] if colors or value >= 50 or letter in UNIFORM_LETTERS else ring_color(value, letter)
+            color = shades[index]
             start, end = (hi - sweep, hi) if index == 0 else (lo, lo + sweep)
             draw.arc(outer, start, end, fill=color, width=RING_W)
     label, fill = (letter, IVORY) if any(value is not None for value in values) else ("?", MUTED)

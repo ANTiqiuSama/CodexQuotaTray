@@ -19,7 +19,7 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 from detail_card import MARGIN, MUTED_TEXT, SECONDARY_TEXT, TEXT, TRACK, _compose, _wrap, figure_font, ui_font
-from icon_art import AMBER, CLAY, PAID, POOL_BLUES, UNIFORM_LETTERS, WINDOW_SHADES, accent, ring_color
+from icon_art import AMBER, CLAY, PAID, POOL_SHADES, UNIFORM_LETTERS, WINDOW_SHADES, accent, ring_color, window_shade
 
 WIDTH = 420
 PAD = 18
@@ -85,16 +85,8 @@ class BurnChart:
 RESET_TINT = (150, 178, 214, 255)
 
 
-def quota_shade(letter: str, slot: int, value: float | None, pooled: bool) -> tuple[int, int, int, int]:
-    """Colour of one quota window: its header bar and its chart line use this.
-    Sources drawn in one colour (Gemini) get one blue per pool when they show
-    several: their own light periwinkle, a dark cobalt (far apart in lightness)
-    and a sky blue (far apart in hue); CIELAB ΔE ≥ 46 between any two."""
-    if pooled and letter in UNIFORM_LETTERS and value is not None:
-        return accent(letter) if slot % 3 == 0 else POOL_BLUES[slot % 3 - 1]
-    if pooled and letter in WINDOW_SHADES and value is not None:
-        return WINDOW_SHADES[letter][slot % 2]
-    return ring_color(value, letter)
+# Header bars and chart lines share the tray ring's per-window colours.
+quota_shade = window_shade
 
 
 def pooled(model: "PanelModel") -> bool:

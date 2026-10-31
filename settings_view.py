@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 from detail_card import MUTED_TEXT, SECONDARY_TEXT, TEXT, ui_font, figure_font
 from forecast import reset_distance
-from icon_art import AMBER, CLAY, PAID, accent, ring_color
+from icon_art import AMBER, CLAY, PAID, UNIFORM_LETTERS, accent, ring_color, window_shade
 
 # Window palette (Tk wants hex).
 BG = "#1b1a18"
@@ -180,7 +180,9 @@ def source_card(card: SourceCard, icon: Image.Image | None, scale: float = 1.0, 
             x = 14 + draw.textlength(_fit(draw, str(label), small, px(CARD_W * .52)), font=small) / s + 6
             draw.text((px(x), px(y + 1)), _fit(draw, str(caption), tiny, px(CARD_W - 76 - x)), font=tiny, fill=ink or MUTED_TEXT, anchor="lt")
         number = figure if figure else ("—" if value is None else f"{value:.0f}%")
-        shade = ink or (ring_color(value, card.letter) if value is not None else MUTED_TEXT)
+        # Like the hover panel: the number warns, the bar keeps its window's colour.
+        shade = ink or (MUTED_TEXT if value is None else TEXT if value >= 50 or card.letter in UNIFORM_LETTERS
+                        else ring_color(value, card.letter))
         draw.text((px(CARD_W - 14), px(y - 2)), number, font=figure_font(px(13)), fill=shade, anchor="rt")
         bar = y + 17
         draw.rounded_rectangle((px(14), px(bar), px(CARD_W - 14), px(bar + 4)), radius=px(2), fill=TRACK_RGB)
@@ -188,7 +190,8 @@ def source_card(card: SourceCard, icon: Image.Image | None, scale: float = 1.0, 
             draw.rounded_rectangle((px(14), px(bar), px(CARD_W - 14), px(bar + 4)), radius=px(2), fill=PAID)
         elif value:
             right = 14 + (CARD_W - 28) * max(0.0, min(100.0, value)) / 100
-            draw.rounded_rectangle((px(14), px(bar), px(max(18, right)), px(bar + 4)), radius=px(2), fill=shade)
+            fill = ink or window_shade(card.letter, index, value, len(rows) > 1)
+            draw.rounded_rectangle((px(14), px(bar), px(max(18, right)), px(bar + 4)), radius=px(2), fill=fill)
 
     y = card_height(slots) - 50
     draw.line((px(14), px(y), px(CARD_W - 14), px(y)), fill=RULE, width=max(1, round(s)))
