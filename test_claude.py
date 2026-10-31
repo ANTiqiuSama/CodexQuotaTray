@@ -65,6 +65,8 @@ class RegistryTests(unittest.TestCase):
 
 class UsageParsingTests(unittest.TestCase):
     def setUp(self):
+        quota_sources._CLAUDE_PROBE.clear()
+        self.addCleanup(quota_sources._CLAUDE_PROBE.clear)
         self.native = patch('claude_status.latest', return_value=None)
         self.bridge = patch('claude_status.bridge_installed', return_value=False)
         self.native.start()
@@ -116,6 +118,8 @@ class UsageParsingTests(unittest.TestCase):
 
 class ReaderIsolationTests(unittest.TestCase):
     def setUp(self):
+        quota_sources._CLAUDE_PROBE.clear()
+        self.addCleanup(quota_sources._CLAUDE_PROBE.clear)
         self.native = patch('claude_status.latest', return_value=None)
         self.bridge = patch('claude_status.bridge_installed', return_value=False)
         self.native.start()
@@ -214,6 +218,30 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(writes.count("/usage"), 1)
         cwd = terminal.spawn.call_args[0][2]
         self.assertTrue(cwd.endswith("claude-probe"))
+
+    def test_workspace_dialog_opening_on_no_steps_down_before_confirming(self):
+        # Claude Code 2.1.316: words placed by cursor moves, "No, exit" preselected.
+        dialog = ("\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:\r\n"
+                  "\x1b[2G\x1b[38;2;177;185;249m❯\x1b[4GNo,\x1b[8Gexit\x1b[39m\r\n"
+                  "\x1b[4GYes,\x1b[9GI\x1b[11Gtrust\x1b[17Gthis\x1b[22Gfolder\r\n")
+        moved = ("\x1b[4GNo,\x1b[8Gexit\r\n"
+                 "\x1b[2G❯\x1b[4GYes,\x1b[9GI\x1b[11Gtrust\x1b[17Gthis\x1b[22Gfolder\r\n")
+
+        def screens(writes, now):
+            if "/usage" in writes:
+                return USAGE
+            if "\r" in writes:
+                return "? for shortcuts"
+            if "\x1b[B" in writes:
+                return dialog + moved
+            return dialog if now > 0.5 else ""
+        text, writes, _ = self.run_probe(screens)
+        self.assertTrue(claude_usage_complete(text))
+        self.assertEqual(writes[:2], ["\x1b[B", "\r"])   # never Enter on "No, exit"
+        self.assertEqual(writes.count("/usage"), 1)
+
+    def test_cursor_placed_words_keep_their_spaces(self):
+        self.assertEqual(cli_usage.clean_terminal_text("\x1b[2GCurrent\x1b[10Gsession\x1b[1C4%"), " Current session 4%")
 
     def test_npm_shim_runs_through_cmd(self):
         _, _, terminal = self.run_probe(lambda writes, now: USAGE if "/usage" in writes else "? for shortcuts", "C:/npm/claude.cmd")

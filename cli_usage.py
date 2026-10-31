@@ -31,8 +31,12 @@ RESET_PATTERNS = (
 )
 
 
+# Newer TUIs place each word with a cursor move instead of a space.
+CURSOR_STEP_RE = re.compile(r"\x1b\[\d*[CG]")
+
+
 def clean_terminal_text(text: str) -> str:
-    return ANSI_RE.sub("", text).replace("\r", "\n")
+    return ANSI_RE.sub("", CURSOR_STEP_RE.sub(" ", text)).replace("\r", "\n")
 
 
 def parse_reset(text: str) -> int | None:
@@ -410,7 +414,10 @@ CLAUDE_SECTION_RE = re.compile(r"current\s+(session|week)\b[^\n]*", re.I)
 CLAUDE_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(used|left|remaining)", re.I)
 CLAUDE_RESET_RE = re.compile(r"resets?\s+(?:at\s+|on\s+)?([^\n]+)", re.I)
 CLAUDE_READY_RE = re.compile(r"for\s+shortcuts|/help\s+for\s+help|bypass\s+permissions|accept\s+edits", re.I)
-CLAUDE_TRUST_RE = re.compile(r"do\s+you\s+trust\s+the\s+files|trust\s+this\s+folder", re.I)
+CLAUDE_TRUST_RE = re.compile(r"do\s+you\s+trust\s+the\s+files", re.I)
+# The workspace dialog now opens on "No, exit": step down to "Yes" first.
+CLAUDE_TRUST_NO_RE = re.compile(r"❯\s*no,\s*exit", re.I)
+CLAUDE_TRUST_YES_RE = re.compile(r"❯\s*yes,\s*i\s+trust\s+this\s+folder", re.I)
 CLAUDE_TIME_RE = re.compile(
     r"^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s+)?"
     r"(?:(?P<month>[a-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s*(?:at\s+)?)?"
@@ -539,7 +546,7 @@ CLAUDE_PROBE = UsageProbe(
     ready_after=6.0,
     retry_every=4.0,
     settle=2.0,
-    answers=((CLAUDE_TRUST_RE, "\r"),),
+    answers=((CLAUDE_TRUST_RE, "\r"), (CLAUDE_TRUST_NO_RE, "\x1b[B"), (CLAUDE_TRUST_YES_RE, "\r")),
     cwd=_claude_probe_dir,
 )
 # No MCP servers, no IDE hookup: the session only needs to render /usage.
