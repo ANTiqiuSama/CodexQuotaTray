@@ -16,6 +16,7 @@ Switches and form fields are staged: the footer lists what is not saved yet and
 from __future__ import annotations
 
 import json
+import ctypes
 import logging
 import os
 import queue
@@ -58,6 +59,33 @@ PAGE_ALIASES = {"mimo": "sources", "agents": "tasks", "naming": "tasks"}
 PROVIDER_NAMES = {"codex": "Codex", "grok": "Grok", "gemini": "Gemini", "claude": "Claude Code", "mimo": "Xiaomi MiMo"}
 NOTICE_SECONDS = 6
 _LATIN = re.compile(r"[A-Za-z0-9_./:@%+-]")
+
+
+def apply_dark_titlebar(root) -> bool:
+    """Use the native Windows caption and keep its minimize/maximize controls."""
+    if os.name != "nt":
+        return False
+    try:
+        user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        user32.GetParent.restype = ctypes.c_void_p
+        child = root.winfo_id()
+        hwnd = user32.GetParent(child) or child
+        dwm.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
+        enabled = ctypes.c_int(1)
+        # 20 is current Windows; 19 was used by earlier Windows 10 builds.
+        applied = any(dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(enabled), ctypes.sizeof(enabled)) == 0
+                      for attr in (20, 19))
+        if applied:
+            # Windows 11 supports explicit caption/text colours; Windows 10
+            # ignores these attributes while retaining immersive dark mode.
+            for attr, color in ((35, 0x00181A1B), (36, 0x00E6EEF0)):
+                value = ctypes.c_uint32(color)
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+        return applied
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def wrap_text(text: str, measure, width: int) -> str:
@@ -151,6 +179,11 @@ def interval_text(seconds: float) -> str:
     return f"{seconds} 秒" if seconds < 60 else (f"{seconds // 60} 分钟" if seconds % 60 == 0 else f"{seconds / 60:.1f} 分钟")
 
 
+def overview_columns(width: int, card_width: int, gap: int, count: int) -> int:
+    """Fit as many fixed-width source cards as the current window permits."""
+    return max(1, min(max(1, count), (width + gap) // (card_width + gap)))
+
+
 class SettingsController:
     """Keep Tk on one UI thread; tray callbacks only enqueue commands."""
     def __init__(self, app):
@@ -202,7 +235,34 @@ class SettingsWindow:
         self.origins = {}
         self.notice = ("", 0.0)
         self.iq_selected: list[str] = []
+        self._resize_after = None
+        self._resize_size = None
+        self._hover_after = None
+        self._painted_hover = None
+        self._card_models = {}
         self._layout()
+        root.bind("<Configure>", self._on_resize, add="+")
+        root.bind("<Map>", self._on_map, add="+")
+
+    def _on_map(self, event):
+        if event.widget is self.root:
+            apply_dark_titlebar(self.root)
+
+    def _on_resize(self, event):
+        if event.widget is not self.root:
+            return
+        size = (event.width, event.height)
+        if size == self._resize_size:
+            return
+        self._resize_size = size
+        if self._resize_after is not None:
+            self.root.after_cancel(self._resize_after)
+        self._resize_after = self.root.after(120, self._finish_resize)
+
+    def _finish_resize(self):
+        self._resize_after = None
+        if self.root.state() not in ("withdrawn", "iconic"):
+            self.refresh_live()
 
     # ----- small widgets -------------------------------------------------------------
     def font(self, size=10, weight="normal"):
@@ -217,15 +277,24 @@ class SettingsWindow:
         Change its text with set_text so it is wrapped again."""
         import tkinter.font as tkfont
         widget = self.label(parent, text, size, color, **kw)
-        widget.raw, widget.wrapped_at = text, None
+        widget.raw, widget.wrapped_at, widget.wrap_after = text, None, None
         face = tkfont.Font(root=self.root, font=widget.cget("font"))
         widget.measure = face.measure
 
-        def wrap(event):
-            width = max(self.S(160), event.width - self.S(4))
+        def apply_wrap(width):
+            widget.wrap_after = None
+            if self._resize_after is not None:
+                widget.wrap_after = widget.after(120, lambda: apply_wrap(width))
+                return
             if widget.wrapped_at != (width, widget.raw):
                 widget.wrapped_at = (width, widget.raw)
                 widget.configure(text=wrap_text(widget.raw, widget.measure, width))
+
+        def wrap(event):
+            width = max(self.S(160), event.width - self.S(4))
+            if widget.wrap_after is not None:
+                widget.after_cancel(widget.wrap_after)
+            widget.wrap_after = widget.after(80, lambda: apply_wrap(width))
         widget.bind("<Configure>", wrap, add="+")
         return widget
 
@@ -435,8 +504,6 @@ class SettingsWindow:
         self.body = tk.Frame(main, bg=view.BG)
         self.body.pack(fill="both", expand=True, padx=S(28), pady=(S(22), S(6)))
         self.pages = {key: tk.Frame(self.body, bg=view.BG) for key, _ in PAGES}
-        for frame in self.pages.values():
-            frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.bodies = {key: self.scrollable(frame) for key, frame in self.pages.items()}
         self._overview(self.bodies["overview"])
         self._sources(self.bodies["sources"])
@@ -450,6 +517,10 @@ class SettingsWindow:
         if key not in self.pages:
             return
         self.page = key
+        for name, frame in self.pages.items():
+            if name != key and frame.winfo_manager():
+                frame.place_forget()
+        self.pages[key].place(relx=0, rely=0, relwidth=1, relheight=1)
         for name, (item, bar, text) in self.nav.items():
             on = name == key
             item.configure(bg=view.SURFACE if on else view.SIDEBAR)
@@ -487,36 +558,43 @@ class SettingsWindow:
         elif self.tray_notice.winfo_manager():
             self.tray_notice.pack_forget()
         width = self.body.winfo_width() or S(780)
-        columns = max(1, min(3, (width + S(14)) // (S(view.CARD_W) + S(14))))
         cards = build_cards(self.app)
+        columns = overview_columns(width, S(view.CARD_W), S(14), len(cards))
         keys = [card.provider for card, _ in cards]
         if self.images.get("overview:keys") != (keys, columns):
+            old_columns = self.images.get("overview:keys", ((), 0))[1]
             for child in self.card_grid.winfo_children():
                 child.destroy()
             for key in list(self.images):
                 if key.startswith("card:"):
                     self.images.pop(key)
             self.images["overview:keys"] = (keys, columns)
+            for column in range(max(old_columns, columns)):
+                self.card_grid.grid_columnconfigure(column, weight=1 if column < columns else 0,
+                                                    uniform="sourcecards" if column < columns else "")
         slots = {}
         for index, (card, _icon) in enumerate(cards):
             row = index // columns
             slots[row] = max(slots.get(row, 1), len(card.rows) or 1)
         for index, (card, icon) in enumerate(cards):
             key = "card:" + card.provider
-            image = view.source_card(card, icon, self.scale, hover=self.hover_card == card.provider, slots=slots[index // columns])
+            card_slots = slots[index // columns]
+            self._card_models[card.provider] = (card, icon, card_slots)
+            image = view.source_card(card, icon, self.scale, hover=self.hover_card == card.provider, slots=card_slots)
             widget = self.picture(self.card_grid, key, image, cursor="hand2")
             if not widget.grid_info():
                 widget.grid(row=index // columns, column=index % columns, padx=(0, S(14)), pady=(0, S(14)), sticky="nw")
                 widget.bind("<Button-1>", lambda _, p=card.provider: self.app.open_details(p))
                 widget.bind("<Enter>", lambda _, p=card.provider: self._hover(p))
                 widget.bind("<Leave>", lambda _: self._hover(None))
+        self._painted_hover = self.hover_card
         events = []
         try:
             events = list(self.app.tps_monitor.events)
         except (AttributeError, RuntimeError):
             pass
         letters = {provider: letter_of(provider) for provider in in_tray_order(self.app.snapshots)}
-        chart_width = columns * view.CARD_W + (columns - 1) * 14
+        chart_width = max(view.CARD_W, round(width / self.scale) - 2)
         chart = view.activity_chart(events, time.time(), letters, self.scale, width=max(view.CARD_W, chart_width), height=136)
         widget = self.picture(self.chart_holder, "chart", chart)
         if not widget.winfo_manager():
@@ -524,7 +602,21 @@ class SettingsWindow:
 
     def _hover(self, provider):
         self.hover_card = provider
-        self._fill_overview()
+        if self._hover_after is not None:
+            self.root.after_cancel(self._hover_after)
+        self._hover_after = self.root.after(60, self._finish_hover)
+
+    def _finish_hover(self):
+        self._hover_after = None
+        if self.page == "overview" and self._resize_after is None:
+            for provider in {self._painted_hover, self.hover_card} - {None}:
+                cached = self._card_models.get(provider)
+                if cached is None:
+                    continue
+                card, icon, slots = cached
+                image = view.source_card(card, icon, self.scale, hover=self.hover_card == provider, slots=slots)
+                self.picture(self.card_grid, "card:" + provider, image, cursor="hand2")
+            self._painted_hover = self.hover_card
 
     def open_taskbar_settings(self):
         if hasattr(os, "startfile"):
@@ -951,7 +1043,7 @@ class SettingsWindow:
 
     # ----- live content --------------------------------------------------------------------
     def refresh_live(self):
-        if self.root.state() == "withdrawn":
+        if self.root.state() in ("withdrawn", "iconic") or self._resize_after is not None:
             return
         try:
             {"overview": self._fill_overview, "sources": self._fill_sources_all, "iq": self._fill_iq,

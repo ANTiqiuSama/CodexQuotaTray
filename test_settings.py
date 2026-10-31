@@ -19,6 +19,54 @@ def snapshot(**extra):
 
 
 class SettingsViewTests(unittest.TestCase):
+    def test_overview_adds_columns_as_space_becomes_available(self):
+        from settings_window import overview_columns
+        self.assertEqual(overview_columns(650, 200, 10, 5), 3)
+        self.assertEqual(overview_columns(830, 200, 10, 5), 4)
+        self.assertEqual(overview_columns(1040, 200, 10, 5), 5)
+        self.assertEqual(overview_columns(2000, 200, 10, 5), 5)
+        self.assertEqual(overview_columns(200, 200, 10, 0), 1)
+    def test_resize_reflows_once_after_resize_and_ignores_child_events(self):
+        import settings_window
+        from unittest.mock import Mock
+        window = settings_window.SettingsWindow.__new__(settings_window.SettingsWindow)
+        window.root = Mock()
+        window.root.state.return_value = 'normal'
+        window.root.after.side_effect = ['first', 'second']
+        window._resize_after = None
+        window._resize_size = None
+        window.refresh_live = Mock()
+        window._on_resize(SimpleNamespace(widget=object(), width=800, height=600))
+        window.root.after.assert_not_called()
+        window._on_resize(SimpleNamespace(widget=window.root, width=800, height=600))
+        window._on_resize(SimpleNamespace(widget=window.root, width=900, height=600))
+        window.root.after_cancel.assert_called_once_with('first')
+        self.assertEqual(window.root.after.call_count, 2)
+        window._finish_resize()
+        window.refresh_live.assert_called_once()
+        self.assertIsNone(window._resize_after)
+
+    def test_dark_titlebar_does_not_run_for_non_windows(self):
+        import settings_window
+        with patch.object(settings_window.os, 'name', 'posix'):
+            self.assertFalse(settings_window.apply_dark_titlebar(object()))
+
+    def test_switch_page_unmaps_hidden_pages_to_avoid_resize_relayout(self):
+        import settings_window
+        from unittest.mock import Mock
+        window = settings_window.SettingsWindow.__new__(settings_window.SettingsWindow)
+        first, second = Mock(), Mock()
+        first.winfo_manager.return_value = 'place'
+        second.winfo_manager.return_value = ''
+        window.pages = {'overview': first, 'tasks': second}
+        window.nav = {}
+        window.bodies = {'tasks': SimpleNamespace(canvas=Mock())}
+        window.refresh_live = Mock()
+        window.show_page('tasks')
+        first.place_forget.assert_called_once()
+        second.place.assert_called_once_with(relx=0, rely=0, relwidth=1, relheight=1)
+        window.refresh_live.assert_called_once()
+
     def test_gemini_panel_uses_full_width_for_quota_without_tps(self):
         import agent_panel
         model = agent_panel.PanelModel('gemini', 'G', 'Gemini', '空闲',
